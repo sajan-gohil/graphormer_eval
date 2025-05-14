@@ -1,7 +1,7 @@
 import torch
 from torch_geometric.datasets import LRGBDataset
 from torch_geometric.loader import DataLoader
-from transformers import AutoModelForGraphClassification, AutoConfig, get_linear_schedule_with_warmup
+from transformers import GraphormerForGraphClassification, GraphormerModel, AutoConfig, get_linear_schedule_with_warmup
 from torch.optim import AdamW
 from sklearn.model_selection import train_test_split
 import os
@@ -37,7 +37,7 @@ val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
 # Load Graphormer model
 config = AutoConfig.from_pretrained(model_name)
-model = AutoModelForGraphClassification.from_pretrained(model_name, config=config)
+model = GraphormerForGraphClassification.from_pretrained(model_name, config=config)
 model.to(device)
 
 optimizer = AdamW(model.parameters(), lr=lr)

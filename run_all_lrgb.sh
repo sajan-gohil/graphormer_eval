@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Script to train and evaluate Graphormer on all LRGB datasets
 datasets=("PCQM4Mv2" "PascalVOC-SP" "COCO-SP" "Peptides-func" "Peptides-struct")
 

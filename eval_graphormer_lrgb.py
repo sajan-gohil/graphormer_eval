@@ -1,7 +1,7 @@
 import torch
 from torch_geometric.datasets import LRGBDataset
 from torch_geometric.loader import DataLoader
-from transformers import AutoModelForGraphClassification, AutoConfig
+from transformers import GraphormerForGraphClassification, GraphormerModel, AutoConfig
 import os
 
 # Configurations
@@ -31,11 +31,11 @@ def main():
     config = AutoConfig.from_pretrained(model_name)
     try:
         # Try to load finetuned weights if available
-        model = AutoModelForGraphClassification.from_pretrained(f"finetuned-graphormer-lrgb-{dataset_name.lower()}", config=config)
+        model = GraphormerForGraphClassification.from_pretrained(f"finetuned-graphormer-lrgb-{dataset_name.lower()}", config=config)
         print(f"Loaded finetuned model weights from 'finetuned-graphormer-lrgb-{dataset_name.lower()}'.")
     except Exception:
         # Fallback to base model if finetuned weights not found
-        model = AutoModelForGraphClassification.from_pretrained(model_name, config=config)
+        model = GraphormerForGraphClassification.from_pretrained(model_name, config=config)
         print(f"Loaded base model weights from '{model_name}'.")
     model.to(device)
     model.eval()
