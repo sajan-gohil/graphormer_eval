@@ -7,25 +7,33 @@ import os
 # Configurations
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model_name = "graphormer-base-graphclassification"
-dataset_name = "PCQM4Mv2"  # One of the LRGB datasets
 batch_size = 4
 
-# Set task_type manually or infer from dataset name
-# Options: 'graph', 'node', 'edge'
-task_type = None
-if dataset_name.lower() in ["pcqm4mv2"]:
-    task_type = "graph"
-elif dataset_name.lower() in ["pascalvoc-sp", "coco-sp"]:
-    task_type = "node"
-elif dataset_name.lower() in ["peptides-func", "peptides-struct"]:
-    task_type = "edge"
-else:
+# Use DATASET_NAME from environment if set
+dataset_name = os.environ.get("DATASET_NAME", "PCQM4Mv2")
+
+# Map dataset_name to correct LRGBDataset name and task type
+DATASET_INFO = {
+    "PCQM4Mv2": {"name": "Peptides-func", "task": "graph"},
+    "PascalVOC-SP": {"name": "PascalVOC-SP", "task": "node"},
+    "COCO-SP": {"name": "COCO-SP", "task": "node"},
+    "PCQM-Contact": {"name": "PCQM-Contact", "task": "link"},
+    "Peptides-func": {"name": "Peptides-func", "task": "graph"},
+    "Peptides-struct": {"name": "Peptides-struct", "task": "regression"},
+}
+if dataset_name not in DATASET_INFO:
     raise ValueError(f"Unknown or unsupported dataset: {dataset_name}")
+
+lrgb_name = DATASET_INFO[dataset_name]["name"]
+task_type = DATASET_INFO[dataset_name]["task"]
 
 def main():
     # Load LRGB dataset
-    dataset = LRGBDataset(root="./data", name=dataset_name)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    if task_type in ["graph", "node", "regression"]:
+        val_dataset = LRGBDataset(root="./data", name=lrgb_name, split="val")
+        loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    else:
+        raise NotImplementedError(f"Task type '{task_type}' is not yet supported in this script.")
 
     # Load Graphormer model
     config = AutoConfig.from_pretrained(model_name)

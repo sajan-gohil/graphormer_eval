@@ -9,31 +9,36 @@ import os
 # Configurations
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model_name = "graphormer-base-graphclassification"
-dataset_name = "PCQM4Mv2"
 batch_size = 4
 epochs = 3
 lr = 2e-5
 
-# Set task_type manually or infer from dataset name
-# Options: 'graph', 'node', 'edge'
-task_type = None
-if dataset_name.lower() in ["pcqm4mv2"]:
-    task_type = "graph"
-elif dataset_name.lower() in ["pascalvoc-sp", "coco-sp"]:
-    task_type = "node"
-elif dataset_name.lower() in ["peptides-func", "peptides-struct"]:
-    task_type = "edge"
-else:
+# Use DATASET_NAME from environment if set
+dataset_name = os.environ.get("DATASET_NAME", "PCQM4Mv2")
+
+# Map dataset_name to correct LRGBDataset name and task type
+DATASET_INFO = {
+    "PCQM4Mv2": {"name": "PCQM4Mv2", "task": "graph"},
+    "PascalVOC-SP": {"name": "PascalVOC-SP", "task": "node"},
+    "COCO-SP": {"name": "COCO-SP", "task": "node"},
+    "PCQM-Contact": {"name": "PCQM-Contact", "task": "link"},
+    "Peptides-func": {"name": "Peptides-func", "task": "graph"},
+    "Peptides-struct": {"name": "Peptides-struct", "task": "regression"},
+}
+if dataset_name not in DATASET_INFO:
     raise ValueError(f"Unknown or unsupported dataset: {dataset_name}")
 
+lrgb_name = DATASET_INFO[dataset_name]["name"]
+task_type = DATASET_INFO[dataset_name]["task"]
+
 # Load LRGB dataset and split into train/val
-dataset = LRGBDataset(root="./data", name=dataset_name)
-indices = list(range(len(dataset)))
-train_idx, val_idx = train_test_split(indices, test_size=0.1, random_state=42)
-train_dataset = dataset[train_idx]
-val_dataset = dataset[val_idx]
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=batch_size)
+if task_type in ["graph", "node", "regression"]:
+    train_dataset = LRGBDataset(root="./data", name=lrgb_name, split="train")
+    val_dataset = LRGBDataset(root="./data", name=lrgb_name, split="val")
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+else:
+    raise NotImplementedError(f"Task type '{task_type}' is not yet supported in this script.")
 
 # Load Graphormer model
 config = AutoConfig.from_pretrained(model_name)
