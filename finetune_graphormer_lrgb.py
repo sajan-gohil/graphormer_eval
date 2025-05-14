@@ -14,11 +14,11 @@ epochs = 3
 lr = 2e-5
 
 # Use DATASET_NAME from environment if set
-dataset_name = os.environ.get("DATASET_NAME", "PCQM4Mv2")
+dataset_name = os.environ.get("DATASET_NAME", "PCQM-Contact")
 
 # Map dataset_name to correct LRGBDataset name and task type
 DATASET_INFO = {
-    "PCQM4Mv2": {"name": "PCQM4Mv2", "task": "graph"},
+    "PCQM-Contact": {"name": "PCQM-Contact", "task": "graph"},
     "PascalVOC-SP": {"name": "PascalVOC-SP", "task": "node"},
     "COCO-SP": {"name": "COCO-SP", "task": "node"},
     "PCQM-Contact": {"name": "PCQM-Contact", "task": "link"},
