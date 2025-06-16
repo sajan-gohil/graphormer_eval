@@ -7,6 +7,7 @@ from ogb.lsc.pcqm4m_pyg import PygPCQM4MDataset
 from ogb.graphproppred import PygGraphPropPredDataset
 from torch_geometric.data import Dataset
 # from graphormer.data.pyg_datasets import GraphormerPYGDataset
+from pyg_dataset import GraphormerPYGDataset
 import torch.distributed as dist
 import os
 
@@ -22,6 +23,10 @@ class MyPygPCQM4Mv2Dataset(PygPCQM4Mv2Dataset):
             super(MyPygPCQM4Mv2Dataset, self).process()
         if dist.is_initialized():
             dist.barrier()
+        try:
+            print(self.processed_paths[0])
+        except:
+            print("CAnt print processed_paths")
 
 
 class MyPygPCQM4MDataset(PygPCQM4MDataset):
@@ -36,6 +41,11 @@ class MyPygPCQM4MDataset(PygPCQM4MDataset):
             super(MyPygPCQM4MDataset, self).process()
         if dist.is_initialized():
             dist.barrier()
+        try:
+            print(self.processed_paths[0])
+        except:
+            print("CAnt print processed_paths")
+
 
 
 class MyPygGraphPropPredDataset(PygGraphPropPredDataset):
@@ -50,6 +60,11 @@ class MyPygGraphPropPredDataset(PygGraphPropPredDataset):
             super(MyPygGraphPropPredDataset, self).process()
         if dist.is_initialized():
             dist.barrier()
+        try:
+            print(self.processed_paths[0])
+        except:
+            print("CAnt print processed_paths")
+
 
 
 class OGBDatasetLookupTable:

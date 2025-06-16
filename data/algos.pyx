@@ -6,13 +6,15 @@ from cython.parallel cimport prange, parallel
 cimport numpy
 import numpy
 
+long = numpy.int64
+
 def floyd_warshall(adjacency_matrix):
 
     (nrows, ncols) = adjacency_matrix.shape
     assert nrows == ncols
     cdef unsigned int n = nrows
 
-    adj_mat_copy = adjacency_matrix.astype(long, order='C', casting='safe', copy=True)
+    adj_mat_copy = adjacency_matrix.astype(numpy.int64, order='C', casting='safe', copy=True)
     assert adj_mat_copy.flags['C_CONTIGUOUS']
     cdef numpy.ndarray[long, ndim=2, mode='c'] M = adj_mat_copy
     cdef numpy.ndarray[long, ndim=2, mode='c'] path = -1 * numpy.ones([n, n], dtype=numpy.int64)

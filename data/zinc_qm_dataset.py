@@ -4,7 +4,7 @@
 from typing import Optional
 from torch_geometric.datasets import *
 from torch_geometric.data import Dataset
-from .pyg_dataset import GraphormerPYGDataset
+from pyg_dataset import GraphormerPYGDataset
 import torch.distributed as dist
 
 

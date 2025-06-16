@@ -9,9 +9,8 @@ from ogb.lsc.pcqm4mv2_pyg import PygPCQM4Mv2Dataset
 from functools import lru_cache
 import pyximport
 import torch.distributed as dist
-import algos
 pyximport.install(setup_args={"include_dirs": np.get_include()})
-
+import algos
 
 @torch.jit.script
 def convert_to_single_emb(x, offset: int = 512):
