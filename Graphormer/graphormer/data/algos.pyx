@@ -6,6 +6,7 @@ from cython.parallel cimport prange, parallel
 cimport numpy
 import numpy
 
+long = numpy.int64
 def floyd_warshall(adjacency_matrix):
 
     (nrows, ncols) = adjacency_matrix.shape
