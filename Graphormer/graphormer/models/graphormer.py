@@ -198,7 +198,7 @@ class GraphormerEncoder(nn.Module):
             x = self.embed_out(x)
         if self.lm_output_learned_bias is not None:
             x = x + self.lm_output_learned_bias
-        return x
+        return x[:, 0, :]
 
     def max_nodes(self):
         return self.max_nodes

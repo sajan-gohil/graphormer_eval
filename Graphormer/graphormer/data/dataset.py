@@ -1,10 +1,11 @@
 from functools import lru_cache
+import contextlib
 
 import ogb
 import numpy as np
 import torch
 from torch.nn import functional as F
-from fairseq.data import data_utils, FairseqDataset, BaseWrapperDataset
+from torch.utils.data import Dataset
 
 from .wrapper import MyPygGraphPropPredDataset
 from .collator import collator
@@ -17,7 +18,24 @@ from .pyg_datasets import PYGDatasetLookupTable, GraphormerPYGDataset
 from .ogb_datasets import OGBDatasetLookupTable
 
 
-class BatchedDataDataset(FairseqDataset):
+@contextlib.contextmanager
+def numpy_seed(seed, *addl_seeds):
+    """Context manager which seeds the numpy PRNG with the specified seed and
+    restores the state afterward"""
+    if seed is None:
+        yield
+        return
+    if len(addl_seeds) > 0:
+        seed = int(hash((seed, *addl_seeds)) % 1e6)
+    state = np.random.get_state()
+    np.random.seed(seed)
+    try:
+        yield
+    finally:
+        np.random.set_state(state)
+
+
+class BatchedDataDataset(Dataset):
     def __init__(
         self, dataset, max_node=128, multi_hop_max_dist=5, spatial_pos_max=1024
     ):
@@ -43,7 +61,7 @@ class BatchedDataDataset(FairseqDataset):
         )
 
 
-class TargetDataset(FairseqDataset):
+class TargetDataset(Dataset):
     def __init__(self, dataset):
         super().__init__()
         self.dataset = dataset
@@ -96,15 +114,16 @@ class GraphormerDataset:
         self.dataset_test = self.dataset.test_data
 
 
-class EpochShuffleDataset(BaseWrapperDataset):
+class EpochShuffleDataset(Dataset):
     def __init__(self, dataset, num_samples, seed):
-        super().__init__(dataset)
+        super().__init__()
+        self.dataset = dataset
         self.num_samples = num_samples
         self.seed = seed
         self.set_epoch(1)
 
     def set_epoch(self, epoch):
-        with data_utils.numpy_seed(self.seed + epoch - 1):
+        with numpy_seed(self.seed + epoch - 1):
             self.sort_order = np.random.permutation(self.num_samples)
 
     def ordered_indices(self):
@@ -113,3 +132,9 @@ class EpochShuffleDataset(BaseWrapperDataset):
     @property
     def can_reuse_epoch_itr_across_epochs(self):
         return False
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, index):
+        return self.dataset[self.sort_order[index]]

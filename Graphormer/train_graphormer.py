@@ -19,6 +19,7 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda', help='Device to use')
     parser.add_argument('--num-classes', type=int, required=True, help='Number of output classes')
     # Add more model hyperparameters as needed
+    parser.add_argument('--num-workers', type=int, default=1, help='number of data loading workers')
     return parser.parse_args()
 
 
@@ -28,10 +29,14 @@ def main():
 
     # Load dataset
     dataset = GraphormerDataset(dataset_spec=args.dataset, dataset_source=args.dataset_source)
-    train_set = BatchedDataDataset(dataset.dataset_train)
-    val_set = BatchedDataDataset(dataset.dataset_val)
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, collate_fn=train_set.collater)
-    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, collate_fn=val_set.collater)
+    train_loader = DataLoader(
+        dataset.dataset_train, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.num_workers, collate_fn=BatchedDataDataset(dataset.dataset_train).collater
+    )
+    val_loader = DataLoader(
+        dataset.dataset_val, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, collate_fn=BatchedDataDataset(dataset.dataset_val).collater
+    )
 
     # Model args
     class ModelArgs:
@@ -66,7 +71,7 @@ def main():
     model = model.to(args.device)
 
     # Loss and optimizer
-    criterion = GraphPredictionMulticlassCrossEntropy()
+    criterion = torch.nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     for epoch in range(1, args.epochs + 1):
@@ -76,8 +81,8 @@ def main():
             batch = {k: v.to(args.device) if torch.is_tensor(v) else v for k, v in batch.items()}
             optimizer.zero_grad()
             logits = model(batch)
-            targets = batch['y'] if 'y' in batch else batch['target']
-            loss, _, _ = criterion(model, {'net_input': batch, 'target': targets})
+            targets = batch['y']
+            loss = criterion(logits, targets)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -93,12 +98,13 @@ def main():
             for batch in val_loader:
                 batch = {k: v.to(args.device) if torch.is_tensor(v) else v for k, v in batch.items()}
                 logits = model(batch)
-                targets = batch['y'] if 'y' in batch else batch['target']
-                loss, _, log_out = criterion(model, {'net_input': batch, 'target': targets})
+                targets = batch['y']
+                loss = criterion(logits, targets)
                 val_loss += loss.item()
-                if 'ncorrect' in log_out:
-                    correct += log_out['ncorrect'].item()
-                    total += log_out['sample_size']
+                _, predicted = torch.max(logits.data, 1)
+                total += targets.size(0)
+                correct += (predicted == targets).sum().item()
+
         avg_val_loss = val_loss / len(val_loader)
         acc = correct / total if total > 0 else 0
         print(f"Epoch {epoch}: Val Loss = {avg_val_loss:.4f}, Acc = {acc:.4f}")
