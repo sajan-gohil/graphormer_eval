@@ -10,9 +10,7 @@ import math
 from typing import Optional, Tuple
 
 import torch
-from fairseq import utils
-from fairseq.modules.fairseq_dropout import FairseqDropout
-from fairseq.modules.quant_noise import quant_noise
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 
@@ -41,9 +39,7 @@ class MultiheadAttention(nn.Module):
         self.qkv_same_dim = self.kdim == embed_dim and self.vdim == embed_dim
 
         self.num_heads = num_heads
-        self.dropout_module = FairseqDropout(
-            dropout, module_name=self.__class__.__name__
-        )
+        self.dropout_module = nn.Dropout(dropout)
 
         self.head_dim = embed_dim // num_heads
         assert (
@@ -59,19 +55,11 @@ class MultiheadAttention(nn.Module):
             "Self-attention requires query, key and " "value to be of the same size"
         )
 
-        self.k_proj = quant_noise(
-            nn.Linear(self.kdim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
-        self.v_proj = quant_noise(
-            nn.Linear(self.vdim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
-        self.q_proj = quant_noise(
-            nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
+        self.k_proj = nn.Linear(self.kdim, embed_dim, bias=bias)
+        self.v_proj = nn.Linear(self.vdim, embed_dim, bias=bias)
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
 
-        self.out_proj = quant_noise(
-            nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
 
         self.reset_parameters()
 
@@ -197,8 +185,8 @@ class MultiheadAttention(nn.Module):
         if before_softmax:
             return attn_weights, v
 
-        attn_weights_float = utils.softmax(
-            attn_weights, dim=-1, onnx_trace=self.onnx_trace
+        attn_weights_float = F.softmax(
+            attn_weights, dim=-1, dtype=torch.float32
         )
         attn_weights = attn_weights_float.type_as(attn_weights)
         attn_probs = self.dropout_module(attn_weights)

@@ -10,8 +10,6 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-from fairseq.modules import FairseqDropout, LayerDropModuleList, LayerNorm
-from fairseq.modules.quant_noise import quant_noise as apply_quant_noise_
 
 from .multihead_attention import MultiheadAttention
 from .graphormer_layers import GraphNodeFeature, GraphAttnBias
@@ -75,9 +73,7 @@ class GraphormerGraphEncoder(nn.Module):
     ) -> None:
 
         super().__init__()
-        self.dropout_module = FairseqDropout(
-            dropout, module_name=self.__class__.__name__
-        )
+        self.dropout_module = nn.Dropout(dropout)
         self.layerdrop = layerdrop
         self.embedding_dim = embedding_dim
         self.apply_graphormer_init = apply_graphormer_init
@@ -107,24 +103,22 @@ class GraphormerGraphEncoder(nn.Module):
         self.embed_scale = embed_scale
 
         if q_noise > 0:
-            self.quant_noise = apply_quant_noise_(
-                nn.Linear(self.embedding_dim, self.embedding_dim, bias=False),
-                q_noise,
-                qn_block_size,
-            )
-        else:
-            self.quant_noise = None
+            # Not supported
+            pass
+
+        self.quant_noise = None
 
         if encoder_normalize_before:
-            self.emb_layer_norm = LayerNorm(self.embedding_dim, export=export)
+            self.emb_layer_norm = nn.LayerNorm(self.embedding_dim)
         else:
             self.emb_layer_norm = None
 
         if pre_layernorm:
-            self.final_layer_norm = LayerNorm(self.embedding_dim, export=export)
+            self.final_layer_norm = nn.LayerNorm(self.embedding_dim)
 
         if self.layerdrop > 0.0:
-            self.layers = LayerDropModuleList(p=self.layerdrop)
+            # Not supported
+            self.layers = nn.ModuleList([])
         else:
             self.layers = nn.ModuleList([])
         self.layers.extend(

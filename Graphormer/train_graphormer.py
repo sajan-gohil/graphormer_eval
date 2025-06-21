@@ -52,6 +52,15 @@ def main():
     model_args.no_token_positional_embeddings = False
     model_args.pre_layernorm = False
     # Add more as needed
+    model_args.num_atoms = 512 * 9
+    model_args.num_edges = 512 * 3
+    model_args.num_in_degree = 512
+    model_args.num_out_degree = 512
+    model_args.num_spatial = 512
+    model_args.num_edge_dis = 128
+    model_args.edge_type = 'multi_hop'
+    model_args.multi_hop_max_dist = 5
+    model_args.max_nodes = 128
 
     model = GraphormerModel.build_model(model_args)
     model = model.to(args.device)

@@ -10,12 +10,25 @@ from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
-from fairseq import utils
-from fairseq.modules import LayerNorm
-from fairseq.modules.fairseq_dropout import FairseqDropout
-from fairseq.modules.quant_noise import quant_noise
+import torch.nn.functional as F
 
 from .multihead_attention import MultiheadAttention
+
+
+def get_activation_fn(activation: str) -> Callable:
+    """Returns the activation function corresponding to `activation`"""
+    if activation == "relu":
+        return F.relu
+    elif activation == "gelu":
+        return F.gelu
+    elif activation == "tanh":
+        return torch.tanh
+    elif activation == "linear":
+        return lambda x: x
+    elif activation == "swish":
+        return F.silu
+    else:
+        raise RuntimeError("--activation-fn {} not supported".format(activation))
 
 
 class GraphormerGraphEncoderLayer(nn.Module):
@@ -47,15 +60,11 @@ class GraphormerGraphEncoderLayer(nn.Module):
         self.qn_block_size = qn_block_size
         self.pre_layernorm = pre_layernorm
 
-        self.dropout_module = FairseqDropout(
-            dropout, module_name=self.__class__.__name__
-        )
-        self.activation_dropout_module = FairseqDropout(
-            activation_dropout, module_name=self.__class__.__name__
-        )
+        self.dropout_module = nn.Dropout(dropout)
+        self.activation_dropout_module = nn.Dropout(activation_dropout)
 
         # Initialize blocks
-        self.activation_fn = utils.get_activation_fn(activation_fn)
+        self.activation_fn = get_activation_fn(activation_fn)
         self.self_attn = self.build_self_attention(
             self.embedding_dim,
             num_attention_heads,
@@ -66,7 +75,7 @@ class GraphormerGraphEncoderLayer(nn.Module):
         )
 
         # layer norm associated with the self attention layer
-        self.self_attn_layer_norm = LayerNorm(self.embedding_dim, export=export)
+        self.self_attn_layer_norm = nn.LayerNorm(self.embedding_dim)
 
         self.fc1 = self.build_fc1(
             self.embedding_dim,
@@ -82,13 +91,13 @@ class GraphormerGraphEncoderLayer(nn.Module):
         )
 
         # layer norm associated with the position wise feed-forward NN
-        self.final_layer_norm = LayerNorm(self.embedding_dim, export=export)
+        self.final_layer_norm = nn.LayerNorm(self.embedding_dim)
 
     def build_fc1(self, input_dim, output_dim, q_noise, qn_block_size):
-        return quant_noise(nn.Linear(input_dim, output_dim), q_noise, qn_block_size)
+        return nn.Linear(input_dim, output_dim)
 
     def build_fc2(self, input_dim, output_dim, q_noise, qn_block_size):
-        return quant_noise(nn.Linear(input_dim, output_dim), q_noise, qn_block_size)
+        return nn.Linear(input_dim, output_dim)
 
     def build_self_attention(
         self,
