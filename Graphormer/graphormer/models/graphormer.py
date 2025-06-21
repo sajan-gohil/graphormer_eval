@@ -10,8 +10,8 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from distributional_graphormer.protein-ligand.src.graphormer.utils.base_utils import LayerNorm, get_activation_fn, safe_hasattr, init_graphormer_params
-from ..modules import GraphormerGraphEncoder
+from ..modules import GraphormerGraphEncoder, init_graphormer_params
+from ..utils.base_utils import LayerNorm, get_activation_fn, safe_hasattr
 from ..pretrain import load_pretrained_model
 
 logger = logging.getLogger(__name__)
