@@ -82,7 +82,7 @@ def main():
             optimizer.zero_grad()
             logits = model(batch)
             targets = batch['y']
-            loss = criterion(logits, targets)
+            loss = criterion(logits, targets.long().squeeze(-1))
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -99,11 +99,11 @@ def main():
                 batch = {k: v.to(args.device) if torch.is_tensor(v) else v for k, v in batch.items()}
                 logits = model(batch)
                 targets = batch['y']
-                loss = criterion(logits, targets)
+                loss = criterion(logits, targets.long().squeeze(-1))
                 val_loss += loss.item()
                 _, predicted = torch.max(logits.data, 1)
                 total += targets.size(0)
-                correct += (predicted == targets).sum().item()
+                correct += (predicted == targets.squeeze(-1)).sum().item()
 
         avg_val_loss = val_loss / len(val_loader)
         acc = correct / total if total > 0 else 0
