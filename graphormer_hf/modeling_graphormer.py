@@ -22,13 +22,13 @@ import torch
 import torch.nn as nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-from ....activations import ACT2FN
-from ....modeling_outputs import (
+from transformers.activations import ACT2FN
+from transformers.modeling_outputs import (
     BaseModelOutputWithNoAttention,
     SequenceClassifierOutput,
 )
-from ....modeling_utils import PreTrainedModel
-from ....utils import logging
+from transformers.modeling_utils import PreTrainedModel
+from transformers.utils import logging
 from .configuration_graphormer import GraphormerConfig
 
 
