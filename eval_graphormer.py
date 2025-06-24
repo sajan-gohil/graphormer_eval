@@ -12,7 +12,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load preprocessed pyg dataset
 pyg_data = torch.load("pyg_dataset_ogb.pt")
-split_dict = pyg_data.get_idx_split()
+split_dict = torch.load("split_dict.pt")
 valid_idx = split_dict['valid']
 testdev_idx = split_dict['test-dev']
 
@@ -24,7 +24,7 @@ valid_dataset = Subset(pyg_data, valid_idx)
 testdev_dataset = Subset(pyg_data, testdev_idx)
 
 # DataLoader
-BATCH_SIZE = 1024
+BATCH_SIZE = 256
 collator = GraphormerDataCollator(on_the_fly_processing=True)
 
 valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collator)
