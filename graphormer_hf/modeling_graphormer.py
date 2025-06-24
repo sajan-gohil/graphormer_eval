@@ -186,7 +186,7 @@ class GraphormerGraphNodeFeature(nn.Module):
             config.num_out_degree, config.hidden_size, padding_idx=config.pad_token_id
         )
 
-        self.graph_token = nn.Embedding(1, config.hidden_size)
+        self.graph_token = nn.Embedding(1, config.hidden_size)  # Equivalent to [CLS]
 
     def forward(
         self,

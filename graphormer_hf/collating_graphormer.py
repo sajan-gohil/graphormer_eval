@@ -32,15 +32,16 @@ def preprocess_item(item, keep_features=True):
     else:
         edge_attr = np.ones((len(item["edge_index"][0]), 1), dtype=np.int64)  # same embedding for all
 
-    if keep_features and "node_feat" in item.keys():  # input_nodes
-        node_feature = np.asarray(item["node_feat"], dtype=np.int64)
+    if keep_features and "x" in item.keys():  # input_nodes
+        node_feature = np.asarray(item["x"], dtype=np.int64)
     else:
-        node_feature = np.ones((item["num_nodes"], 1), dtype=np.int64)  # same embedding for all
+        raise Exception("NODE FEATURES NOT FOUND")
+        node_feature = np.ones((item["x"].shape[0], 1), dtype=np.int64)  # same embedding for all
 
     edge_index = np.asarray(item["edge_index"], dtype=np.int64)
 
     input_nodes = convert_to_single_emb(node_feature) + 1
-    num_nodes = item["num_nodes"]
+    num_nodes = item["x"].shape[0]
 
     if len(edge_attr.shape) == 1:
         edge_attr = edge_attr[:, None]
@@ -86,7 +87,7 @@ class GraphormerDataCollator:
         if not isinstance(features[0], Mapping):
             features = [vars(f) for f in features]
         batch = {}
-
+        features = [i["_store"] for i in features]
         max_node_num = max(len(i["input_nodes"]) for i in features)
         node_feat_size = len(features[0]["input_nodes"][0])
         edge_feat_size = len(features[0]["attn_edge_type"][0][0])
