@@ -11,8 +11,7 @@ from graphormer_hf.configuration_graphormer import GraphormerConfig
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
 
 # 1. Dataset setup
-dataset = PCQM4Mv2Dataset(root=".")
-split_dict = dataset.get_idx_split()
+split_dict = torch.load("split_dict.pt")
 train_idx = split_dict['train']
 valid_idx = split_dict['valid']
 
