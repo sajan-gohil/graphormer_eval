@@ -12,11 +12,11 @@ from .collator import collator
 
 from typing import Optional, Union
 from torch_geometric.data import Data as PYGDataset
-from dgl.data import DGLDataset
-from .dgl_datasets import DGLDatasetLookupTable, GraphormerDGLDataset
+# from dgl.data import DGLDataset
+#from .dgl_datasets import DGLDatasetLookupTable, GraphormerDGLDataset
 from .pyg_datasets import PYGDatasetLookupTable, GraphormerPYGDataset
 from .ogb_datasets import OGBDatasetLookupTable
-
+DGLDataset = DGLDatasetLookupTable = GraphormerDGLDataset = None
 
 @contextlib.contextmanager
 def numpy_seed(seed, *addl_seeds):
