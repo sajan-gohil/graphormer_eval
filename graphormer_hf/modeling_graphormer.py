@@ -230,7 +230,7 @@ class GraphormerGraphAttnBias(nn.Module):
                 1,
             )
 
-        self.spatial_pos_encoder = nn.Embedding(config.num_spatial, config.num_attention_heads, padding_idx=0)
+        # self.spatial_pos_encoder = nn.Embedding(config.num_spatial, config.num_attention_heads, padding_idx=0)
 
         self.graph_token_virtual_distance = nn.Embedding(1, config.num_attention_heads)
 
@@ -250,8 +250,8 @@ class GraphormerGraphAttnBias(nn.Module):
 
         # spatial pos
         # [n_graph, n_node, n_node, n_head] -> [n_graph, n_head, n_node, n_node]
-        spatial_pos_bias = self.spatial_pos_encoder(spatial_pos).permute(0, 3, 1, 2)
-        graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + spatial_pos_bias
+        # spatial_pos_bias = self.spatial_pos_encoder(spatial_pos).permute(0, 3, 1, 2)
+        # graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:]  # + spatial_pos_bias
 
         # reset spatial pos here
         t = self.graph_token_virtual_distance.weight.view(1, self.num_heads, 1)

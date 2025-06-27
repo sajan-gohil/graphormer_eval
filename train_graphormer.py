@@ -132,7 +132,7 @@ for epoch in range(MAX_EPOCHS):
     print(f"Validation MAE: {valid_mae:.6f}")
     if valid_mae < best_valid_mae:
         best_valid_mae = valid_mae
-        torch.save(model.state_dict(), "best_model.pt")
+        torch.save(model.state_dict(), f"training_checkpoints/best_model_{epoch}.pt")
         print("Best model updated.")
 
     if step >= MAX_STEPS:
