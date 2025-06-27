@@ -10,6 +10,16 @@ from graphormer_hf.modeling_graphormer import GraphormerForGraphClassification
 from graphormer_hf.configuration_graphormer import GraphormerConfig
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
 
+import os
+import random
+import numpy as np
+
+os.environ['PYTHONHASHSEED'] = '42'
+seed_value = 42
+random.seed(seed_value)
+np.random.seed(seed_value)
+torch.manual_seed(seed_value)
+
 # 1. Dataset setup
 split_dict = torch.load("split_dict.pt", weights_only=False)
 train_idx = split_dict['train']
@@ -32,7 +42,7 @@ BATCH_SIZE = 1024
 collator = GraphormerDataCollator(on_the_fly_processing=True)
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator)
-valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collator)
+valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE//4, shuffle=False, collate_fn=collator)  # Val data has some big samples
 
 # 2. Model Configuration - Graphormer-base
 config = GraphormerConfig(
