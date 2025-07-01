@@ -54,8 +54,10 @@ def preprocess_item(item, keep_features=True):
 
     shortest_path_result, path = algos_graphormer.floyd_warshall(adj)
     max_dist = np.amax(shortest_path_result)
-
-    input_edges = algos_graphormer.gen_edge_input(max_dist, path, attn_edge_type)
+    if max_dist > 0:
+        input_edges = algos_graphormer.gen_edge_input(max_dist, path, attn_edge_type)
+    else:
+        input_edges = np.zeros([num_nodes, num_nodes, 1, attn_edge_type.shape[-1]], dtype=np.int64)
     attn_bias = np.zeros([num_nodes + 1, num_nodes + 1], dtype=np.single)  # with graph token
 
     # combine

@@ -21,12 +21,12 @@ np.random.seed(seed_value)
 torch.manual_seed(seed_value)
 
 # 1. Dataset setup
-split_dict = torch.load("split_dict.pt")
+split_dict = torch.load("split_dict.pt", weights_only=False)
 train_idx = split_dict['train']
 valid_idx = split_dict['valid']
 
 # Load preprocessed pyg graph objects
-pyg_data = torch.load("pyg_dataset_ogb.pt")
+pyg_data = torch.load("pyg_dataset_ogb.pt", weights_only=False)
 
 # Assign num_nodes attribute
 for i in range(len(pyg_data)):
