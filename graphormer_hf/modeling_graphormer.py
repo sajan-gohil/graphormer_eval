@@ -225,6 +225,7 @@ class GraphormerGraphAttnBias(nn.Module):
 
         self.edge_type = config.edge_type
         if self.edge_type == "multi_hop":
+            print("IN MULTIHOP SHOULD NOT BE HERE")
             self.edge_dis_encoder = nn.Embedding(
                 config.num_edge_dis * config.num_attention_heads * config.num_attention_heads,
                 1,
@@ -260,6 +261,7 @@ class GraphormerGraphAttnBias(nn.Module):
 
         # edge feature
         if self.edge_type == "multi_hop":
+            print("IN MULTIHOP 2 SHOULD NOT BE HERE")
             spatial_pos_ = spatial_pos.clone()
 
             spatial_pos_[spatial_pos_ == 0] = 1  # set pad to 1
