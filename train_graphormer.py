@@ -58,6 +58,7 @@ config = GraphormerConfig(
 )
 
 model = GraphormerForGraphClassification(config)
+model.encoder.enable_diffusion = True  # Enable diffusion
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
@@ -98,6 +99,11 @@ for epoch in range(MAX_EPOCHS):
         labels = batch["labels"]
 
         outputs = model(**batch)
+        # Pass edge_index to model if present
+        if "edge_index" in batch:
+            outputs = model(**batch, edge_index=batch["edge_index"])
+        else:
+            outputs = model(**batch)
         loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
 
         optimizer.zero_grad()
@@ -121,6 +127,11 @@ for epoch in range(MAX_EPOCHS):
                 batch[k] = batch[k].to(device)
             labels = batch["labels"]
             outputs = model(**batch)
+            # Pass edge_index to model if present
+            if "edge_index" in batch:
+                outputs = model(**batch, edge_index=batch["edge_index"])
+            else:
+                outputs = model(**batch)
             y_pred.append(outputs[1].view(-1).cpu())
             y_true.append(labels.view(-1).cpu())
 

@@ -126,6 +126,9 @@ class GraphormerDataCollator:
 
         batch["out_degree"] = batch["in_degree"]
 
+        # Add edge_index as a list of tensors (one per graph in batch)
+        batch["edge_index"] = [torch.tensor(i["edge_index"]) for i in features if "edge_index" in i]
+
         sample = features[0]["labels"]
         if len(sample) == 1:  # one task
             if isinstance(sample[0], float):  # regression
