@@ -51,15 +51,16 @@ class GraphLatentDiffusion(nn.Module):
         noisy_x = sqrt_alpha * x + sqrt_one_minus_alpha * noise
         return noisy_x, noise
 
-    def denoising_step(self, noisy_embeddings, t, edge_index):
-        pred_noise = self.denoiser(noisy_embeddings, edge_index)
-        return pred_noise
+    # def denoising_step(self, noisy_embeddings, t, edge_index):
+    #     pred_noise = self.denoiser(noisy_embeddings, edge_index)
+    #     return pred_noise
 
     def attention_improvement_loss(self, node_embeddings, denoised_embeddings, edge_index):
         src, dst = edge_index
         initial_scores = (node_embeddings[src] * node_embeddings[dst]).sum(dim=-1)
         final_scores = (denoised_embeddings[src] * denoised_embeddings[dst]).sum(dim=-1)
-        # Encourage final_scores > initial_scores → hinge loss
+        
+        # Encourage final_scores > initial_scores -> hinge loss
         loss = F.relu(1.0 - (final_scores - initial_scores)).mean()
         return loss
 
@@ -67,19 +68,36 @@ class GraphLatentDiffusion(nn.Module):
         N = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps, (N,), device=node_embeddings.device)
         noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
-        pred_noise = self.denoising_step(noisy_embeddings, t, edge_index)
+        # pred_noise = self.denoising_step(noisy_embeddings, t, edge_index)
+        # denoised_embeddings = self.denoising_step(noisy_embeddings, t, edge_index)
+        denoised_embeddings = self.denoiser(noisy_embeddings, edge_index)
 
         # MSE loss for noise prediction
         # mse_loss = F.mse_loss(pred_noise, true_noise)
 
         # Reconstruct denoised embeddings
-        alpha_t = self.sqrt_alphas_cumprod[t].unsqueeze(1)
-        one_minus_alpha_t = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1)
-        denoised_embeddings = (noisy_embeddings - one_minus_alpha_t * pred_noise) / alpha_t
+        # alpha_t = self.sqrt_alphas_cumprod[t].unsqueeze(1)
+        # one_minus_alpha_t = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1)
+        # denoised_embeddings = (noisy_embeddings - one_minus_alpha_t * pred_noise) / alpha_t
 
         # Attention improvement loss
         attn_loss = self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index)
-        return attn_loss.item()
+        return denoised_embeddings, attn_loss #.item()
+
+    @torch.no_grad()
+    def sample(self, noisy_embeddings, edge_index):
+        x = noisy_embeddings
+        for t in reversed(range(self.num_denoising_steps)):
+            t_tensor = torch.full((x.size(0),), t, device=x.device, dtype=torch.long)
+            pred_noise = self.denoising_step(x, t_tensor, edge_index)
+
+            alpha_t = self.sqrt_alphas_cumprod[t].view(1, 1)
+            one_minus_alpha_t = self.sqrt_one_minus_alphas_cumprod[t].view(1, 1)
+
+            x = (x - one_minus_alpha_t * pred_noise) / alpha_t
+            # optionally add noise at intermediate steps, if stochastic sampling desired
+        return x
+
 
 
 if __name__ == "__main__":
