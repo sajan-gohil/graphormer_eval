@@ -16,6 +16,7 @@ def cosine_beta_schedule(timesteps, s=0.008):
 class GATv2Denoiser(nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, heads=4):
         super().__init__()
+        print("INITIALIZING DIFFUSION")
         self.gat1 = GATv2Conv(in_channels, hidden_channels, heads=heads)
         self.gat2 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads)
         self.out = nn.Linear(hidden_channels * heads, out_channels)
@@ -29,6 +30,7 @@ class GATv2Denoiser(nn.Module):
 class GraphLatentDiffusion(nn.Module):
     def __init__(self, input_dim=768, latent_dim=768, num_denoising_steps=50):
         super().__init__()
+        print("MAKING LATENT DIFFUSION MODEL")
         self.input_dim = input_dim
         self.latent_dim = latent_dim
         self.num_denoising_steps = num_denoising_steps

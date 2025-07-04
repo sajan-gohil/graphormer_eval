@@ -41,8 +41,8 @@ BATCH_SIZE = 1024
 
 collator = GraphormerDataCollator(on_the_fly_processing=True)
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, num_workers=2)
-valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE//4, shuffle=False, collate_fn=collator, num_workers=2)  # Val data has some big samples
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, num_workers=1)
+valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE//4, shuffle=False, collate_fn=collator, num_workers=0)  # Val data has some big samples
 
 # 2. Model Configuration - Graphormer-base
 config = GraphormerConfig(
@@ -54,7 +54,7 @@ config = GraphormerConfig(
     attention_dropout=0.1,
     activation_dropout=0.1,
     num_classes=1,
-    edge_type="single_hop",
+    #edge_type="single_hop",
 )
 
 model = GraphormerForGraphClassification(config)
@@ -87,7 +87,7 @@ scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 # 4. Training loop
 evaluator = PCQM4MEvaluator()
 step = 0
-MAX_EPOCHS = 300
+MAX_EPOCHS = 30 #0
 best_valid_mae = float('inf')
 
 for epoch in range(MAX_EPOCHS):
@@ -95,7 +95,10 @@ for epoch in range(MAX_EPOCHS):
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{MAX_EPOCHS}")
     for batch in pbar:
         for k in batch:
-            batch[k] = batch[k].to(device)
+            try:
+                batch[k] = batch[k].to(device)
+            except:
+                batch[k] = [i.to(device) for i in batch[k]]
         labels = batch["labels"]
 
         outputs = model(**batch)

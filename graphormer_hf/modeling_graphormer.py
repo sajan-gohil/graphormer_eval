@@ -227,13 +227,13 @@ class GraphormerGraphAttnBias(nn.Module):
 
         self.edge_type = config.edge_type
         if self.edge_type == "multi_hop":
-            print("IN MULTIHOP SHOULD NOT BE HERE")
+            # print("IN MULTIHOP SHOULD NOT BE HERE")
             self.edge_dis_encoder = nn.Embedding(
                 config.num_edge_dis * config.num_attention_heads * config.num_attention_heads,
                 1,
             )
 
-        # self.spatial_pos_encoder = nn.Embedding(config.num_spatial, config.num_attention_heads, padding_idx=0)
+        self.spatial_pos_encoder = nn.Embedding(config.num_spatial, config.num_attention_heads, padding_idx=0)
 
         self.graph_token_virtual_distance = nn.Embedding(1, config.num_attention_heads)
 
@@ -253,8 +253,8 @@ class GraphormerGraphAttnBias(nn.Module):
 
         # spatial pos
         # [n_graph, n_node, n_node, n_head] -> [n_graph, n_head, n_node, n_node]
-        # spatial_pos_bias = self.spatial_pos_encoder(spatial_pos).permute(0, 3, 1, 2)
-        # graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:]  # + spatial_pos_bias
+        spatial_pos_bias = self.spatial_pos_encoder(spatial_pos).permute(0, 3, 1, 2)
+        graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + spatial_pos_bias
 
         # reset spatial pos here
         t = self.graph_token_virtual_distance.weight.view(1, self.num_heads, 1)
@@ -263,7 +263,7 @@ class GraphormerGraphAttnBias(nn.Module):
 
         # edge feature
         if self.edge_type == "multi_hop":
-            print("IN MULTIHOP 2 SHOULD NOT BE HERE")
+            # print("IN MULTIHOP 2 SHOULD NOT BE HERE")
             spatial_pos_ = spatial_pos.clone()
 
             spatial_pos_[spatial_pos_ == 0] = 1  # set pad to 1
@@ -779,7 +779,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
     this model with a downstream model of your choice, following the example in GraphormerForGraphClassification.
     """
 
-    def __init__(self, config: GraphormerConfig, enable_diffusion: bool = False, diffusion_steps: int = 50):
+    def __init__(self, config: GraphormerConfig, enable_diffusion: bool = True, diffusion_steps: int = 100):
         super().__init__(config)
         self.max_nodes = config.max_nodes
 
