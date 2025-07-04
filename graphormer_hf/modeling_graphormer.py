@@ -798,8 +798,10 @@ class GraphormerModel(GraphormerPreTrainedModel):
         self.enable_diffusion = enable_diffusion
         if self.enable_diffusion:
             self.diffusion_model = GraphLatentDiffusion(input_dim=config.embedding_dim, latent_dim=config.embedding_dim, num_denoising_steps=diffusion_steps)
+            self.diffusion_optimizer = Adam(self.diffusion_model.parameters())
         else:
             self.diffusion_model = None
+            self.diffusion_optimizer = None
 
         self.post_init()
 
@@ -838,16 +840,23 @@ class GraphormerModel(GraphormerPreTrainedModel):
             node_emb = input_nodes[:, 1:, :]
             # edge_index should be a list of edge_index tensors for each graph in batch
             new_node_emb = []
-            for i in range(node_emb.shape[0]):
-                # edge_index[i]: [2, num_edges]
-                emb = node_emb[i]
-                ei = edge_index[i] if isinstance(edge_index, (list, tuple)) else edge_index
-                # If edge_index is batched, use per-graph, else use same for all
-                new_emb = self.diffusion_model(emb, ei)
-                if isinstance(new_emb, tuple):
-                    new_emb = new_emb[0]  # If model returns (loss, emb)
-                new_node_emb.append(new_emb.unsqueeze(0))
-            node_emb = torch.cat(new_node_emb, dim=0)
+            new_emb, attention_matching_loss = self.diffusion_model(node_emb, ei)
+            print("OLD, NEW EMBEDDING SHAPE: ", node_emb.shape, new_emb.shape, "ATTENTION LOSS = ", attention_matching_loss)
+            self.diffusion_optimizer.zero_grad()
+            attention_matching_loss.backward(retain_graph=True)
+            self.diffusion_optimizer.step()
+            
+            node_emb = new_emb
+            # for i in range(node_emb.shape[0]):
+            #     # edge_index[i]: [2, num_edges]
+            #     emb = node_emb[i]
+            #     ei = edge_index[i] if isinstance(edge_index, (list, tuple)) else edge_index
+            #     # If edge_index is batched, use per-graph, else use same for all
+            #     new_emb, attention_matching_loss = self.diffusion_model(emb, ei)
+            #     if isinstance(new_emb, tuple):
+            #         new_emb = new_emb[0]  # If model returns (loss, emb)
+            #     new_node_emb.append(new_emb.unsqueeze(0))
+            # node_emb = torch.cat(new_node_emb, dim=0)
             input_nodes = torch.cat([graph_token, node_emb], dim=1)
         # --- End diffusion integration ---
 
