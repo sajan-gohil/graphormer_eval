@@ -22,10 +22,40 @@ class GATv2Denoiser(nn.Module):
         self.out = nn.Linear(hidden_channels * heads, out_channels)
 
     def forward(self, x, edge_index):
+        # x: [B, N, F], edge_index: [2, E] (per-graph)
+        assert edge_index is not None
+        B, N, F = x.size()
+        x = x.reshape(B * N, F)  # Safer than .view
+
+        # Offset edge_index for each graph in the batch
+        edge_index = self._batch_edge_index(edge_index, B, N, device=x.device)
+
         x = F.elu(self.gat1(x, edge_index))
         x = F.elu(self.gat2(x, edge_index))
         x = self.out(x)
+
+        # Reshape output back to [B, N, -1]
+        out_dim = x.size(-1)
+        x = x.reshape(B, N, out_dim)
         return x
+
+    def _batch_edge_index(self, edge_index, batch_size, num_nodes, device):
+        """
+        Replicates and offsets edge_index for a batch of graphs.
+        Assumes the same edge_index structure for each graph.
+        """
+        edge_index = edge_index #.to(device)
+        edge_index_list = []
+
+        for i in range(batch_size):
+            offset = i * num_nodes
+            offset_edge_index = edge_index + offset
+            edge_index_list.append(offset_edge_index)
+
+        # Concatenate along edge dimension
+        batched_edge_index = torch.cat(edge_index_list, dim=1)  # shape: [2, B * E]
+        return batched_edge_index
+
 
 class GraphLatentDiffusion(nn.Module):
     def __init__(self, input_dim=768, latent_dim=768, num_denoising_steps=50):
@@ -48,8 +78,11 @@ class GraphLatentDiffusion(nn.Module):
 
     def add_noise(self, x, t):
         noise = torch.randn_like(x)
-        sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1)
-        sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1)
+        sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
+        sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
+        print("Noise addition shapes", sqrt_alpha.shape, x.shape, sqrt_one_minus_alpha.shape, noise.shape)
+        print((sqrt_alpha*x).shape)
+        print((sqrt_one_minus_alpha * noise).shape)
         noisy_x = sqrt_alpha * x + sqrt_one_minus_alpha * noise
         return noisy_x, noise
 

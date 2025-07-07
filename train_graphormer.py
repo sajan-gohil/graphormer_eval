@@ -20,6 +20,8 @@ random.seed(seed_value)
 np.random.seed(seed_value)
 torch.manual_seed(seed_value)
 
+os.makedirs("training_checkpoints", exist_ok=True)
+
 # 1. Dataset setup
 split_dict = torch.load("split_dict.pt", weights_only=False)
 train_idx = split_dict['train']
@@ -103,10 +105,10 @@ for epoch in range(MAX_EPOCHS):
 
         outputs = model(**batch)
         # Pass edge_index to model if present
-        if "edge_index" in batch:
-            outputs = model(**batch, edge_index=batch["edge_index"])
-        else:
-            outputs = model(**batch)
+        #if "edge_index" in batch:
+        outputs = model(**batch, edge_index=batch["edge_index"])
+        #else:
+        #    outputs = model(**batch)
         loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
 
         optimizer.zero_grad()
