@@ -840,7 +840,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
             node_emb = input_nodes[:, 1:, :]
             # edge_index should be a list of edge_index tensors for each graph in batch
             new_node_emb = []
-            new_emb, attention_matching_loss = self.diffusion_model(node_emb, ei)
+            new_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index)
             print("OLD, NEW EMBEDDING SHAPE: ", node_emb.shape, new_emb.shape, "ATTENTION LOSS = ", attention_matching_loss)
             self.diffusion_optimizer.zero_grad()
             attention_matching_loss.backward(retain_graph=True)
