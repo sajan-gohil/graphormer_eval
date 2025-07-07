@@ -21,7 +21,7 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-
+from torch.optim import Adam
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
     BaseModelOutputWithNoAttention,
@@ -833,18 +833,18 @@ class GraphormerModel(GraphormerPreTrainedModel):
         input_nodes = inner_states[-1].transpose(0, 1)
 
         # --- Diffusion integration ---
-        if self.enable_diffusion and edge_index is not None and self.diffusion_model is not None:
+        if self.enable_diffusion:
             # input_nodes: [batch, num_nodes+1, hidden_dim] (includes graph token)
             # Remove graph token for diffusion, then re-attach after
             graph_token = input_nodes[:, :1, :]
             node_emb = input_nodes[:, 1:, :]
             # edge_index should be a list of edge_index tensors for each graph in batch
             new_node_emb = []
-            new_emb, attention_matching_loss = self.diffusion_model(node_emb, ei)
-            print("OLD, NEW EMBEDDING SHAPE: ", node_emb.shape, new_emb.shape, "ATTENTION LOSS = ", attention_matching_loss)
-            self.diffusion_optimizer.zero_grad()
-            attention_matching_loss.backward(retain_graph=True)
-            self.diffusion_optimizer.step()
+            new_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index)
+            print("OLD, NEW EMBEDDING SHAPE: ", node_emb.shape, new_emb.shape, "ATTENTION LOSS = ", attention_matching_loss.item())
+            #self.diffusion_optimizer.zero_grad()
+            #attention_matching_loss.backward(retain_graph=True)
+            #self.diffusion_optimizer.step()
             
             node_emb = new_emb
             # for i in range(node_emb.shape[0]):
