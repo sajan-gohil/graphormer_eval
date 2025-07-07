@@ -111,5 +111,5 @@ if __name__ == "__main__":
     node_embeddings = torch.randn(num_nodes, input_dim)
     edge_index = erdos_renyi_graph(num_nodes, edge_prob=0.1)
     model = GraphLatentDiffusion(input_dim=input_dim, latent_dim=latent_dim, num_denoising_steps=num_steps)
-    attn_loss = model(node_embeddings, edge_index)
-    print(f"Attention improvement loss: {attn_loss:.4f}")
+    denoised_embeddings, attn_loss = model(node_embeddings, edge_index)
+    print(f"Attention improvement loss: {attn_loss.item():.4f}")
