@@ -103,7 +103,7 @@ for epoch in range(MAX_EPOCHS):
                 batch[k] = [i.to(device) for i in batch[k]]
         labels = batch["labels"]
 
-        outputs = model(**batch)
+        # outputs = model(**batch)
         # Pass edge_index to model if present
         #if "edge_index" in batch:
         outputs = model(**batch, edge_index=batch["edge_index"])
