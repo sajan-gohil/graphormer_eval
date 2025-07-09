@@ -821,7 +821,8 @@ class GraphormerModel(GraphormerPreTrainedModel):
         masked_tokens: None = None,
         return_dict: Optional[bool] = None,
         edge_index: Optional[torch.LongTensor] = None,
-        **unused,
+#        **unused,
+         **kwargs
     ) -> Union[tuple[torch.LongTensor], BaseModelOutputWithNoAttention]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -840,23 +841,24 @@ class GraphormerModel(GraphormerPreTrainedModel):
             node_emb = input_nodes[:, 1:, :]
             # edge_index should be a list of edge_index tensors for each graph in batch
             new_node_emb = []
-            new_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index)
-            print("OLD, NEW EMBEDDING SHAPE: ", node_emb.shape, new_emb.shape, "ATTENTION LOSS = ", attention_matching_loss)
-            self.diffusion_optimizer.zero_grad()
-            attention_matching_loss.backward(retain_graph=True)
-            self.diffusion_optimizer.step()
-            
-            node_emb = new_emb
-            # for i in range(node_emb.shape[0]):
-            #     # edge_index[i]: [2, num_edges]
-            #     emb = node_emb[i]
-            #     ei = edge_index[i] if isinstance(edge_index, (list, tuple)) else edge_index
-            #     # If edge_index is batched, use per-graph, else use same for all
-            #     new_emb, attention_matching_loss = self.diffusion_model(emb, ei)
-            #     if isinstance(new_emb, tuple):
-            #         new_emb = new_emb[0]  # If model returns (loss, emb)
-            #     new_node_emb.append(new_emb.unsqueeze(0))
-            # node_emb = torch.cat(new_node_emb, dim=0)
+            # new_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index)
+            # print("OLD, NEW EMBEDDING SHAPE: ", node_emb.shape, new_emb.shape, "ATTENTION LOSS = ", attention_matching_loss)
+            #self.diffusion_optimizer.zero_grad()
+            #attention_matching_loss.backward(retain_graph=True)
+            #self.diffusion_optimizer.step()
+            attention_matching_losses = []
+            # node_emb = new_emb
+            for i in range(node_emb.shape[0]):
+                # edge_index[i]: [2, num_edges]
+                emb = node_emb[i]
+                ei = edge_index[i] if isinstance(edge_index, (list, tuple)) else edge_index
+                # If edge_index is batched, use per-graph, else use same for all
+                # print("Passing embedding: ", emb.shape, ei.shape)
+                new_emb, attention_matching_loss = self.diffusion_model(emb, ei)
+                if isinstance(new_emb, tuple):
+                    new_emb = new_emb[0]  # If model returns (loss, emb)
+                new_node_emb.append(new_emb.unsqueeze(0))
+            node_emb = torch.cat(new_node_emb, dim=0)
             input_nodes = torch.cat([graph_token, node_emb], dim=1)
         # --- End diffusion integration ---
 
@@ -913,7 +915,9 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         attn_edge_type: torch.LongTensor,
         labels: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
-        **unused,
+        edge_index: Optional[torch.LongTensor] = None,
+         **kwargs
+#        **unused,
     ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -926,6 +930,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             spatial_pos,
             attn_edge_type,
             return_dict=True,
+            edge_index=edge_index
         )
         outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
 

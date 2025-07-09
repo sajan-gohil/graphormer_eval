@@ -43,7 +43,7 @@ BATCH_SIZE = 1024
 
 collator = GraphormerDataCollator(on_the_fly_processing=True)
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, num_workers=1)
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, num_workers=0)
 valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE//4, shuffle=False, collate_fn=collator, num_workers=0)  # Val data has some big samples
 
 # 2. Model Configuration - Graphormer-base
@@ -105,8 +105,9 @@ for epoch in range(MAX_EPOCHS):
 
         # outputs = model(**batch)
         # Pass edge_index to model if present
-        #if "edge_index" in batch:
-        outputs = model(**batch, edge_index=batch["edge_index"])
+        assert "edge_index" in batch.keys()
+        # print("batch index len = ", len(batch["edge_index"]))
+        outputs = model(**batch)
         #else:
         #    outputs = model(**batch)
         loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
@@ -129,14 +130,17 @@ for epoch in range(MAX_EPOCHS):
     with torch.no_grad():
         for batch in valid_loader:
             for k in batch:
-                batch[k] = batch[k].to(device)
+                try:
+                    batch[k] = batch[k].to(device)
+                except:
+                    batch[k] = [i.to(device) for i in batch[k]]
             labels = batch["labels"]
-            outputs = model(**batch)
+            # outputs = model(**batch)
             # Pass edge_index to model if present
-            if "edge_index" in batch:
-                outputs = model(**batch, edge_index=batch["edge_index"])
-            else:
-                outputs = model(**batch)
+            #if "edge_index" in batch:
+            #    outputs = model(**batch, edge_index=batch["edge_index"])
+            #else:
+            outputs = model(**batch)
             y_pred.append(outputs[1].view(-1).cpu())
             y_true.append(labels.view(-1).cpu())
 

@@ -58,6 +58,7 @@ def preprocess_item(item, keep_features=True):
         input_edges = algos_graphormer.gen_edge_input(max_dist, path, attn_edge_type)
     else:
         input_edges = np.zeros([num_nodes, num_nodes, 1, attn_edge_type.shape[-1]], dtype=np.int64)
+        np.fill_diagonal(input_edges, 1)
     attn_bias = np.zeros([num_nodes + 1, num_nodes + 1], dtype=np.single)  # with graph token
 
     # combine
@@ -67,7 +68,7 @@ def preprocess_item(item, keep_features=True):
     item["spatial_pos"] = shortest_path_result.astype(np.int64) + 1  # we shift all indices by one for padding
     item["in_degree"] = np.sum(adj, axis=1).reshape(-1) + 1  # we shift all indices by one for padding
     item["out_degree"] = item["in_degree"]  # for undirected graph
-    item["input_edges"] = input_edges + 1  # we shift all indices by one for padding
+    item["input_edges"] = input_edges + 1  # we shift all indices by one for padding  # equal to max dist, encoding of edges along shortest path from i to j [edge 1 feat, edge 2 feat, ... 0,0,0]
     if "labels" not in item:
         item["labels"] = item["y"]
 
@@ -95,6 +96,8 @@ class GraphormerDataCollator:
         edge_feat_size = len(features[0]["attn_edge_type"][0][0])
         max_dist = max(len(i["input_edges"][0][0]) for i in features)
         edge_input_size = len(features[0]["input_edges"][0][0][0])
+        # for i in features:
+        #     print("edge input size = ", i["input_edges"])
         batch_size = len(features)
 
         batch["attn_bias"] = torch.zeros(batch_size, max_node_num + 1, max_node_num + 1, dtype=torch.float)
@@ -127,7 +130,7 @@ class GraphormerDataCollator:
         batch["out_degree"] = batch["in_degree"]
 
         # Add edge_index as a list of tensors (one per graph in batch)
-        batch["edge_index"] = [torch.tensor(i["edge_index"]) for i in features if "edge_index" in i]
+        batch["edge_index"] = [i["edge_index"] for i in features] # if "edge_index" in i]
 
         sample = features[0]["labels"]
         if len(sample) == 1:  # one task
@@ -137,5 +140,5 @@ class GraphormerDataCollator:
                 batch["labels"] = torch.from_numpy(np.concatenate([i["labels"] for i in features]))
         else:  # multi task classification, left to float to keep the NaNs
             batch["labels"] = torch.from_numpy(np.stack([i["labels"] for i in features], axis=0))
-        print("Batch keys:", batch.keys())
+        # print("Batch keys:", batch.keys(), len(batch["edge_index"]))
         return batch

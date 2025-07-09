@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv
 from torch_geometric.utils import erdos_renyi_graph
+import numpy as np
 
 
 def cosine_beta_schedule(timesteps, s=0.008):
@@ -23,20 +24,19 @@ class GATv2Denoiser(nn.Module):
 
     def forward(self, x, edge_index):
         # x: [B, N, F], edge_index: [2, E] (per-graph)
-        assert edge_index is not None
-        B, N, F = x.size()
-        x = x.reshape(B * N, F)  # Safer than .view
-
+        #assert edge_index is not None
+        #B, N, F = x.size()
+        #x = x.reshape(B * N, F)  # Safer than .view
         # Offset edge_index for each graph in the batch
-        edge_index = self._batch_edge_index(edge_index, B, N, device=x.device)
-
-        x = F.elu(self.gat1(x, edge_index))
-        x = F.elu(self.gat2(x, edge_index))
+        # edge_index = self._batch_edge_index(edge_index, B, N, device=x.device)
+        # print("X vals  ", x.shape, edge_index.shape)
+        x = torch.nn.functional.elu(self.gat1(x, edge_index))
+        x = torch.nn.functional.elu(self.gat2(x, edge_index))
         x = self.out(x)
 
         # Reshape output back to [B, N, -1]
-        out_dim = x.size(-1)
-        x = x.reshape(B, N, out_dim)
+        #out_dim = x.size(-1)
+        #x = x.reshape(B, N, out_dim)
         return x
 
     def _batch_edge_index(self, edge_index, batch_size, num_nodes, device):
@@ -49,10 +49,15 @@ class GATv2Denoiser(nn.Module):
 
         for i in range(batch_size):
             offset = i * num_nodes
-            offset_edge_index = edge_index + offset
+            # print(type(edge_index), type(edge_index[0]), len(edge_index), offset)
+            offset_edge_index = [edge_index[i] + offset for i in range(len(edge_index))]
             edge_index_list.append(offset_edge_index)
-
+        # print("indices = ", set([(len(i), type(i), len(i[0]), len(i[0][0])) for i in edge_index_list]))
         # Concatenate along edge dimension
+        # for i, ei in enumerate(edge_index_list):
+        #     print(f"[{i}] type: {type(ei)}, value: {ei}")
+
+        edge_index_list = [torch.cat(ei, dim=1) for ei in edge_index_list]
         batched_edge_index = torch.cat(edge_index_list, dim=1)  # shape: [2, B * E]
         return batched_edge_index
 
@@ -78,12 +83,11 @@ class GraphLatentDiffusion(nn.Module):
 
     def add_noise(self, x, t):
         noise = torch.randn_like(x)
-        sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
-        sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
-        print("Noise addition shapes", sqrt_alpha.shape, x.shape, sqrt_one_minus_alpha.shape, noise.shape)
-        print((sqrt_alpha*x).shape)
-        print((sqrt_one_minus_alpha * noise).shape)
+        sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1)#.unsqueeze(2)
+        sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1)#.unsqueeze(2)
+        # print("Noise addition shapes", sqrt_alpha.shape, x.shape, sqrt_one_minus_alpha.shape, noise.shape)
         noisy_x = sqrt_alpha * x + sqrt_one_minus_alpha * noise
+        # print("NOISY X SHAPE = ", noisy_x.shape)
         return noisy_x, noise
 
     # def denoising_step(self, noisy_embeddings, t, edge_index):
@@ -91,13 +95,18 @@ class GraphLatentDiffusion(nn.Module):
     #     return pred_noise
 
     def attention_improvement_loss(self, node_embeddings, denoised_embeddings, edge_index):
-        src, dst = edge_index
-        initial_scores = (node_embeddings[src] * node_embeddings[dst]).sum(dim=-1)
-        final_scores = (denoised_embeddings[src] * denoised_embeddings[dst]).sum(dim=-1)
+        #print(torch.tensor(edge_index).shape)
+        #print(len(edge_index), [i.shape for i in edge_index])
+        losses = []
+        for src, dst in edge_index:
+            # src, dst = edge_index
+            initial_scores = (node_embeddings[src] * node_embeddings[dst]).sum(dim=-1)
+            final_scores = (denoised_embeddings[src] * denoised_embeddings[dst]).sum(dim=-1)
         
-        # Encourage final_scores > initial_scores -> hinge loss
-        loss = F.relu(1.0 - (final_scores - initial_scores)).mean()
-        return loss
+            # Encourage final_scores > initial_scores -> hinge loss
+            losses.append(torch.nn.functional.relu(1.0 - (final_scores - initial_scores)).mean())
+        # print(losses)
+        return torch.tensor(losses).mean()
 
     def forward(self, node_embeddings, edge_index):
         N = node_embeddings.shape[0]
@@ -116,7 +125,7 @@ class GraphLatentDiffusion(nn.Module):
         # denoised_embeddings = (noisy_embeddings - one_minus_alpha_t * pred_noise) / alpha_t
 
         # Attention improvement loss
-        attn_loss = self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index)
+        attn_loss = 0 # self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index)
         return denoised_embeddings, attn_loss #.item()
 
     @torch.no_grad()
