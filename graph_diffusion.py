@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv
-from torch_geometric.utils import erdos_renyi_graph
 import numpy as np
+from torch_geometric.data import Data, Batch
 
 
 def cosine_beta_schedule(timesteps, s=0.008):
@@ -14,6 +14,7 @@ def cosine_beta_schedule(timesteps, s=0.008):
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.999)
 
+
 class GATv2Denoiser(nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, heads=4):
         super().__init__()
@@ -22,44 +23,34 @@ class GATv2Denoiser(nn.Module):
         self.gat2 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads)
         self.out = nn.Linear(hidden_channels * heads, out_channels)
 
-    def forward(self, x, edge_index):
-        # x: [B, N, F], edge_index: [2, E] (per-graph)
-        #assert edge_index is not None
-        #B, N, F = x.size()
-        #x = x.reshape(B * N, F)  # Safer than .view
-        # Offset edge_index for each graph in the batch
-        # edge_index = self._batch_edge_index(edge_index, B, N, device=x.device)
-        # print("X vals  ", x.shape, edge_index.shape)
+    def sample_forward(self, x, edge_index):
         x = torch.nn.functional.elu(self.gat1(x, edge_index))
         x = torch.nn.functional.elu(self.gat2(x, edge_index))
         x = self.out(x)
-
-        # Reshape output back to [B, N, -1]
-        #out_dim = x.size(-1)
-        #x = x.reshape(B, N, out_dim)
         return x
 
-    def _batch_edge_index(self, edge_index, batch_size, num_nodes, device):
+    def forward(self, x_batch, edge_index_list):
         """
-        Replicates and offsets edge_index for a batch of graphs.
-        Assumes the same edge_index structure for each graph.
+        Args:
+            x_batch: Tensor of shape [B, N, F]
+            edge_index_list: list of [2, E_i] tensors
+        Returns:
+            Tensor of shape [B, N, out_features]
         """
-        edge_index = edge_index #.to(device)
-        edge_index_list = []
+        B, N, F = x_batch.shape
+        data_list = []
 
-        for i in range(batch_size):
-            offset = i * num_nodes
-            # print(type(edge_index), type(edge_index[0]), len(edge_index), offset)
-            offset_edge_index = [edge_index[i] + offset for i in range(len(edge_index))]
-            edge_index_list.append(offset_edge_index)
-        # print("indices = ", set([(len(i), type(i), len(i[0]), len(i[0][0])) for i in edge_index_list]))
-        # Concatenate along edge dimension
-        # for i, ei in enumerate(edge_index_list):
-        #     print(f"[{i}] type: {type(ei)}, value: {ei}")
+        for b in range(B):
+            data = Data(x=x_batch[b], edge_index=edge_index_list[b])
+            data_list.append(data)
 
-        edge_index_list = [torch.cat(ei, dim=1) for ei in edge_index_list]
-        batched_edge_index = torch.cat(edge_index_list, dim=1)  # shape: [2, B * E]
-        return batched_edge_index
+        batch = Batch.from_data_list(data_list)  # Automatically handles indexing
+
+        x = torch.nn.functional.elu(self.gat1(batch.x, batch.edge_index))
+        x = torch.nn.functional.elu(self.gat2(x, batch.edge_index))
+        x = self.out(x)
+        out_per_graph = x.split(batch.batch.bincount().tolist(), dim=0)
+        return torch.stack(out_per_graph, dim=0)  # Shape: [B, N, out_features] if N is fixed
 
 
 class GraphLatentDiffusion(nn.Module):
@@ -100,8 +91,8 @@ class GraphLatentDiffusion(nn.Module):
         losses = []
         for src, dst in edge_index:
             # src, dst = edge_index
-            initial_scores = (node_embeddings[src] * node_embeddings[dst]).sum(dim=-1)
-            final_scores = (denoised_embeddings[src] * denoised_embeddings[dst]).sum(dim=-1)
+            initial_scores = torch.nn.sigmoid(node_embeddings[src] * node_embeddings[dst]).sum(dim=-1)
+            final_scores = torch.nn.sigmoid(denoised_embeddings[src] * denoised_embeddings[dst]).sum(dim=-1)
         
             # Encourage final_scores > initial_scores -> hinge loss
             losses.append(torch.nn.functional.relu(1.0 - (final_scores - initial_scores)).mean())
@@ -145,6 +136,7 @@ class GraphLatentDiffusion(nn.Module):
 
 
 if __name__ == "__main__":
+    from torch_geometric.utils import erdos_renyi_graph
     # Parameters
     num_nodes = 100
     input_dim = 32
