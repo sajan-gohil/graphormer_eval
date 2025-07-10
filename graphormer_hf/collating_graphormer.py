@@ -58,7 +58,7 @@ def preprocess_item(item, keep_features=True):
         input_edges = algos_graphormer.gen_edge_input(max_dist, path, attn_edge_type)
     else:
         input_edges = np.zeros([num_nodes, num_nodes, 1, attn_edge_type.shape[-1]], dtype=np.int64)
-        np.fill_diagonal(input_edges, 1)
+        # np.fill_diagonal(input_edges, 1)
     attn_bias = np.zeros([num_nodes + 1, num_nodes + 1], dtype=np.single)  # with graph token
 
     # combine
