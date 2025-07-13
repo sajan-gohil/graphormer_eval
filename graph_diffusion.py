@@ -46,11 +46,11 @@ class GATv2Denoiser(nn.Module):
 
         batch = Batch.from_data_list(data_list)  # Automatically handles indexing
 
-        x = torch.nn.functional.elu(self.gat2(batch.x, batch.edge_index))
-        x = torch.nn.functional.elu(self.gat3(x, batch.edge_index))
+        x = torch.nn.functional.elu(self.gat1(batch.x, batch.edge_index))
+        x = torch.nn.functional.elu(self.gat2(x, batch.edge_index))
         x = self.out(x)
-        out_per_graph = x.split(batch.batch.bincount().tolist(), dim=1)
-        return torch.stack(out_per_graph, dim=1)  # Shape: [B, N, out_features] if N is fixed
+        out_per_graph = x.split(batch.batch.bincount().tolist(), dim=0)
+        return torch.stack(out_per_graph, dim=0)  # Shape: [B, N, out_features] if N is fixed
 
 
 class GraphLatentDiffusion(nn.Module):
@@ -76,14 +76,14 @@ class GraphLatentDiffusion(nn.Module):
         noise = torch.randn_like(x)
         sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
         sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
-        print("Noise addition shapes", sqrt_alpha.shape, x.shape, sqrt_one_minus_alpha.shape, noise.shape, t.shape, t)
+        # print("Noise addition shapes", sqrt_alpha.shape, x.shape, sqrt_one_minus_alpha.shape, noise.shape, t.shape, t)
         noisy_x = sqrt_alpha * x + sqrt_one_minus_alpha * noise
-        print("NOISY X SHAPE = ", noisy_x.shape)
+        # print("NOISY X SHAPE = ", noisy_x.shape)
         return noisy_x, noise
 
-    def denoising_step(self, noisy_embeddings, t, edge_index):
-        pred_noise = self.denoiser(noisy_embeddings, edge_index)
-        return pred_noise
+    #def denoising_step(self, noisy_embeddings, t, edge_index):
+    #    pred_noise = self.denoiser(noisy_embeddings, edge_index)
+    #    return pred_noise
 
     def attention_improvement_loss(self, node_embeddings, denoised_embeddings, edge_index):
         #print(torch.tensor(edge_index).shape)
@@ -100,13 +100,12 @@ class GraphLatentDiffusion(nn.Module):
         return torch.tensor(losses).mean()
 
     def forward(self, node_embeddings, edge_index):
-        print("NODE EMBEDDINGS SHAPE = ", node_embeddings.shape)
+        # print("NODE EMBEDDINGS SHAPE = ", node_embeddings.shape)  # B, N, D
         B = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps, (B,), device=node_embeddings.device)
-        t_emb = self.timestep_embeddings(t).unsqueeze(1).expand(-1, x.size(1), -1)
+        t_emb = self.timestep_embeddings(t).unsqueeze(1).expand(-1, node_embeddings.size(1), -1)
         noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
         noisy_embeddings_with_t = noisy_embeddings + t_emb  # torch.cat([noisy_embeddings, t_emb], dim=-1)
-        # pred_noise = self.denoising_step(noisy_embeddings, t, edge_index)
         # denoised_embeddings = self.denoising_step(noisy_embeddings, t, edge_index)
         denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index)
 

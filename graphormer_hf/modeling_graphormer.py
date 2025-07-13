@@ -234,7 +234,7 @@ class GraphormerGraphAttnBias(nn.Module):
             )
 
         self.spatial_pos_encoder = nn.Embedding(config.num_spatial, config.num_attention_heads, padding_idx=0)
-
+        # print("EXCLUDING SPATIAL ENCODINGS=======================")
         self.graph_token_virtual_distance = nn.Embedding(1, config.num_attention_heads)
 
     def forward(
@@ -841,6 +841,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
             # edge_index should be a list of edge_index tensors for each graph in batch
             new_node_emb = []
             new_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index)
+            # print("ATM LOSS = ", attention_matching_loss) 
             #self.diffusion_optimizer.zero_grad()
             #attention_matching_loss.backward(retain_graph=True)
             #self.diffusion_optimizer.step()
