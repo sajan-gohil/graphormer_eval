@@ -19,6 +19,8 @@ import json
 import random
 import numpy as np
 import datetime
+import argparse
+
 
 os.environ['PYTHONHASHSEED'] = '42'
 seed_value = 42
@@ -28,7 +30,16 @@ torch.manual_seed(seed_value)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(seed_value)
 
-args = get_params()
+parser = argparse.ArgumentParser(
+    description="Graphormer Training Parameters")
+parser.add_argument("--edge_type", type=str, default="multi_hop", help="Type of edge encoding (multi_hop, single_hop, etc.)")
+parser.add_argument("--enable_spatial_encoder", action="store_true", help="Enable spatial encoder")
+parser.add_argument("--enable_diffusion", action="store_true", help="Enable diffusion")
+parser.add_argument("--optimize_diffuser", action="store_true", help="Optimize diffuser")
+parser.add_argument("--experiment_dir", type=str, default="./experiments", help="Directory to save experiment results")
+parser.add_argument("--name", type=str, default="graphormer_experiment", help="Name of the experiment")
+args = parser.parse_args()
+
 args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
 os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
             exist_ok=True)
@@ -106,7 +117,7 @@ scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 # 4. Training loop
 evaluator = PCQM4MEvaluator()
 step = 0
-MAX_EPOCHS = 30 #0
+MAX_EPOCHS = 50
 best_valid_mae = float('inf')
 
 for epoch in range(MAX_EPOCHS):
@@ -178,33 +189,3 @@ for epoch in range(MAX_EPOCHS):
         break
 
 print(f"Best Validation MAE: {best_valid_mae:.6f}")
-
-
-def get_params():
-    import argparse
-    parser = argparse.ArgumentParser(
-        description="Graphormer Training Parameters")
-    parser.add_argument(
-        "--edge_type",
-        type=str,
-        default="multi_hop",
-        help="Type of edge encoding (multi_hop, single_hop, etc.)")
-    parser.add_argument("--enable_spatial_encoder",
-                        action="store_true",
-                        help="Enable spatial encoder")
-    parser.add_argument("--enable_diffusion",
-                        action="store_true",
-                        help="Enable diffusion")
-    parser.add_argument("--optimize_diffuser",
-                        action="store_true",
-                        help="Optimize diffuser")
-    parser.add_argument("--experiment_dir",
-                        type=str,
-                        default="./experiments",
-                        help="Directory to save experiment results")
-    parser.add_argument("--name",
-                        type=str,
-                        default="graphormer_experiment",
-                        help="Name of the experiment")
-    args = parser.parse_args()
-    return args
