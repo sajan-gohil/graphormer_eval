@@ -14,16 +14,29 @@ from graphormer_hf.configuration_graphormer import GraphormerConfig
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
 
 import os
+import sys
+import json
 import random
 import numpy as np
+import datetime
 
 os.environ['PYTHONHASHSEED'] = '42'
 seed_value = 42
 random.seed(seed_value)
 np.random.seed(seed_value)
 torch.manual_seed(seed_value)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(seed_value)
 
-os.makedirs("training_checkpoints", exist_ok=True)
+args = get_params()
+args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
+            exist_ok=True)
+sys.stdout = open(os.path.join(args.experiment_dir, "training_log.txt"), "w")
+sys.stderr = open(os.path.join(args.experiment_dir, "training_error_log.txt"),"w")
+
+print(f"Experiment directory: {args.experiment_dir}")
+print(f"Parameters: {json.dumps(vars(args), indent=4)}")
 
 # 1. Dataset setup
 split_dict = torch.load("split_dict.pt", weights_only=False)
@@ -32,13 +45,11 @@ valid_idx = split_dict['valid']
 
 # Load preprocessed pyg graph objects
 pyg_data = torch.load("pyg_dataset_ogb.pt", weights_only=False)
-
-# Assign num_nodes attribute
-for i in range(len(pyg_data)):
-    pyg_data[i].num_nodes = pyg_data[i].x.shape[0]
-
+# # Assign num_nodes attribute
+# for i in range(len(pyg_data)):
+#     pyg_data[i].num_nodes = pyg_data[i].x.shape[0]
 # Create subsets
-train_dataset = Subset(pyg_data, train_idx)
+train_dataset = Subset(pyg_data, train_idx[:len(train_idx) // 4])  # Use a smaller subset for faster training
 valid_dataset = Subset(pyg_data, valid_idx)
 
 # Data loaders
@@ -59,11 +70,14 @@ config = GraphormerConfig(
     attention_dropout=0.1,
     activation_dropout=0.1,
     num_classes=1,
-    # edge_type="single_hop",
+    edge_type=args.edge_type,
+    enable_spatial_encoder=args.enable_spatial_encoder,
+    enable_diffusion=args.enable_diffusion,
+    optimize_diffuser=args.optimize_diffuser
 )
 
 model = GraphormerForGraphClassification(config)
-model.encoder.enable_diffusion = True  # Enable diffusion
+# model.encoder.enable_diffusion = True  # Enable diffusion
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
@@ -156,7 +170,7 @@ for epoch in range(MAX_EPOCHS):
     print(f"Validation MAE: {valid_mae:.6f}")
     if valid_mae < best_valid_mae:
         best_valid_mae = valid_mae
-        torch.save(model.state_dict(), f"training_checkpoints/best_model_{epoch}.pt")
+        torch.save(model.state_dict(), f"{args.experiment_dir}/training_checkpoints/best_model_{epoch}.pt")
         print("Best model updated.")
 
     if step >= MAX_STEPS:
@@ -164,3 +178,33 @@ for epoch in range(MAX_EPOCHS):
         break
 
 print(f"Best Validation MAE: {best_valid_mae:.6f}")
+
+
+def get_params():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Graphormer Training Parameters")
+    parser.add_argument(
+        "--edge_type",
+        type=str,
+        default="multi_hop",
+        help="Type of edge encoding (multi_hop, single_hop, etc.)")
+    parser.add_argument("--enable_spatial_encoder",
+                        action="store_true",
+                        help="Enable spatial encoder")
+    parser.add_argument("--enable_diffusion",
+                        action="store_true",
+                        help="Enable diffusion")
+    parser.add_argument("--optimize_diffuser",
+                        action="store_true",
+                        help="Optimize diffuser")
+    parser.add_argument("--experiment_dir",
+                        type=str,
+                        default="./experiments",
+                        help="Directory to save experiment results")
+    parser.add_argument("--name",
+                        type=str,
+                        default="graphormer_experiment",
+                        help="Name of the experiment")
+    args = parser.parse_args()
+    return args
