@@ -46,9 +46,9 @@ class GATv2Denoiser(nn.Module):
 
         batch = Batch.from_data_list(data_list)  # Automatically handles indexing
 
-        x = torch.nn.functional.elu(self.gat1(batch.x, batch.edge_index))
-        x = torch.nn.functional.elu(self.gat2(x, batch.edge_index))
-        x = self.out(x)
+        x1 = torch.nn.functional.elu(self.gat1(batch.x, batch.edge_index))
+        x2 = torch.nn.functional.elu(self.gat2(x1, batch.edge_index))
+        x = self.out(x2)
         out_per_graph = x.split(batch.batch.bincount().tolist(), dim=0)
         return torch.stack(out_per_graph, dim=0)  # Shape: [B, N, out_features] if N is fixed
 
@@ -70,7 +70,7 @@ class GraphLatentDiffusion(nn.Module):
         self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1 - alphas_cumprod))
 
-        self.denoiser = GATv2Denoiser(input_dim, latent_dim, input_dim)
+        self.denoiser = GATv2Denoiser(input_dim+latent_dim, latent_dim, input_dim)
 
     def add_noise(self, x, t):
         noise = torch.randn_like(x)
@@ -81,52 +81,33 @@ class GraphLatentDiffusion(nn.Module):
         # print("NOISY X SHAPE = ", noisy_x.shape)
         return noisy_x, noise
 
-    #def denoising_step(self, noisy_embeddings, t, edge_index):
-    #    pred_noise = self.denoiser(noisy_embeddings, edge_index)
-    #    return pred_noise
-
-    def attention_improvement_loss(self, node_embeddings, denoised_embeddings, edge_index):
-        #print(torch.tensor(edge_index).shape)
-        #print(len(edge_index), [i.shape for i in edge_index])
+    def attention_improvement_loss(self, node_embeddings, denoised_embeddings, edge_index_list):
         losses = []
-        for src, dst in edge_index:
-            # src, dst = edge_index
-            initial_scores = torch.sigmoid(code_embeddings[src] * node_embeddings[dst]).sum(dim=-1)
-            final_scores = torch.sigmoid(denoised_embeddings[src] * denoised_embeddings[dst]).sum(dim=-1)
-            # print("INITIAL = ", initial_scores.shape, "FINAL = ", final_scores.shape)
+        node_emb_normed = torch.nn.functional.normalize(node_embeddings, p=2, dim=-1)
+        denoised_emb_normed = orch.nn.functional.normalize(denoised_embeddings, p=2, dim=-1)
+        for batch_index, (src, dst) in enumerate(edge_index_list):
+            initial_scores = (node_emb_normed[batch_index][src] *
+                              node_emb_normed[batch_index][dst]).sum(dim=-1)
+            final_scores = (denoised_emb_normed[batch_index][src] *
+                            denoised_emb_normed[batch_index][dst]).sum(dim=-1)
             # Encourage final_scores > initial_scores -> hinge loss
-            losses.append(torch.nn.functional.relu(1.0 - (final_scores - initial_scores)).mean())
+            losses.append(torch.nn.functional.relu(0.1 - (final_scores - initial_scores)).mean())
         # print(losses)
-        return torch.tensor(losses).mean()
+        return torch.stack(losses).mean()
 
-    def forward(self, node_embeddings, edge_index):
+    def forward(self, node_embeddings, edge_index_list):
         # print("NODE EMBEDDINGS SHAPE = ", node_embeddings.shape)  # B, N, D
         B = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps, (B,), device=node_embeddings.device)
         t_emb = self.timestep_embeddings(t).unsqueeze(1).expand(-1, node_embeddings.size(1), -1)
+
         noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
-        noisy_embeddings_with_t = noisy_embeddings + t_emb  # torch.cat([noisy_embeddings, t_emb], dim=-1)
-        # denoised_embeddings = self.denoising_step(noisy_embeddings, t, edge_index)
-        denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index)
+        noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
+        denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index_list)
 
         # Attention improvement loss
-        attn_loss = 0 #self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index)
+        attn_loss = self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index_list)
         return denoised_embeddings, attn_loss #.item()
-
-    @torch.no_grad()
-    def sample(self, noisy_embeddings, edge_index):
-        x = noisy_embeddings
-        for t in reversed(range(self.num_denoising_steps)):
-            t_tensor = torch.full((x.size(0),), t, device=x.device, dtype=torch.long)
-            pred_noise = self.denoising_step(x, t_tensor, edge_index)
-
-            alpha_t = self.sqrt_alphas_cumprod[t].view(1, 1)
-            one_minus_alpha_t = self.sqrt_one_minus_alphas_cumprod[t].view(1, 1)
-
-            x = (x - one_minus_alpha_t * pred_noise) / alpha_t
-            # optionally add noise at intermediate steps, if stochastic sampling desired
-        return x
-
 
 
 if __name__ == "__main__":
@@ -135,9 +116,10 @@ if __name__ == "__main__":
     num_nodes = 100
     input_dim = 32
     latent_dim = 64
-    num_steps = 20
-    node_embeddings = torch.randn(num_nodes, input_dim)
-    edge_index = erdos_renyi_graph(num_nodes, edge_prob=0.1)
+    num_steps = 100
+    batch_size = 10
+    node_embeddings = torch.randn(batch_size, num_nodes, input_dim)
+    edge_index = [erdos_renyi_graph(num_nodes, edge_prob=0.1) for i in range(batch_size)]
     model = GraphLatentDiffusion(input_dim=input_dim, latent_dim=latent_dim, num_denoising_steps=num_steps)
     denoised_embeddings, attn_loss = model(node_embeddings, edge_index)
     print(f"Attention improvement loss: {attn_loss.item():.4f}")
