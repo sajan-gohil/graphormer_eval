@@ -1,4 +1,7 @@
 import torch
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 from torch.utils.data import DataLoader, Subset
 from torch.nn import functional as F
 from torch.optim import Adam
@@ -56,7 +59,7 @@ config = GraphormerConfig(
     attention_dropout=0.1,
     activation_dropout=0.1,
     num_classes=1,
-    #edge_type="single_hop",
+    # edge_type="single_hop",
 )
 
 model = GraphormerForGraphClassification(config)
