@@ -102,6 +102,7 @@ BETA1, BETA2 = 0.9, 0.999
 GRAD_CLIP_NORM = 5.0
 
 optimizer = Adam(model.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
+diffusion_optimizer = Adam(self.diffusion_model.parameters(), lr=1e-4)
 
 # Linear warmup and decay scheduler
 def lr_lambda(current_step):
@@ -141,9 +142,11 @@ for epoch in range(MAX_EPOCHS):
         loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
 
         optimizer.zero_grad()
+        # diffusion_optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
         optimizer.step()
+        # diffusion_optimizer.step()
         scheduler.step()
 
         step += 1

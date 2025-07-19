@@ -800,7 +800,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
 
         if config.enable_diffusion:
             self.diffusion_model = GraphLatentDiffusion(input_dim=config.embedding_dim, latent_dim=config.embedding_dim, num_denoising_steps=diffusion_steps)
-            self.diffusion_optimizer = Adam(self.diffusion_model.parameters(), lr=1e-4)
+            # self.diffusion_optimizer = Adam(self.diffusion_model.parameters(), lr=1e-4)
         else:
             self.diffusion_model = None
             self.diffusion_optimizer = None
@@ -843,10 +843,10 @@ class GraphormerModel(GraphormerPreTrainedModel):
             # edge_index should be a list of edge_index tensors for each graph in batch
             node_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index)
             # print("ATM LOSS = ", attention_matching_loss)
-            if self.config.optimize_diffuser:
-                self.diffusion_optimizer.zero_grad()
-                attention_matching_loss.backward(retain_graph=True)
-                self.diffusion_optimizer.step()
+            # if self.config.optimize_diffuser:
+            #     self.diffusion_optimizer.zero_grad()
+            #     attention_matching_loss.backward(retain_graph=True)
+            #     self.diffusion_optimizer.step()
 
             input_nodes = torch.cat([graph_token, node_emb], dim=1)
         # --- End diffusion integration ---
@@ -863,6 +863,10 @@ class GraphormerModel(GraphormerPreTrainedModel):
 
         if not return_dict:
             return tuple(x for x in [input_nodes, inner_states] if x is not None)
+        if self.config.optimize_diffuser:
+            return BaseModelOutputWithNoAttention(
+                last_hidden_state=input_nodes,
+                hidden_states=inner_states), attention_matching_loss
         return BaseModelOutputWithNoAttention(last_hidden_state=input_nodes, hidden_states=inner_states)
 
     def max_nodes(self):
@@ -884,6 +888,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
 
     def __init__(self, config: GraphormerConfig):
         super().__init__(config)
+        self.config = config
         self.encoder = GraphormerModel(config)
         self.embedding_dim = config.embedding_dim
         self.num_classes = config.num_classes
@@ -921,6 +926,8 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             return_dict=True,
             edge_index=edge_index
         )
+        if self.config.optimize_diffuser:
+            encoder_outputs, attention_matching_loss = encoder_outputs
         outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
 
         head_outputs = self.classifier(outputs)
@@ -940,6 +947,9 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
                 loss_fct = BCEWithLogitsLoss(reduction="sum")
                 loss = loss_fct(logits[mask], labels[mask])
 
+        if self.config.optimize_diffuser:
+            print(loss, attention_matching_loss)
+            loss = loss + 0.5*attention_matching_loss
         if not return_dict:
             return tuple(x for x in [loss, logits, hidden_states] if x is not None)
         return SequenceClassifierOutput(loss=loss, logits=logits, hidden_states=hidden_states, attentions=None)
