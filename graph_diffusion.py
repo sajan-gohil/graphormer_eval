@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, L1Loss
 from torch_geometric.nn import GATv2Conv
 from torch_geometric.data import Data, Batch
+import datetime
 
 
 def cosine_beta_schedule(timesteps, s=0.008):
@@ -134,7 +135,7 @@ class GraphLatentDiffusion(nn.Module):
                 struct_assn = calculate_structural_associations(flat_node.detach().cpu(),
                                                          flat_denoised.detach().cpu(),
                                                          all_src, all_dst)
-                print(f"{struct_assn[0]},{strict_assn[1]}", file=f)
+                print(f"{datetime.datetime.now()},{struct_assn[0]},{strict_assn[1]}", file=f)
         initial_scores = (flat_node[all_src] * flat_node[all_dst]).sum(-1)
         final_scores = (flat_denoised[all_src] * flat_denoised[all_dst]).sum(-1)
         
