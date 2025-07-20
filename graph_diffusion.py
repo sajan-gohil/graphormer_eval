@@ -81,19 +81,52 @@ class GraphLatentDiffusion(nn.Module):
         # print("NOISY X SHAPE = ", noisy_x.shape)
         return noisy_x, noise
 
-    def attention_improvement_loss(self, node_embeddings, denoised_embeddings, edge_index_list):
+    def attention_improvement_loss_slow(self, node_embeddings, denoised_embeddings, edge_index_list):
         losses = []
-        node_emb_normed = torch.nn.functional.normalize(node_embeddings, p=2, dim=-1)
-        denoised_emb_normed = orch.nn.functional.normalize(denoised_embeddings, p=2, dim=-1)
+        node_emb_normed = node_embeddings  # torch.nn.functional.normalize(node_embeddings, p=2, dim=-1)
+        denoised_emb_normed = denoised_embeddings  # torch.nn.functional.normalize(denoised_embeddings, p=2, dim=-1)
         for batch_index, (src, dst) in enumerate(edge_index_list):
             initial_scores = (node_emb_normed[batch_index][src] *
                               node_emb_normed[batch_index][dst]).sum(dim=-1)
             final_scores = (denoised_emb_normed[batch_index][src] *
                             denoised_emb_normed[batch_index][dst]).sum(dim=-1)
             # Encourage final_scores > initial_scores -> hinge loss
-            losses.append(torch.nn.functional.relu(0.1 - (final_scores - initial_scores)).mean())
+            losses.append(torch.nn.functional.relu(1.0 - (final_scores - initial_scores)).mean())
         # print(losses)
         return torch.stack(losses).mean()
+    
+    def attention_improvement_loss(self, node_embeddings, denoised_embeddings, edge_index_list):
+        # Normalize embeddings
+        node_emb_normed = node_embeddings  # F.normalize(node_embeddings, p=2, dim=-1)
+        denoised_emb_normed = denoised_embeddings  # F.normalize(denoised_embeddings, p=2, dim=-1)
+
+        # Concatenate all graphs into a single tensor for faster processing
+        all_src = []
+        all_dst = []
+        all_batch = []
+        offset = 0
+        for b, edge_index in enumerate(edge_index_list):
+            src, dst = edge_index
+            all_src.append(src + offset)
+            all_dst.append(dst + offset)
+            all_batch.append(torch.full((src.size(0),), b, device=src.device))
+            offset += node_embeddings[b].size(0)
+    
+        all_src = torch.cat(all_src)
+        all_dst = torch.cat(all_dst)
+        all_batch = torch.cat(all_batch)
+    
+        # Flatten embeddings [B, N, D] -> [sum(N), D]
+        flat_node = node_emb_normed.reshape(-1, node_emb_normed.size(-1))
+        flat_denoised = denoised_emb_normed.reshape(-1, denoised_emb_normed.size(-1))
+    
+        initial_scores = (flat_node[all_src] * flat_node[all_dst]).sum(-1)
+        final_scores = (flat_denoised[all_src] * flat_denoised[all_dst]).sum(-1)
+    
+        per_graph_loss = torch.zeros(node_embeddings.size(0), device=node_embeddings.device)
+        per_graph_loss.index_add_(0, all_batch, F.relu(1 - (final_scores - initial_scores)))
+    
+        return (per_graph_loss / torch.bincount(all_batch).float()).mean()
 
     def forward(self, node_embeddings, edge_index_list):
         # print("NODE EMBEDDINGS SHAPE = ", node_embeddings.shape)  # B, N, D

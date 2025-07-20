@@ -948,8 +948,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
                 loss = loss_fct(logits[mask], labels[mask])
 
         if self.config.optimize_diffuser:
-            print(loss, attention_matching_loss)
-            loss = loss + 0.5*attention_matching_loss
+            loss = loss + attention_matching_loss
         if not return_dict:
             return tuple(x for x in [loss, logits, hidden_states] if x is not None)
         return SequenceClassifierOutput(loss=loss, logits=logits, hidden_states=hidden_states, attentions=None)

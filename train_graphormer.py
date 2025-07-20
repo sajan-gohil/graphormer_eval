@@ -1,6 +1,7 @@
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+torch.autograd.set_detect_anomaly(True)
 
 from torch.utils.data import DataLoader, Subset
 from torch.nn import functional as F
@@ -15,6 +16,7 @@ from graphormer_hf.collating_graphormer import GraphormerDataCollator
 
 import os
 import sys
+import shutil
 import json
 import random
 import numpy as np
@@ -49,6 +51,10 @@ sys.stderr = open(os.path.join(args.experiment_dir, "training_error_log.txt"),"w
 print(f"Experiment directory: {args.experiment_dir}")
 print(f"Parameters: {json.dumps(vars(args), indent=4)}")
 
+shutil.copy("graph_diffusion.py", args.experiment_dir)
+shutil.copytree("graphormer_hf/", os.path.join(args.experiment_dir, "graphormer_hf"))
+shutil.copy("train_graphormer.py", args.experiment_dir)
+
 # 1. Dataset setup
 split_dict = torch.load("split_dict.pt", weights_only=False)
 train_idx = split_dict['train']
@@ -64,7 +70,7 @@ train_dataset = Subset(pyg_data, train_idx[:len(train_idx) // 4])  # Use a small
 valid_dataset = Subset(pyg_data, valid_idx)
 
 # Data loaders
-BATCH_SIZE = 1024
+BATCH_SIZE = 512
 
 collator = GraphormerDataCollator(on_the_fly_processing=True)
 
@@ -102,7 +108,7 @@ BETA1, BETA2 = 0.9, 0.999
 GRAD_CLIP_NORM = 5.0
 
 optimizer = Adam(model.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
-diffusion_optimizer = Adam(self.diffusion_model.parameters(), lr=1e-4)
+# diffusion_optimizer = Adam(model.encoder.diffusion_model.parameters(), lr=1e-4)
 
 # Linear warmup and decay scheduler
 def lr_lambda(current_step):
@@ -122,6 +128,7 @@ MAX_EPOCHS = 50
 best_valid_mae = float('inf')
 
 for epoch in range(MAX_EPOCHS):
+    print("EPOCH: ", epoch)
     model.train()
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{MAX_EPOCHS}")
     for batch in pbar:
@@ -137,9 +144,8 @@ for epoch in range(MAX_EPOCHS):
         assert "edge_index" in batch.keys()
         # print("batch index len = ", len(batch["edge_index"]))
         outputs = model(**batch)
-        #else:
-        #    outputs = model(**batch)
-        loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
+        # loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
+        loss = outputs.loss
 
         optimizer.zero_grad()
         # diffusion_optimizer.zero_grad()
