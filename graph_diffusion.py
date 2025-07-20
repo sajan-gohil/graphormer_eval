@@ -105,7 +105,8 @@ class GraphLatentDiffusion(nn.Module):
                                    node_embeddings,
                                    denoised_embeddings,
                                    edge_index_list,
-                                   threshold=0.0):
+                                   # threshold=0.1,
+                                   tau=0.2):
         # Normalize embeddings
         node_emb_normed = F.normalize(node_embeddings, p=2, dim=-1)
         denoised_emb_normed = F.normalize(denoised_embeddings, p=2, dim=-1)
@@ -139,8 +140,14 @@ class GraphLatentDiffusion(nn.Module):
         initial_scores = (flat_node[all_src] * flat_node[all_dst]).sum(-1)
         final_scores = (flat_denoised[all_src] * flat_denoised[all_dst]).sum(-1)
         
-        recall_init = torch.sigmoid((initial_scores - threshold)/0.05)
-        recall_final = torch.sigmoid((final_scores - threshold)/0.05)
+        with torch.no_grad():
+            threshold = torch.zeros_like(init_scores)
+            for b in range(node_embeddings.size(0)):
+                mask = (all_batch == b)
+                threshold[mask] = initial_scores[mask].mean()
+
+        recall_init = torch.sigmoid((initial_scores - threshold) / tau)
+        recall_final = torch.sigmoid((final_scores - threshold) / tau)
 
         per_graph_loss = torch.zeros(node_embeddings.size(0), device=node_embeddings.device)
         # per_graph_loss.index_add_(0, all_batch, -(recall_final - recall_init))
@@ -162,12 +169,12 @@ class GraphLatentDiffusion(nn.Module):
             for thresh in np.linspace(node_adj.mean() - node_adj.std(),
                                       node_adj.mean() + node_adj.std(), 9):
                 adj = (node_adj > thresh).to(dtype=torch.int8)
-                max_node_recovery = max(torch.bitwise_and(adj, mask).sum()/mask_sum,
+                max_node_recovery = max((adj == mask).sum()/mask_sum,
                                         max_node_recovery)
             for thresh in np.linspace(denoised_adj.mean() - denoised_adj.std(),
                                       denoised_adj.mean() + denoised_adj.std(), 9):
                 adj = (denoised_adj > thresh).to(dtype=torch.int8)
-                max_denoised_recovery = max(torch.bitwise_and(adj, mask).sum()/mask_sum,
+                max_denoised_recovery = max((adj == mask).sum()/mask_sum,
                                         max_denoised_recovery)
         return max_node_recovery, max_denoised_recovery
 

@@ -957,7 +957,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         if self.config.optimize_diffuser:
             if np.random.rand() < 0.01:
                 with open(f"{self.config.experiment_dir}/losses.csv", "a") as f:
-                    print(f"{datetime.datetime.now()}{loss},{attention_matching_loss}", file=f)
+                    print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)
             loss = loss + attention_matching_loss
         if not return_dict:
             return tuple(x for x in [loss, logits, hidden_states] if x is not None)
