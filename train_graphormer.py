@@ -41,13 +41,15 @@ parser.add_argument("--optimize_diffuser", action="store_true", help="Optimize d
 parser.add_argument("--experiment_dir", type=str, default="./experiments", help="Directory to save experiment results")
 parser.add_argument("--name", type=str, default="graphormer_experiment", help="Name of the experiment")
 parser.add_argument("--diffusion_reconstruction_scale", type=float, default=0.0, help="How much to weigh diffusion reconstruction loss")
+parser.add_argument("--onscreen_logs", action="store_true", help="print logs on screen instead of log files in experiment dir")
 args = parser.parse_args()
 
 args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
 os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
             exist_ok=True)
-sys.stdout = open(os.path.join(args.experiment_dir, "training_log.txt"), "w")
-sys.stderr = open(os.path.join(args.experiment_dir, "training_error_log.txt"),"w")
+if not args.onscreen_logs:
+    sys.stdout = open(os.path.join(args.experiment_dir, "training_log.txt"), "w")
+    sys.stderr = open(os.path.join(args.experiment_dir, "training_error_log.txt"),"w")
 
 print(f"Experiment directory: {args.experiment_dir}")
 print(f"Parameters: {json.dumps(vars(args), indent=4)}")
@@ -71,7 +73,7 @@ train_dataset = Subset(pyg_data, train_idx[:len(train_idx) // 4])  # Use a small
 valid_dataset = Subset(pyg_data, valid_idx)
 
 # Data loaders
-BATCH_SIZE = 512
+BATCH_SIZE = 32
 
 collator = GraphormerDataCollator(on_the_fly_processing=True)
 
@@ -92,7 +94,8 @@ config = GraphormerConfig(
     enable_spatial_encoder=args.enable_spatial_encoder,
     enable_diffusion=args.enable_diffusion,
     optimize_diffuser=args.optimize_diffuser,
-    diffusion_reconstruction_scale=args.diffusion_reconstruction_scale
+    diffusion_reconstruction_scale=args.diffusion_reconstruction_scale,
+    experiment_dir=args.experiment_dir
 )
 
 model = GraphormerForGraphClassification(config)

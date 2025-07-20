@@ -132,10 +132,10 @@ class GraphLatentDiffusion(nn.Module):
         if np.random.rand() < 0.01:
             with open(f"{self.config.experiment_dir}/structural_associations.csv",
                       "a") as f:
-                struct_assn = calculate_structural_associations(flat_node.detach().cpu(),
+                struct_assn = self.calculate_structural_associations(flat_node.detach().cpu(),
                                                          flat_denoised.detach().cpu(),
                                                          all_src, all_dst)
-                print(f"{datetime.datetime.now()},{struct_assn[0]},{strict_assn[1]}", file=f)
+                print(f"{datetime.datetime.now()},{struct_assn[0]},{struct_assn[1]}", file=f)
         initial_scores = (flat_node[all_src] * flat_node[all_dst]).sum(-1)
         final_scores = (flat_denoised[all_src] * flat_denoised[all_dst]).sum(-1)
         
@@ -149,10 +149,10 @@ class GraphLatentDiffusion(nn.Module):
     
         return (per_graph_loss / torch.bincount(all_batch).float()).mean()
 
-    def calculate_structural_associations(flat_node, flat_denoised, all_src,
+    def calculate_structural_associations(self, flat_node, flat_denoised, all_src,
                                           all_dst):
         with torch.no_grad():
-            mask = torch.zeros((flat_node, flat_node))
+            mask = torch.zeros((flat_node.shape[0], flat_node.shape[0]), dtype=torch.int8)
             mask[all_src, all_dst] = 1
             mask_sum = mask.sum()
             node_adj = torch.mm(flat_node, flat_node.T)
@@ -161,14 +161,14 @@ class GraphLatentDiffusion(nn.Module):
             max_denoised_recovery = 0
             for thresh in np.linspace(node_adj.mean() - node_adj.std(),
                                       node_adj.mean() + node_adj.std(), 9):
-                adj = node_adj > thresh
-                max_node_recovery = max(torch.bitwise_and(adj, mask)/mask_sum,
+                adj = (node_adj > thresh).to(dtype=torch.int8)
+                max_node_recovery = max(torch.bitwise_and(adj, mask).sum()/mask_sum,
                                         max_node_recovery)
             for thresh in np.linspace(denoised_adj.mean() - denoised_adj.std(),
                                       denoised_adj.mean() + denoised_adj.std(), 9):
-                adj = denoised_adj > thresh
-                max_denoised_recovery = max(torch.bitwise_and(adj, mask)/mask_sum,
-                                        max_node_recovery)
+                adj = (denoised_adj > thresh).to(dtype=torch.int8)
+                max_denoised_recovery = max(torch.bitwise_and(adj, mask).sum()/mask_sum,
+                                        max_denoised_recovery)
         return max_node_recovery, max_denoised_recovery
 
 
@@ -182,11 +182,12 @@ class GraphLatentDiffusion(nn.Module):
         noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
         denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index_list)
         if np.random.rand() < 0.001:
-            plt.plot(denoised_embeddings.detach().cpu().reshape(-1))
+            plt.hist(denoised_embeddings.detach().cpu().reshape(-1))
             plt.savefig(
                 os.path.join(
-                    config.experiment_dir, "denoised_emb_dist_" +
+                    self.config.experiment_dir, "denoised_emb_dist_" +
                     "".join(np.random.choice(["a", "b", "c"], size=10))+".png"))
+            plt.clf()
         # If noise predictor:
         # sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
         # sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
