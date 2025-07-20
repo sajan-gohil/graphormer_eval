@@ -40,6 +40,7 @@ parser.add_argument("--enable_diffusion", action="store_true", help="Enable diff
 parser.add_argument("--optimize_diffuser", action="store_true", help="Optimize diffuser")
 parser.add_argument("--experiment_dir", type=str, default="./experiments", help="Directory to save experiment results")
 parser.add_argument("--name", type=str, default="graphormer_experiment", help="Name of the experiment")
+parser.add_argument("--diffusion_reconstruction_scale", type=float, default=0.0, help="How much to weigh diffusion reconstruction loss")
 args = parser.parse_args()
 
 args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
@@ -90,7 +91,8 @@ config = GraphormerConfig(
     edge_type=args.edge_type,
     enable_spatial_encoder=args.enable_spatial_encoder,
     enable_diffusion=args.enable_diffusion,
-    optimize_diffuser=args.optimize_diffuser
+    optimize_diffuser=args.optimize_diffuser,
+    diffusion_reconstruction_scale=args.diffusion_reconstruction_scale
 )
 
 model = GraphormerForGraphClassification(config)
@@ -172,11 +174,6 @@ for epoch in range(MAX_EPOCHS):
                 except:
                     batch[k] = [i.to(device) for i in batch[k]]
             labels = batch["labels"]
-            # outputs = model(**batch)
-            # Pass edge_index to model if present
-            #if "edge_index" in batch:
-            #    outputs = model(**batch, edge_index=batch["edge_index"])
-            #else:
             outputs = model(**batch)
             y_pred.append(outputs[1].view(-1).cpu())
             y_true.append(labels.view(-1).cpu())

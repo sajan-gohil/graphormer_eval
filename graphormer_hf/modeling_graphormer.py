@@ -20,7 +20,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, L1Loss
 from torch.optim import Adam
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
@@ -33,6 +33,7 @@ from .configuration_graphormer import GraphormerConfig
 
 # Add import for diffusion
 from graph_diffusion import GraphLatentDiffusion
+import numpy as np
 
 logger = logging.get_logger(__name__)
 
@@ -799,7 +800,11 @@ class GraphormerModel(GraphormerPreTrainedModel):
         self.layer_norm = nn.LayerNorm(config.embedding_dim)
 
         if config.enable_diffusion:
-            self.diffusion_model = GraphLatentDiffusion(input_dim=config.embedding_dim, latent_dim=config.embedding_dim, num_denoising_steps=diffusion_steps)
+            self.diffusion_model = GraphLatentDiffusion(
+                input_dim=config.embedding_dim,
+                latent_dim=config.embedding_dim,
+                num_denoising_steps=diffusion_steps,
+                config=config)
             # self.diffusion_optimizer = Adam(self.diffusion_model.parameters(), lr=1e-4)
         else:
             self.diffusion_model = None
@@ -938,7 +943,8 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             mask = ~torch.isnan(labels)
 
             if self.num_classes == 1:  # regression
-                loss_fct = MSELoss()
+                # loss_fct = MSELoss()
+                loss_fct = L1Loss()
                 loss = loss_fct(logits[mask].squeeze(), labels[mask].squeeze().float())
             elif self.num_classes > 1 and len(labels.shape) == 1:  # One task classification
                 loss_fct = CrossEntropyLoss()
