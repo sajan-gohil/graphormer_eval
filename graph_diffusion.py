@@ -128,7 +128,13 @@ class GraphLatentDiffusion(nn.Module):
         # Flatten embeddings [B, N, D] -> [sum(N), D]
         flat_node = node_emb_normed.reshape(-1, node_emb_normed.size(-1))
         flat_denoised = denoised_emb_normed.reshape(-1, denoised_emb_normed.size(-1))
-    
+        if np.random.rand() < 0.01:
+            with open(f"{self.config.experiment_dir}/structural_associations.csv",
+                      "a") as f:
+                struct_assn = calculate_structural_associations(flat_node.detach().cpu(),
+                                                         flat_denoised.detach().cpu(),
+                                                         all_src, all_dst)
+                print(f"{struct_assn[0]},{strict_assn[1]}", file=f)
         initial_scores = (flat_node[all_src] * flat_node[all_dst]).sum(-1)
         final_scores = (flat_denoised[all_src] * flat_denoised[all_dst]).sum(-1)
         

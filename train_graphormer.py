@@ -183,6 +183,8 @@ for epoch in range(MAX_EPOCHS):
 
     input_dict = {"y_true": y_true.numpy(), "y_pred": y_pred.numpy()}
     valid_mae = evaluator.eval(input_dict)["mae"]
+    with open(f"{args.experiment_dir}/val_metric.csv", "a") as f:
+        f.write(f"epoch_{epoch},valid_mae\n")
 
     print(f"Validation MAE: {valid_mae:.6f}")
     if valid_mae < best_valid_mae:
