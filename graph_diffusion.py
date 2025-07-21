@@ -26,6 +26,9 @@ class GATv2Denoiser(nn.Module):
         self.gat1 = GATv2Conv(in_channels, hidden_channels, heads=heads)
         self.gat2 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads)
         self.out = nn.Linear(hidden_channels * heads, out_channels)
+        self.ln1 = nn.LayerNorm(hidden_channels*heads)
+        self.ln2 = nn.LayerNorm(hidden_channels*heads)
+        self.lnout = nn.LayerNorm(out_channels)
 
     def sample_forward(self, x, edge_index):
         x = torch.nn.functional.elu(self.gat1(x, edge_index))
@@ -141,7 +144,7 @@ class GraphLatentDiffusion(nn.Module):
         final_scores = (flat_denoised[all_src] * flat_denoised[all_dst]).sum(-1)
         
         with torch.no_grad():
-            threshold = torch.zeros_like(init_scores)
+            threshold = torch.zeros_like(initial_scores)
             for b in range(node_embeddings.size(0)):
                 mask = (all_batch == b)
                 threshold[mask] = initial_scores[mask].mean()
@@ -151,7 +154,7 @@ class GraphLatentDiffusion(nn.Module):
 
         per_graph_loss = torch.zeros(node_embeddings.size(0), device=node_embeddings.device)
         # per_graph_loss.index_add_(0, all_batch, -(recall_final - recall_init))
-        per_graph_loss.index_add_(0, all_batch, -(recall_final))
+        per_graph_loss.index_add_(0, all_batch, -torch.log(recall_final+1e-8))
         # per_graph_loss.index_add_(0, all_batch, F.relu(1 - (final_scores - initial_scores)))
     
         return (per_graph_loss / torch.bincount(all_batch).float()).mean()
@@ -161,7 +164,8 @@ class GraphLatentDiffusion(nn.Module):
         with torch.no_grad():
             mask = torch.zeros((flat_node.shape[0], flat_node.shape[0]), dtype=torch.int8)
             mask[all_src, all_dst] = 1
-            mask_sum = mask.sum()
+            # mask_sum = mask.sum()
+            mask_shape = mask.shape[0]**2
             node_adj = torch.mm(flat_node, flat_node.T)
             denoised_adj = torch.mm(flat_denoised, flat_denoised.T)
             max_node_recovery = 0
@@ -169,12 +173,13 @@ class GraphLatentDiffusion(nn.Module):
             for thresh in np.linspace(node_adj.mean() - node_adj.std(),
                                       node_adj.mean() + node_adj.std(), 9):
                 adj = (node_adj > thresh).to(dtype=torch.int8)
-                max_node_recovery = max((adj == mask).sum()/mask_sum,
+                # print("METRI adj=", adj.shape, "Mask=", mask.shape)
+                max_node_recovery = max((adj == mask).sum()/mask_shape,
                                         max_node_recovery)
             for thresh in np.linspace(denoised_adj.mean() - denoised_adj.std(),
                                       denoised_adj.mean() + denoised_adj.std(), 9):
                 adj = (denoised_adj > thresh).to(dtype=torch.int8)
-                max_denoised_recovery = max((adj == mask).sum()/mask_sum,
+                max_denoised_recovery = max((adj == mask).sum()/mask_shape,
                                         max_denoised_recovery)
         return max_node_recovery, max_denoised_recovery
 
@@ -188,11 +193,18 @@ class GraphLatentDiffusion(nn.Module):
         noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
         noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
         denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index_list)
+        denoised_embeddings = (denoised_embeddings - denoised_embeddings.mean(dim=-1, keepdim=True))/(denoised_embedding.std(dim=-1, keepdim=True) + 1e-6)
         if np.random.rand() < 0.001:
             plt.hist(denoised_embeddings.detach().cpu().reshape(-1))
             plt.savefig(
                 os.path.join(
                     self.config.experiment_dir, "denoised_emb_dist_" +
+                    "".join(np.random.choice(["a", "b", "c"], size=10))+".png"))
+            plt.clf()
+            plt.hist(node_embeddings.detach().cpu().reshape(-1))
+            plt.savefig(
+                os.path.join(
+                    self.config.experiment_dir, "node_emb_dist_" +
                     "".join(np.random.choice(["a", "b", "c"], size=10))+".png"))
             plt.clf()
         # If noise predictor:
@@ -203,7 +215,7 @@ class GraphLatentDiffusion(nn.Module):
         # Attention improvement loss
         attn_loss = self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index_list)
         reconstruction_loss = MSELoss()(node_embeddings, denoised_embeddings)
-        return denoised_embeddings, attn_loss + (reconstruction_loss*self.reconstruction_scale)
+        return denoised_embeddings, attn_loss*0.5 + (reconstruction_loss*self.reconstruction_scale)
 
 
 if __name__ == "__main__":
