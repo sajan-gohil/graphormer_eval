@@ -193,7 +193,7 @@ class GraphLatentDiffusion(nn.Module):
         noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
         noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
         denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index_list)
-        denoised_embeddings = (denoised_embeddings - denoised_embeddings.mean(dim=-1, keepdim=True))/(denoised_embedding.std(dim=-1, keepdim=True) + 1e-6)
+        denoised_embeddings = (denoised_embeddings - denoised_embeddings.mean(dim=-1, keepdim=True))/(denoised_embeddings.std(dim=-1, keepdim=True) + 1e-6)
         if np.random.rand() < 0.001:
             plt.hist(denoised_embeddings.detach().cpu().reshape(-1))
             plt.savefig(
@@ -215,6 +215,7 @@ class GraphLatentDiffusion(nn.Module):
         # Attention improvement loss
         attn_loss = self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index_list)
         reconstruction_loss = MSELoss()(node_embeddings, denoised_embeddings)
+        # return denoised_embeddings, reconstruction_loss*self.reconstruction_scale
         return denoised_embeddings, attn_loss*0.5 + (reconstruction_loss*self.reconstruction_scale)
 
 
