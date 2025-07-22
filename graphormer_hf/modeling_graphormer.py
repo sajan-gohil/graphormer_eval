@@ -21,7 +21,7 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-
+from torch.optim import Adam
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
     BaseModelOutputWithNoAttention,
@@ -31,6 +31,8 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from .configuration_graphormer import GraphormerConfig
 
+# Add import for diffusion
+from graph_diffusion import GraphLatentDiffusion
 
 logger = logging.get_logger(__name__)
 
@@ -225,6 +227,7 @@ class GraphormerGraphAttnBias(nn.Module):
 
         self.edge_type = config.edge_type
         if self.edge_type == "multi_hop":
+            # print("IN MULTIHOP SHOULD NOT BE HERE")
             self.edge_dis_encoder = nn.Embedding(
                 config.num_edge_dis * config.num_attention_heads * config.num_attention_heads,
                 1,
@@ -260,6 +263,7 @@ class GraphormerGraphAttnBias(nn.Module):
 
         # edge feature
         if self.edge_type == "multi_hop":
+            # print("IN MULTIHOP 2 SHOULD NOT BE HERE")
             spatial_pos_ = spatial_pos.clone()
 
             spatial_pos_[spatial_pos_ == 0] = 1  # set pad to 1
@@ -628,6 +632,7 @@ class GraphormerGraphEncoder(nn.Module):
         last_state_only: bool = False,
         token_embeddings: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
+        edge_index: Optional[torch.LongTensor] = None,
     ) -> tuple[Union[torch.Tensor, list[torch.LongTensor]], torch.Tensor]:
         # compute padding mask. This is needed for multi-head attention
         data_x = input_nodes
@@ -774,7 +779,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
     this model with a downstream model of your choice, following the example in GraphormerForGraphClassification.
     """
 
-    def __init__(self, config: GraphormerConfig):
+    def __init__(self, config: GraphormerConfig, enable_diffusion: bool = True, diffusion_steps: int = 100):
         super().__init__(config)
         self.max_nodes = config.max_nodes
 
@@ -789,6 +794,14 @@ class GraphormerModel(GraphormerPreTrainedModel):
         self.lm_head_transform_weight = nn.Linear(config.embedding_dim, config.embedding_dim)
         self.activation_fn = ACT2FN[config.activation_fn]
         self.layer_norm = nn.LayerNorm(config.embedding_dim)
+
+        self.enable_diffusion = enable_diffusion
+        if self.enable_diffusion:
+            self.diffusion_model = GraphLatentDiffusion(input_dim=config.embedding_dim, latent_dim=config.embedding_dim, num_denoising_steps=diffusion_steps)
+            self.diffusion_optimizer = Adam(self.diffusion_model.parameters())
+        else:
+            self.diffusion_model = None
+            self.diffusion_optimizer = None
 
         self.post_init()
 
@@ -807,16 +820,47 @@ class GraphormerModel(GraphormerPreTrainedModel):
         perturb: Optional[torch.FloatTensor] = None,
         masked_tokens: None = None,
         return_dict: Optional[bool] = None,
-        **unused,
+        edge_index: Optional[torch.LongTensor] = None,
+#        **unused,
+         **kwargs
     ) -> Union[tuple[torch.LongTensor], BaseModelOutputWithNoAttention]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         inner_states, graph_rep = self.graph_encoder(
-            input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb
+            input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index
         )
 
         # last inner state, then revert Batch and Graph len
         input_nodes = inner_states[-1].transpose(0, 1)
+
+        # --- Diffusion integration ---
+        if self.enable_diffusion:
+            # input_nodes: [batch, num_nodes+1, hidden_dim] (includes graph token)
+            # Remove graph token for diffusion, then re-attach after
+            graph_token = input_nodes[:, :1, :]
+            node_emb = input_nodes[:, 1:, :]
+            # edge_index should be a list of edge_index tensors for each graph in batch
+            new_node_emb = []
+            # new_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index)
+            # print("OLD, NEW EMBEDDING SHAPE: ", node_emb.shape, new_emb.shape, "ATTENTION LOSS = ", attention_matching_loss)
+            #self.diffusion_optimizer.zero_grad()
+            #attention_matching_loss.backward(retain_graph=True)
+            #self.diffusion_optimizer.step()
+            attention_matching_losses = []
+            # node_emb = new_emb
+            for i in range(node_emb.shape[0]):
+                # edge_index[i]: [2, num_edges]
+                emb = node_emb[i]
+                ei = edge_index[i] if isinstance(edge_index, (list, tuple)) else edge_index
+                # If edge_index is batched, use per-graph, else use same for all
+                # print("Passing embedding: ", emb.shape, ei.shape)
+                new_emb, attention_matching_loss = self.diffusion_model(emb, ei)
+                if isinstance(new_emb, tuple):
+                    new_emb = new_emb[0]  # If model returns (loss, emb)
+                new_node_emb.append(new_emb.unsqueeze(0))
+            node_emb = torch.cat(new_node_emb, dim=0)
+            input_nodes = torch.cat([graph_token, node_emb], dim=1)
+        # --- End diffusion integration ---
 
         # project masked tokens only
         if masked_tokens is not None:
@@ -871,7 +915,9 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         attn_edge_type: torch.LongTensor,
         labels: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
-        **unused,
+        edge_index: Optional[torch.LongTensor] = None,
+         **kwargs
+#        **unused,
     ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -884,6 +930,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             spatial_pos,
             attn_edge_type,
             return_dict=True,
+            edge_index=edge_index
         )
         outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
 
