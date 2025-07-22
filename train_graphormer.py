@@ -40,7 +40,7 @@ parser.add_argument("--enable_diffusion", action="store_true", help="Enable diff
 parser.add_argument("--optimize_diffuser", action="store_true", help="Optimize diffuser")
 parser.add_argument("--experiment_dir", type=str, default="./experiments", help="Directory to save experiment results")
 parser.add_argument("--name", type=str, default="graphormer_experiment", help="Name of the experiment")
-parser.add_argument("--diffusion_reconstruction_scale", type=float, default=0.0, help="How much to weigh diffusion reconstruction loss")
+parser.add_argument("--reconstruction_scale", type=float, default=0.0, help="How much to weigh diffusion reconstruction loss")
 parser.add_argument("--onscreen_logs", action="store_true", help="print logs on screen instead of log files in experiment dir")
 parser.add_argument("--batch_size", type=int, default=512, help="number of graphs in a batch")
 args = parser.parse_args()
@@ -70,7 +70,7 @@ pyg_data = torch.load("pyg_dataset_ogb.pt", weights_only=False)
 # for i in range(len(pyg_data)):
 #     pyg_data[i].num_nodes = pyg_data[i].x.shape[0]
 # Create subsets
-train_dataset = Subset(pyg_data, train_idx[:len(train_idx) // 4])  # Use a smaller subset for faster training
+train_dataset = Subset(pyg_data, train_idx[:len(train_idx) // 10])  # Use a smaller subset for faster training
 valid_dataset = Subset(pyg_data, valid_idx)
 
 # Data loaders
@@ -78,8 +78,8 @@ BATCH_SIZE = args.batch_size  # 512
 
 collator = GraphormerDataCollator(on_the_fly_processing=True)
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, num_workers=2)
-valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE//4, shuffle=False, collate_fn=collator, num_workers=0)  # Val data has some big samples
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, num_workers=1)
+valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE//8, shuffle=False, collate_fn=collator, num_workers=1)  # Val data has some big samples
 
 # 2. Model Configuration - Graphormer-base
 config = GraphormerConfig(
@@ -95,7 +95,7 @@ config = GraphormerConfig(
     enable_spatial_encoder=args.enable_spatial_encoder,
     enable_diffusion=args.enable_diffusion,
     optimize_diffuser=args.optimize_diffuser,
-    diffusion_reconstruction_scale=args.diffusion_reconstruction_scale,
+    reconstruction_scale=args.reconstruction_scale,
     experiment_dir=args.experiment_dir
 )
 
@@ -113,8 +113,11 @@ ADAM_EPS = 1e-8
 BETA1, BETA2 = 0.9, 0.999
 GRAD_CLIP_NORM = 5.0
 
-optimizer = Adam(model.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
-diffusion_optimizer = Adam(model.encoder.diffusion_model.parameters(), lr=5e-4)
+param_list = [{"params": [i for n,i in model.named_parameters() if "diffusion_model" not in n], "lr":LEARNING_RATE}]
+if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model.parameters(), "lr": 2e-4}]
+optimizer = Adam(param_list, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
+
+# diffusion_optimizer = Adam(model.encoder.diffusion_model.parameters(), lr=1e-4)
 
 # Linear warmup and decay scheduler
 def lr_lambda(current_step):
@@ -130,7 +133,7 @@ scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 # 4. Training loop
 evaluator = PCQM4MEvaluator()
 step = 0
-MAX_EPOCHS = 50
+MAX_EPOCHS = 100
 best_valid_mae = float('inf')
 
 for epoch in range(MAX_EPOCHS):
@@ -154,11 +157,11 @@ for epoch in range(MAX_EPOCHS):
         loss = outputs.loss
 
         optimizer.zero_grad()
-        diffusion_optimizer.zero_grad()
+        # diffusion_optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
         optimizer.step()
-        diffusion_optimizer.step()
+        # diffusion_optimizer.step()
         scheduler.step()
 
         step += 1
