@@ -17,10 +17,11 @@
 import math
 from collections.abc import Iterable, Iterator
 from typing import Optional, Union
+import datetime
 
 import torch
 import torch.nn as nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, L1Loss
 from torch.optim import Adam
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
@@ -33,6 +34,7 @@ from .configuration_graphormer import GraphormerConfig
 
 # Add import for diffusion
 from graph_diffusion import GraphLatentDiffusion
+import numpy as np
 
 logger = logging.get_logger(__name__)
 
@@ -218,6 +220,7 @@ class GraphormerGraphAttnBias(nn.Module):
 
     def __init__(self, config: GraphormerConfig):
         super().__init__()
+        self.config = config
         self.num_heads = config.num_attention_heads
         self.multi_hop_max_dist = config.multi_hop_max_dist
 
@@ -233,8 +236,8 @@ class GraphormerGraphAttnBias(nn.Module):
                 1,
             )
 
-        self.spatial_pos_encoder = nn.Embedding(config.num_spatial, config.num_attention_heads, padding_idx=0)
-
+        if config.enable_spatial_encoder:
+            self.spatial_pos_encoder = nn.Embedding(config.num_spatial, config.num_attention_heads, padding_idx=0)
         self.graph_token_virtual_distance = nn.Embedding(1, config.num_attention_heads)
 
     def forward(
@@ -253,8 +256,9 @@ class GraphormerGraphAttnBias(nn.Module):
 
         # spatial pos
         # [n_graph, n_node, n_node, n_head] -> [n_graph, n_head, n_node, n_node]
-        spatial_pos_bias = self.spatial_pos_encoder(spatial_pos).permute(0, 3, 1, 2)
-        graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + spatial_pos_bias
+        if self.config.enable_spatial_encoder:
+            spatial_pos_bias = self.spatial_pos_encoder(spatial_pos).permute(0, 3, 1, 2)
+            graph_attn_bias[:, :, 1:, 1:] = graph_attn_bias[:, :, 1:, 1:] + spatial_pos_bias
 
         # reset spatial pos here
         t = self.graph_token_virtual_distance.weight.view(1, self.num_heads, 1)
@@ -781,6 +785,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
 
     def __init__(self, config: GraphormerConfig, enable_diffusion: bool = True, diffusion_steps: int = 100):
         super().__init__(config)
+        self.config = config
         self.max_nodes = config.max_nodes
 
         self.graph_encoder = GraphormerGraphEncoder(config)
@@ -795,10 +800,13 @@ class GraphormerModel(GraphormerPreTrainedModel):
         self.activation_fn = ACT2FN[config.activation_fn]
         self.layer_norm = nn.LayerNorm(config.embedding_dim)
 
-        self.enable_diffusion = enable_diffusion
-        if self.enable_diffusion:
-            self.diffusion_model = GraphLatentDiffusion(input_dim=config.embedding_dim, latent_dim=config.embedding_dim, num_denoising_steps=diffusion_steps)
-            self.diffusion_optimizer = Adam(self.diffusion_model.parameters())
+        if config.enable_diffusion:
+            self.diffusion_model = GraphLatentDiffusion(
+                input_dim=config.embedding_dim,
+                latent_dim=config.embedding_dim,
+                num_denoising_steps=diffusion_steps,
+                config=config)
+            # self.diffusion_optimizer = Adam(self.diffusion_model.parameters(), lr=1e-4)
         else:
             self.diffusion_model = None
             self.diffusion_optimizer = None
@@ -829,36 +837,23 @@ class GraphormerModel(GraphormerPreTrainedModel):
         inner_states, graph_rep = self.graph_encoder(
             input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index
         )
-
         # last inner state, then revert Batch and Graph len
         input_nodes = inner_states[-1].transpose(0, 1)
 
         # --- Diffusion integration ---
-        if self.enable_diffusion:
+        if self.config.enable_diffusion:
             # input_nodes: [batch, num_nodes+1, hidden_dim] (includes graph token)
             # Remove graph token for diffusion, then re-attach after
             graph_token = input_nodes[:, :1, :]
             node_emb = input_nodes[:, 1:, :]
             # edge_index should be a list of edge_index tensors for each graph in batch
-            new_node_emb = []
-            # new_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index)
-            # print("OLD, NEW EMBEDDING SHAPE: ", node_emb.shape, new_emb.shape, "ATTENTION LOSS = ", attention_matching_loss)
-            #self.diffusion_optimizer.zero_grad()
-            #attention_matching_loss.backward(retain_graph=True)
-            #self.diffusion_optimizer.step()
-            attention_matching_losses = []
-            # node_emb = new_emb
-            for i in range(node_emb.shape[0]):
-                # edge_index[i]: [2, num_edges]
-                emb = node_emb[i]
-                ei = edge_index[i] if isinstance(edge_index, (list, tuple)) else edge_index
-                # If edge_index is batched, use per-graph, else use same for all
-                # print("Passing embedding: ", emb.shape, ei.shape)
-                new_emb, attention_matching_loss = self.diffusion_model(emb, ei)
-                if isinstance(new_emb, tuple):
-                    new_emb = new_emb[0]  # If model returns (loss, emb)
-                new_node_emb.append(new_emb.unsqueeze(0))
-            node_emb = torch.cat(new_node_emb, dim=0)
+            node_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index)
+            # print("ATM LOSS = ", attention_matching_loss)
+            # if self.config.optimize_diffuser:
+            #     self.diffusion_optimizer.zero_grad()
+            #     attention_matching_loss.backward(retain_graph=True)
+            #     self.diffusion_optimizer.step()
+
             input_nodes = torch.cat([graph_token, node_emb], dim=1)
         # --- End diffusion integration ---
 
@@ -874,6 +869,10 @@ class GraphormerModel(GraphormerPreTrainedModel):
 
         if not return_dict:
             return tuple(x for x in [input_nodes, inner_states] if x is not None)
+        if self.config.optimize_diffuser:
+            return BaseModelOutputWithNoAttention(
+                last_hidden_state=input_nodes,
+                hidden_states=inner_states), attention_matching_loss
         return BaseModelOutputWithNoAttention(last_hidden_state=input_nodes, hidden_states=inner_states)
 
     def max_nodes(self):
@@ -895,6 +894,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
 
     def __init__(self, config: GraphormerConfig):
         super().__init__(config)
+        self.config = config
         self.encoder = GraphormerModel(config)
         self.embedding_dim = config.embedding_dim
         self.num_classes = config.num_classes
@@ -932,6 +932,8 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             return_dict=True,
             edge_index=edge_index
         )
+        if self.config.optimize_diffuser:
+            encoder_outputs, attention_matching_loss = encoder_outputs
         outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
 
         head_outputs = self.classifier(outputs)
@@ -942,7 +944,8 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             mask = ~torch.isnan(labels)
 
             if self.num_classes == 1:  # regression
-                loss_fct = MSELoss()
+                # loss_fct = MSELoss()
+                loss_fct = L1Loss()
                 loss = loss_fct(logits[mask].squeeze(), labels[mask].squeeze().float())
             elif self.num_classes > 1 and len(labels.shape) == 1:  # One task classification
                 loss_fct = CrossEntropyLoss()
@@ -951,6 +954,11 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
                 loss_fct = BCEWithLogitsLoss(reduction="sum")
                 loss = loss_fct(logits[mask], labels[mask])
 
+        if self.config.optimize_diffuser:
+            if np.random.rand() < 0.01:
+                with open(f"{self.config.experiment_dir}/losses.csv", "a") as f:
+                    print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)
+            loss = loss + attention_matching_loss
         if not return_dict:
             return tuple(x for x in [loss, logits, hidden_states] if x is not None)
         return SequenceClassifierOutput(loss=loss, logits=logits, hidden_states=hidden_states, attentions=None)

@@ -208,6 +208,7 @@ class GraphormerConfig(PretrainedConfig):
         self.vdim = vdim
         self.self_attention = self_attention
         self.bias = bias
+        self.experiment_dir = kwargs["experiment_dir"]
 
         super().__init__(
             pad_token_id=pad_token_id,
