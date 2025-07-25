@@ -20,9 +20,6 @@ def cosine_beta_schedule(timesteps, s=0.008):
 
 
 def linear_beta_schedule(timesteps, beta_start=1e-4, beta_end=0.02):
-    """
-    Linear schedule from beta_start up to beta_end over timesteps.
-    """
     return torch.linspace(beta_start, beta_end, steps=timesteps)
 
 
@@ -45,11 +42,8 @@ class GATv2Denoiser(nn.Module):
 
     def forward(self, x_batch, edge_index_list):
         """
-        Args:
             x_batch: Tensor of shape [B, N, F]
-            edge_index_list: list of [3, E_i] tensors
-        Returns:
-            Tensor of shape [B, N, out_features]
+            edge_index_list: list of [2, E_i] tensors
         """
         B, N, F = x_batch.shape
         data_list = []
@@ -79,8 +73,8 @@ class GraphLatentDiffusion(nn.Module):
         self.structure_scale = getattr(config, "structure_scale", 0.1)
         self.timestep_embeddings = nn.Embedding(num_denoising_steps, latent_dim)
         
-        # betas = cosine_beta_schedule(num_denoising_steps)
-        betas = linear_beta_schedule(num_denoising_steps)
+        betas = cosine_beta_schedule(num_denoising_steps)
+        # betas = linear_beta_schedule(num_denoising_steps)
         alphas = 1 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
         self.register_buffer("betas", betas)
@@ -107,7 +101,6 @@ class GraphLatentDiffusion(nn.Module):
         # Normalize embeddings
         node_emb_normed = F.normalize(node_embeddings, p=2, dim=-1)
         denoised_emb_normed = F.normalize(denoised_embeddings, p=2, dim=-1)
-
         # Concatenate all graphs into a single tensor for faster processing
         all_src = []
         all_dst = []
