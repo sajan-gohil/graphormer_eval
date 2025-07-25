@@ -47,6 +47,7 @@ parser.add_argument("--batch_size", type=int, default=512, help="number of graph
 parser.add_argument("--diffusion_type", type=str, default="x0", help='Type of diffusion predictor ["x0", "delta", "noise_pred"]')
 parser.add_argument("--detached_denoiser", action="store_true", help="Detach embedding before passing to diffusion module to separate denoiser training")
 parser.add_argument("--pretrained_weights", type=str, default=None, help="path to checkpoint pt file")
+parser.add_argument("--diffusion_steps", type=int, default=100, help="Number of diffusion steps for the model")
 
 args = parser.parse_args()
 

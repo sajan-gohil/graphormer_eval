@@ -788,7 +788,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
     this model with a downstream model of your choice, following the example in GraphormerForGraphClassification.
     """
 
-    def __init__(self, config: GraphormerConfig, enable_diffusion: bool = True, diffusion_steps: int = 100):
+    def __init__(self, config: GraphormerConfig, enable_diffusion: bool = True):
         super().__init__(config)
         self.config = config
         self.max_nodes = config.max_nodes
@@ -809,7 +809,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
             self.diffusion_model = GraphLatentDiffusion(
                 input_dim=config.embedding_dim,
                 latent_dim=config.embedding_dim,
-                num_denoising_steps=diffusion_steps,
+                num_denoising_steps=config.diffusion_steps,
                 config=config)
             # self.diffusion_optimizer = Adam(self.diffusion_model.parameters(), lr=1e-4)
         else:

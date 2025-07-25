@@ -34,12 +34,6 @@ class GATv2Denoiser(nn.Module):
         self.ln2 = nn.LayerNorm(hidden_channels*heads)
         self.lnout = nn.LayerNorm(out_channels)
 
-    def sample_forward(self, x, edge_index):
-        x = torch.nn.functional.elu(self.gat1(x, edge_index))
-        x = torch.nn.functional.elu(self.gat2(x, edge_index))
-        x = self.lnout(self.out(x))
-        return x
-
     def forward(self, x_batch, edge_index_list):
         """
             x_batch: Tensor of shape [B, N, F]
@@ -56,13 +50,13 @@ class GATv2Denoiser(nn.Module):
 
         x1 = torch.nn.functional.elu(self.gat1(batch.x, batch.edge_index))
         x2 = torch.nn.functional.elu(self.gat2(x1, batch.edge_index))
-        x = self.out(x2)
+        x = self.lnout(self.out(x2))
         out_per_graph = x.split(batch.batch.bincount().tolist(), dim=0)
         return torch.stack(out_per_graph, dim=0)  # Shape: [B, N, out_features] if N is fixed
 
 
 class GraphLatentDiffusion(nn.Module):
-    def __init__(self, input_dim=768, latent_dim=768, num_denoising_steps=50, config=None):
+    def __init__(self, input_dim=768, latent_dim=768, num_denoising_steps=100, config=None):
         super().__init__()
         print("MAKING LATENT DIFFUSION MODEL")
         self.input_dim = input_dim
@@ -73,7 +67,10 @@ class GraphLatentDiffusion(nn.Module):
         self.structure_scale = getattr(config, "structure_scale", 0.1)
         self.timestep_embeddings = nn.Embedding(num_denoising_steps, latent_dim)
         
-        betas = cosine_beta_schedule(num_denoising_steps)
+        if config.diffusion_type == "ddim":
+            betas = linear_beta_schedule(num_denoising_steps)
+        else:
+            betas = cosine_beta_schedule(num_denoising_steps)
         # betas = linear_beta_schedule(num_denoising_steps)
         alphas = 1 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
@@ -91,7 +88,71 @@ class GraphLatentDiffusion(nn.Module):
         sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
         noisy_x = sqrt_alpha * x + sqrt_one_minus_alpha * noise
         return noisy_x, noise
-    
+
+    def predict_x0_from_noise(self, noisy_x, noise_pred, t):
+        sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
+        sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
+        return (noisy_x - sqrt_one_minus_alpha * noise_pred) / sqrt_alpha
+
+    def optimize_diffusion(self, node_embeddings, edge_index_list):
+        """
+        Optimize only the diffusion model over all timesteps for this batch.
+        """
+        B = node_embeddings.size(0)
+        t = torch.tensor([self.num_denoising_steps - 1], device=node_embeddings.device).repeat(B)
+        noisy_x, true_noise = self.add_noise(node_embeddings.detach(), t)
+
+        x_t = noisy_x.clone()
+
+        for step in reversed(range(self.num_denoising_steps)):
+            t_step = torch.tensor([step], device=node_embeddings.device).repeat(B)
+            t_emb = self.timestep_embeddings(t_step).unsqueeze(1).expand(-1, x_t.size(1), -1)
+
+            noisy_with_t = torch.cat([x_t, t_emb], dim=-1)
+            noise_pred = self.denoiser(noisy_with_t, edge_index_list)
+
+            loss = MSELoss()(true_noise, noise_pred)
+            if self.config.optimize_diffuser:
+                self.diffusion_optimizer.zero_grad()
+                loss.backward()
+                self.diffusion_optimizer.step()
+
+            # Update x_t -> x_{t-1} (DDIM-like deterministic step)
+            x0_pred = self.predict_x0_from_noise(x_t, noise_pred, t_step)
+            if step > 0:
+                alpha_prev = self.alphas_cumprod[step - 1]
+                x_t = torch.sqrt(alpha_prev).unsqueeze(0).unsqueeze(-1) * x0_pred + \
+                      torch.sqrt(1 - alpha_prev).unsqueeze(0).unsqueeze(-1) * noise_pred
+
+        return x_t  # final denoised embeddings after training
+
+    def sample_diffusion(self, node_embeddings, edge_index_list):
+        """
+        Run deterministic DDIM-like sampling (no optimizer update).
+        """
+        B = node_embeddings.size(0)
+        t = torch.tensor([self.num_denoising_steps - 1], device=node_embeddings.device).repeat(B)
+        noisy_x, _ = self.add_noise(node_embeddings.detach(), t)
+
+        x_t = noisy_x.clone()
+
+        for step in reversed(range(self.num_denoising_steps)):
+            t_step = torch.tensor([step], device=node_embeddings.device).repeat(B)
+            t_emb = self.timestep_embeddings(t_step).unsqueeze(1).expand(-1, x_t.size(1), -1)
+
+            noisy_with_t = torch.cat([x_t, t_emb], dim=-1)
+            noise_pred = self.denoiser(noisy_with_t, edge_index_list)
+
+            x0_pred = self.predict_x0_from_noise(x_t, noise_pred, t_step)
+            if step > 0:
+                alpha_prev = self.alphas_cumprod[step - 1]
+                x_t = torch.sqrt(alpha_prev).unsqueeze(0).unsqueeze(-1) * x0_pred + \
+                      torch.sqrt(1 - alpha_prev).unsqueeze(0).unsqueeze(-1) * noise_pred
+            else:
+                x_t = x0_pred
+
+        return x_t
+
     def attention_improvement_loss(self,
                                    node_embeddings,
                                    denoised_embeddings,
@@ -197,7 +258,8 @@ class GraphLatentDiffusion(nn.Module):
             noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
         noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
         
-        denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index_list)
+        if not self.config.diffusion_type == "ddim":
+            denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index_list)
         
         if self.config.diffusion_type == "x0":
             reconstruction_loss = MSELoss()(node_embeddings, denoised_embeddings)
@@ -210,6 +272,13 @@ class GraphLatentDiffusion(nn.Module):
             sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)  # Remove more noise than added
             denoised_embeddings = (noisy_embeddings - sqrt_one_minus_alpha*denoised_embeddings)/sqrt_alpha
             denoised_embeddings = (0.1*node_embeddings) + (0.9*denoised_embeddings)
+        
+        elif self.config.diffusion_type == "ddim":
+            self.optimize_diffusion(node_embeddings, edge_index_list)
+            denoised_embeddings = self.sample_diffusion(node_embeddings, edge_index_list)
+            denoised_embeddings = 0.5 * denoised_embeddings + 0.5 * node_embeddings
+            reconstruction_loss = 0
+            
         self.log_embedding_distribution(node_embeddings, denoised_embeddings)
 
         # Attention improvement loss
