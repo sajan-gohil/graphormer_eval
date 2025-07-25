@@ -233,17 +233,18 @@ class GraphLatentDiffusion(nn.Module):
 
     def log_embedding_distribution(self, node_embeddings, denoised_embeddings):
         if np.random.rand() < 0.001:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             plt.hist(denoised_embeddings.detach().cpu().reshape(-1))
             plt.savefig(
                 os.path.join(
                     self.config.experiment_dir, "denoised_emb_dist_" +
-                    "".join(np.random.choice(["a", "b", "c"], size=10))+".png"))
+                    timestamp + ".png"))
             plt.clf()
             plt.hist(node_embeddings.detach().cpu().reshape(-1))
             plt.savefig(
                 os.path.join(
                     self.config.experiment_dir, "node_emb_dist_" +
-                    "".join(np.random.choice(["a", "b", "c"], size=10))+".png"))
+                    timestamp + ".png"))
             plt.clf()
 
     def forward(self, node_embeddings, edge_index_list):

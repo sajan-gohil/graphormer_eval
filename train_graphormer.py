@@ -107,12 +107,6 @@ config = GraphormerConfig(
 )
 
 model = GraphormerForGraphClassification(config)
-# model.encoder.enable_diffusion = True  # Enable diffusion
-if args.pretrained_weights:
-    weights = torch.load(args.pretrained_weights, weights_only=True)
-    model.load_state_dict(weights)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
 
 # 3. Optimizer and Scheduler
 LEARNING_RATE = 2e-4
@@ -127,8 +121,6 @@ param_list = [{"params": [i for n,i in model.named_parameters() if "diffusion_mo
 if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model.parameters(), "lr": 2e-4}]
 optimizer = Adam(param_list, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
 
-# diffusion_optimizer = Adam(model.encoder.diffusion_model.parameters(), lr=1e-4)
-
 # Linear warmup and decay scheduler
 def lr_lambda(current_step):
     if current_step < WARMUP_STEPS:
@@ -139,6 +131,18 @@ def lr_lambda(current_step):
     )
 
 scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+# Load pretrained weights if specified
+if args.pretrained_weights:
+    state_dicts = torch.load(args.pretrained_weights, weights_only=False)
+    model.load_state_dict(state_dicts["model"], strict=False)
+    optimizer.load_state_dict(state_dicts["optimizer"])
+    if "scheduler" in state_dicts:
+        scheduler.load_state_dict(state_dicts["scheduler"])
+    print(f"Loaded pretrained weights from {args.pretrained_weights}")
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
 
 # 4. Training loop
 evaluator = PCQM4MEvaluator()
@@ -206,7 +210,14 @@ for epoch in range(MAX_EPOCHS):
     print(f"Validation MAE: {valid_mae:.6f}")
     if valid_mae < best_valid_mae:
         best_valid_mae = valid_mae
-        torch.save(model.state_dict(), f"{args.experiment_dir}/training_checkpoints/best_model_{epoch}.pt")
+        torch.save(
+            {"model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "epoch": epoch,
+                "step": step},
+            f"{args.experiment_dir}/training_checkpoints/best_model_{epoch}.pt"
+        )
         print("Best model updated.")
 
     if step >= MAX_STEPS:
