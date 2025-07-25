@@ -204,8 +204,10 @@ class GraphLatentDiffusion(nn.Module):
         # per_graph_loss.index_add_(0, all_batch, -(recall_final - recall_init))
         per_graph_loss.index_add_(0, all_batch, -torch.log(recall_final+1e-8))
         # per_graph_loss.index_add_(0, all_batch, F.relu(1 - (final_scores - initial_scores)))
-    
-        return (per_graph_loss / torch.bincount(all_batch).float()).mean()
+        num_graphs = node_embeddings.size(0)
+        counts = torch.bincount(all_batch, minlength=num_graphs).float()
+        counts[counts == 0] = 1  # avoid division by zero
+        return (per_graph_loss / counts).mean()
 
     def calculate_structural_associations(self, flat_node, flat_denoised, all_src,
                                           all_dst):
