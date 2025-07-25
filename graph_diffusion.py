@@ -188,11 +188,11 @@ class GraphLatentDiffusion(nn.Module):
     def forward(self, node_embeddings, edge_index_list):
         # print("NODE EMBEDDINGS SHAPE = ", node_embeddings.shape)  # B, N, D
         B = node_embeddings.shape[0]
-        t = torch.randint(0, self.num_denoising_steps, (B,), device=node_embeddings.device)
+        t = torch.randint(0, self.num_denoising_steps-1, (B,), device=node_embeddings.device)
         t_emb = self.timestep_embeddings(t).unsqueeze(1).expand(-1, node_embeddings.size(1), -1)
 
         if self.config.detached_denoiser:
-            noisy_embeddings, true_noise = self.add_noise(node_embeddings.detach(), t)
+            noisy_embeddings, true_noise = self.add_noise(node_embeddings.detach().clone(), t)
         else:
             noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
         noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
@@ -205,10 +205,11 @@ class GraphLatentDiffusion(nn.Module):
             reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
             denoised_embeddings = node_embeddings + denoised_embeddings
         elif self.config.diffusion_type == "noise_pred":
+            reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
             sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
-            sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
+            sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)  # Remove more noise than added
             denoised_embeddings = (noisy_embeddings - sqrt_one_minus_alpha*denoised_embeddings)/sqrt_alpha
-
+            denoised_embeddings = (0.1*node_embeddings) + (0.9*denoised_embeddings)
         self.log_embedding_distribution(node_embeddings, denoised_embeddings)
 
         # Attention improvement loss

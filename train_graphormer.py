@@ -45,6 +45,7 @@ parser.add_argument("--structure_scale", type=float, default=0.0, help="How much
 parser.add_argument("--onscreen_logs", action="store_true", help="print logs on screen instead of log files in experiment dir")
 parser.add_argument("--batch_size", type=int, default=512, help="number of graphs in a batch")
 parser.add_argument("--diffusion_type", type=str, default="x0", help='Type of diffusion predictor ["x0", "delta", "noise_pred"]')
+parser.add_argument("--detached_denoiser", action="store_true", help="Detach embedding before passing to diffusion module to separate denoiser training")
 parser.add_argument("--pretrained_weights", type=str, default=None, help="path to checkpoint pt file")
 
 args = parser.parse_args()
@@ -95,13 +96,13 @@ config = GraphormerConfig(
     attention_dropout=0.1,
     activation_dropout=0.1,
     num_classes=1,
-    **args
+    **vars(args)
     # edge_type=args.edge_type,
     # enable_spatial_encoder=args.enable_spatial_encoder,
     # enable_diffusion=args.enable_diffusion,
     # optimize_diffuser=args.optimize_diffuser,
     # reconstruction_scale=args.reconstruction_scale,
-    # experiment_dir=args.experiment_dir,
+    # experiment_dir=args.experiment_dir
 )
 
 model = GraphormerForGraphClassification(config)
