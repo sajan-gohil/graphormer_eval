@@ -272,7 +272,14 @@ class GraphLatentDiffusion(nn.Module):
             sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
             sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)  # Remove more noise than added
             denoised_embeddings = (noisy_embeddings - sqrt_one_minus_alpha*denoised_embeddings)/sqrt_alpha
-            denoised_embeddings = (0.1*node_embeddings) + (0.9*denoised_embeddings)
+           
+            t_emb_2 = self.timestep_embeddings(1).unsqueeze(1).expand(-1, node_embeddings.size(1), -1)
+            last_noise_pred = self.denoiser(torch.cat([denoised_embeddings, t_emb_2], dim=-1), edge_index_list)
+           
+            sqrt_alpha_1 = self.sqrt_alphas_cumprod[1].unsqueeze(1).unsqueeze(2)
+            sqrt_one_minus_alpha_1 = self.sqrt_one_minus_alphas_cumprod[1].unsqueeze(1).unsqueeze(2)
+            denoised_embeddings = (denoised_embeddings - sqrt_one_minus_alpha_1*last_noise_pred)/sqrt_alpha
+            # denoised_embeddings = (0.1*node_embeddings) + (0.9*denoised_embeddings)
         
         elif self.config.diffusion_type == "ddim":
             self.optimize_diffusion(node_embeddings, edge_index_list)
