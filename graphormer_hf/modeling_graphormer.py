@@ -275,7 +275,12 @@ class GraphormerGraphAttnBias(nn.Module):
             spatial_pos_ = torch.where(spatial_pos_ > 1, spatial_pos_ - 1, spatial_pos_)
             if self.multi_hop_max_dist > 0:
                 spatial_pos_ = spatial_pos_.clamp(0, self.multi_hop_max_dist)
-                input_edges = input_edges[:, :, :, : self.multi_hop_max_dist, :]
+                try:
+                    input_edges = input_edges[:, :, :, : self.multi_hop_max_dist, :]
+                except:
+                    print(type(input_edges), self.multi_hop_max_dist)
+                    print(np.array(input_edges).shape)
+                    raise
             # [n_graph, n_node, n_node, max_dist, n_head]
 
             input_edges = self.edge_encoder(input_edges).mean(-2)
@@ -783,7 +788,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
     this model with a downstream model of your choice, following the example in GraphormerForGraphClassification.
     """
 
-    def __init__(self, config: GraphormerConfig, enable_diffusion: bool = True, diffusion_steps: int = 100):
+    def __init__(self, config: GraphormerConfig, enable_diffusion: bool = True):
         super().__init__(config)
         self.config = config
         self.max_nodes = config.max_nodes
@@ -804,7 +809,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
             self.diffusion_model = GraphLatentDiffusion(
                 input_dim=config.embedding_dim,
                 latent_dim=config.embedding_dim,
-                num_denoising_steps=diffusion_steps,
+                num_denoising_steps=config.diffusion_steps,
                 config=config)
             # self.diffusion_optimizer = Adam(self.diffusion_model.parameters(), lr=1e-4)
         else:

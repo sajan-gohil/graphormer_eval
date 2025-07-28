@@ -3,6 +3,16 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.autograd.set_detect_anomaly(True)
 
+# For tensor parallelism
+from transformers import enable_full_determinism
+try:
+    from transformers import infer_auto_device_map, dispatch_model
+    from transformers.utils import is_torch_tpu_available
+except ImportError:
+    infer_auto_device_map = None
+    dispatch_model = None
+    is_torch_tpu_available = lambda: False
+
 from torch.utils.data import DataLoader, Subset
 from torch.nn import functional as F
 from torch.optim import Adam
@@ -38,11 +48,18 @@ parser.add_argument("--edge_type", type=str, default="multi_hop", help="Type of 
 parser.add_argument("--enable_spatial_encoder", action="store_true", help="Enable spatial encoder")
 parser.add_argument("--enable_diffusion", action="store_true", help="Enable diffusion")
 parser.add_argument("--optimize_diffuser", action="store_true", help="Optimize diffuser")
+parser.add_argument("--tensor_parallel", action="store_true", help="Enable tensor parallelism on 2 GPUs (requires >=2 GPUs)")
 parser.add_argument("--experiment_dir", type=str, default="./experiments", help="Directory to save experiment results")
 parser.add_argument("--name", type=str, default="graphormer_experiment", help="Name of the experiment")
-parser.add_argument("--diffusion_reconstruction_scale", type=float, default=0.0, help="How much to weigh diffusion reconstruction loss")
+parser.add_argument("--reconstruction_scale", type=float, default=0.0, help="How much to weigh diffusion reconstruction loss")
+parser.add_argument("--structure_scale", type=float, default=0.0, help="How much to weigh diffusion reconstruction loss")
 parser.add_argument("--onscreen_logs", action="store_true", help="print logs on screen instead of log files in experiment dir")
 parser.add_argument("--batch_size", type=int, default=512, help="number of graphs in a batch")
+parser.add_argument("--diffusion_type", type=str, default="x0", help='Type of diffusion predictor ["x0", "delta", "noise_pred"]')
+parser.add_argument("--detached_denoiser", action="store_true", help="Detach embedding before passing to diffusion module to separate denoiser training")
+parser.add_argument("--pretrained_weights", type=str, default=None, help="path to checkpoint pt file")
+parser.add_argument("--diffusion_steps", type=int, default=100, help="Number of diffusion steps for the model")
+
 args = parser.parse_args()
 
 args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
@@ -70,7 +87,7 @@ pyg_data = torch.load("pyg_dataset_ogb.pt", weights_only=False)
 # for i in range(len(pyg_data)):
 #     pyg_data[i].num_nodes = pyg_data[i].x.shape[0]
 # Create subsets
-train_dataset = Subset(pyg_data, train_idx[:len(train_idx) // 4])  # Use a smaller subset for faster training
+train_dataset = Subset(pyg_data, train_idx[:len(train_idx) // 10])  # Use a smaller subset for faster training
 valid_dataset = Subset(pyg_data, valid_idx)
 
 # Data loaders
@@ -78,8 +95,8 @@ BATCH_SIZE = args.batch_size  # 512
 
 collator = GraphormerDataCollator(on_the_fly_processing=True)
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, num_workers=2)
-valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE//4, shuffle=False, collate_fn=collator, num_workers=0)  # Val data has some big samples
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, num_workers=1)
+valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE//8, shuffle=False, collate_fn=collator, num_workers=1)  # Val data has some big samples
 
 # 2. Model Configuration - Graphormer-base
 config = GraphormerConfig(
@@ -91,18 +108,28 @@ config = GraphormerConfig(
     attention_dropout=0.1,
     activation_dropout=0.1,
     num_classes=1,
-    edge_type=args.edge_type,
-    enable_spatial_encoder=args.enable_spatial_encoder,
-    enable_diffusion=args.enable_diffusion,
-    optimize_diffuser=args.optimize_diffuser,
-    diffusion_reconstruction_scale=args.diffusion_reconstruction_scale,
-    experiment_dir=args.experiment_dir
+    **vars(args)
+    # edge_type=args.edge_type,
+    # enable_spatial_encoder=args.enable_spatial_encoder,
+    # enable_diffusion=args.enable_diffusion,
+    # optimize_diffuser=args.optimize_diffuser,
+    # reconstruction_scale=args.reconstruction_scale,
+    # experiment_dir=args.experiment_dir
 )
 
+
 model = GraphormerForGraphClassification(config)
-# model.encoder.enable_diffusion = True  # Enable diffusion
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
+
+# Tensor parallelism: split model across 2 GPUs if requested
+if getattr(args, "tensor_parallel", False):
+    assert torch.cuda.device_count() >= 2, "Tensor parallelism requires at least 2 GPUs."
+    if infer_auto_device_map is not None and dispatch_model is not None:
+        device_map = {k: i % 2 for i, k in enumerate([name for name, _ in model.named_parameters()])}
+        # Use Hugging Face's device map utility for tensor parallel
+        model = dispatch_model(model, device_map={"": [0, 1]})
+        print("Model wrapped for tensor parallelism on GPUs 0 and 1.")
+    else:
+        print("Tensor parallelism requires transformers >=4.27.0. Proceeding without tensor parallelism.")
 
 # 3. Optimizer and Scheduler
 LEARNING_RATE = 2e-4
@@ -113,8 +140,9 @@ ADAM_EPS = 1e-8
 BETA1, BETA2 = 0.9, 0.999
 GRAD_CLIP_NORM = 5.0
 
-optimizer = Adam(model.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
-diffusion_optimizer = Adam(model.encoder.diffusion_model.parameters(), lr=5e-4)
+param_list = [{"params": [i for n,i in model.named_parameters() if "diffusion_model" not in n], "lr":LEARNING_RATE}]
+if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model.parameters(), "lr": 2e-4}]
+optimizer = Adam(param_list, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
 
 # Linear warmup and decay scheduler
 def lr_lambda(current_step):
@@ -127,10 +155,27 @@ def lr_lambda(current_step):
 
 scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 
+# Load pretrained weights if specified
+if args.pretrained_weights:
+    state_dicts = torch.load(args.pretrained_weights, weights_only=False)
+    model.load_state_dict(state_dicts["model"], strict=False)
+    optimizer.load_state_dict(state_dicts["optimizer"])
+    if "scheduler" in state_dicts:
+        scheduler.load_state_dict(state_dicts["scheduler"])
+    print(f"Loaded pretrained weights from {args.pretrained_weights}")
+
+
+# Only move to device if not tensor parallel (dispatch_model handles device placement)
+if not (getattr(args, "tensor_parallel", False) and infer_auto_device_map is not None and dispatch_model is not None):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+else:
+    device = torch.device("cuda:0")
+
 # 4. Training loop
 evaluator = PCQM4MEvaluator()
 step = 0
-MAX_EPOCHS = 50
+MAX_EPOCHS = 100
 best_valid_mae = float('inf')
 
 for epoch in range(MAX_EPOCHS):
@@ -154,11 +199,11 @@ for epoch in range(MAX_EPOCHS):
         loss = outputs.loss
 
         optimizer.zero_grad()
-        diffusion_optimizer.zero_grad()
+        # diffusion_optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
         optimizer.step()
-        diffusion_optimizer.step()
+        # diffusion_optimizer.step()
         scheduler.step()
 
         step += 1
@@ -193,7 +238,14 @@ for epoch in range(MAX_EPOCHS):
     print(f"Validation MAE: {valid_mae:.6f}")
     if valid_mae < best_valid_mae:
         best_valid_mae = valid_mae
-        torch.save(model.state_dict(), f"{args.experiment_dir}/training_checkpoints/best_model_{epoch}.pt")
+        torch.save(
+            {"model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "epoch": epoch,
+                "step": step},
+            f"{args.experiment_dir}/training_checkpoints/best_model_{epoch}.pt"
+        )
         print("Best model updated.")
 
     if step >= MAX_STEPS:
