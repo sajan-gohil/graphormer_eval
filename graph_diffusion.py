@@ -29,9 +29,11 @@ class GATv2Denoiser(nn.Module):
         print("INITIALIZING DIFFUSION")
         self.gat1 = GATv2Conv(in_channels, hidden_channels, heads=heads)
         self.gat2 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads)
+        self.gat3 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads)
         self.out = nn.Linear(hidden_channels * heads, out_channels)
-        self.ln1 = nn.LayerNorm(hidden_channels*heads)
-        self.ln2 = nn.LayerNorm(hidden_channels*heads)
+        # self.linear1 = nn.Linear(hidden_channels * heads)
+        self.ln1 = nn.LayerNorm(hidden_channels * heads)
+        self.ln2 = nn.LayerNorm(hidden_channels * heads)
         self.lnout = nn.LayerNorm(out_channels)
 
     def forward(self, x_batch, edge_index_list):
@@ -50,6 +52,7 @@ class GATv2Denoiser(nn.Module):
 
         x1 = torch.nn.functional.elu(self.gat1(batch.x, batch.edge_index))
         x2 = torch.nn.functional.elu(self.gat2(x1, batch.edge_index))
+        # x3 = torch.nn.functional.elu(self.ln2(self.gat2(x2, batch.edge_index) + x1))
         x = self.lnout(self.out(x2))
         out_per_graph = x.split(batch.batch.bincount().tolist(), dim=0)
         return torch.stack(out_per_graph, dim=0)  # Shape: [B, N, out_features] if N is fixed
@@ -80,7 +83,7 @@ class GraphLatentDiffusion(nn.Module):
         self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1 - alphas_cumprod))
 
-        self.denoiser = GATv2Denoiser(input_dim+latent_dim, latent_dim, input_dim)
+        self.denoiser = GATv2Denoiser(input_dim+latent_dim, latent_dim//4, input_dim, heads=4)
         self.diffusion_optimizer = torch.optim.Adam(self.denoiser.parameters(), lr=1e-4)
 
     def add_noise(self, x, t):
@@ -287,7 +290,7 @@ class GraphLatentDiffusion(nn.Module):
             sqrt_alpha_1 = self.sqrt_alphas_cumprod[t_2].unsqueeze(1).unsqueeze(2)
             sqrt_one_minus_alpha_1 = self.sqrt_one_minus_alphas_cumprod[t_2].unsqueeze(1).unsqueeze(2)
             denoised_embeddings = (denoised_embeddings - sqrt_one_minus_alpha_1*last_noise_pred)/sqrt_alpha
-            denoised_embeddings = (denoised_embedding-denoised_embedding.mean())/denoised_embedding.std()
+            denoised_embeddings = (denoised_embeddings - denoised_embeddings.mean())/denoised_embeddings.std()
             # denoised_embeddings = (0.1*node_embeddings) + (0.9*denoised_embeddings)
         
         elif self.config.diffusion_type == "ddim":
