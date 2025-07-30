@@ -19,7 +19,7 @@ def cosine_beta_schedule(timesteps, s=0.008):
     return torch.clip(betas, 0, 0.999)
 
 
-def linear_beta_schedule(timesteps, beta_start=1e-4, beta_end=0.02):
+def linear_beta_schedule(timesteps, beta_start=1e-4, beta_end=0.01):
     return torch.linspace(beta_start, beta_end, steps=timesteps)
 
 
@@ -257,7 +257,7 @@ class GraphLatentDiffusion(nn.Module):
                     timestamp + ".png"))
             plt.clf()
 
-    def forward(self, node_embeddings, edge_index_list):
+    def forward(self, node_embeddings, edge_index_list, is_train=True):
         # print("NODE EMBEDDINGS SHAPE = ", node_embeddings.shape)  # B, N, D
         B = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps-1, (B,), device=node_embeddings.device)
@@ -294,7 +294,8 @@ class GraphLatentDiffusion(nn.Module):
             # denoised_embeddings = (0.1*node_embeddings) + (0.9*denoised_embeddings)
         
         elif self.config.diffusion_type == "ddim":
-            _ = self.optimize_diffusion(node_embeddings, edge_index_list)
+            if is_train:
+                _ = self.optimize_diffusion(node_embeddings, edge_index_list)
             denoised_embeddings = self.sample_diffusion(node_embeddings, edge_index_list)
             denoised_embeddings = 0.5 * denoised_embeddings + 0.5 * node_embeddings
             reconstruction_loss = 0

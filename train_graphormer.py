@@ -195,7 +195,7 @@ for epoch in range(MAX_EPOCHS):
                 except:
                     batch[k] = [i.to(device) for i in batch[k]]
             labels = batch["labels"]
-            outputs = model(**batch)
+            outputs = model(**batch, is_train=False)
             y_pred.append(outputs[1].view(-1).cpu())
             y_true.append(labels.view(-1).cpu())
 

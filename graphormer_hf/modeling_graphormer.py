@@ -834,6 +834,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
         masked_tokens: None = None,
         return_dict: Optional[bool] = None,
         edge_index: Optional[torch.LongTensor] = None,
+        is_train=True,
 #        **unused,
          **kwargs
     ) -> Union[tuple[torch.LongTensor], BaseModelOutputWithNoAttention]:
@@ -852,7 +853,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
             graph_token = input_nodes[:, :1, :]
             node_emb = input_nodes[:, 1:, :]
             # edge_index should be a list of edge_index tensors for each graph in batch
-            node_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index)
+            node_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index, is_train=is_train)
             # print("ATM LOSS = ", attention_matching_loss)
             # if self.config.optimize_diffuser:
             #     self.diffusion_optimizer.zero_grad()
@@ -921,6 +922,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         labels: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
         edge_index: Optional[torch.LongTensor] = None,
+        is_train = True,
          **kwargs
 #        **unused,
     ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
@@ -935,7 +937,8 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             spatial_pos,
             attn_edge_type,
             return_dict=True,
-            edge_index=edge_index
+            edge_index=edge_index,
+            is_train=is_train
         )
         if self.config.optimize_diffuser:
             encoder_outputs, attention_matching_loss = encoder_outputs
