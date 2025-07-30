@@ -3,6 +3,16 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.autograd.set_detect_anomaly(True)
 
+# For tensor parallelism
+from transformers import enable_full_determinism
+try:
+    from transformers import infer_auto_device_map, dispatch_model
+    from transformers.utils import is_torch_tpu_available
+except ImportError:
+    infer_auto_device_map = None
+    dispatch_model = None
+    is_torch_tpu_available = lambda: False
+
 from torch.utils.data import DataLoader, Subset
 from torch.nn import functional as F
 from torch.optim import Adam
@@ -38,6 +48,7 @@ parser.add_argument("--edge_type", type=str, default="multi_hop", help="Type of 
 parser.add_argument("--enable_spatial_encoder", action="store_true", help="Enable spatial encoder")
 parser.add_argument("--enable_diffusion", action="store_true", help="Enable diffusion")
 parser.add_argument("--optimize_diffuser", action="store_true", help="Optimize diffuser")
+parser.add_argument("--tensor_parallel", action="store_true", help="Enable tensor parallelism on 2 GPUs (requires >=2 GPUs)")
 parser.add_argument("--experiment_dir", type=str, default="./experiments", help="Directory to save experiment results")
 parser.add_argument("--name", type=str, default="graphormer_experiment", help="Name of the experiment")
 parser.add_argument("--reconstruction_scale", type=float, default=0.0, help="How much to weigh diffusion reconstruction loss")
@@ -106,7 +117,19 @@ config = GraphormerConfig(
     # experiment_dir=args.experiment_dir
 )
 
+
 model = GraphormerForGraphClassification(config)
+
+# Tensor parallelism: split model across 2 GPUs if requested
+if getattr(args, "tensor_parallel", False):
+    assert torch.cuda.device_count() >= 2, "Tensor parallelism requires at least 2 GPUs."
+    if infer_auto_device_map is not None and dispatch_model is not None:
+        device_map = {k: i % 2 for i, k in enumerate([name for name, _ in model.named_parameters()])}
+        # Use Hugging Face's device map utility for tensor parallel
+        model = dispatch_model(model, device_map={"": [0, 1]})
+        print("Model wrapped for tensor parallelism on GPUs 0 and 1.")
+    else:
+        print("Tensor parallelism requires transformers >=4.27.0. Proceeding without tensor parallelism.")
 
 # 3. Optimizer and Scheduler
 LEARNING_RATE = 2e-4
@@ -141,8 +164,13 @@ if args.pretrained_weights:
         scheduler.load_state_dict(state_dicts["scheduler"])
     print(f"Loaded pretrained weights from {args.pretrained_weights}")
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
+
+# Only move to device if not tensor parallel (dispatch_model handles device placement)
+if not (getattr(args, "tensor_parallel", False) and infer_auto_device_map is not None and dispatch_model is not None):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+else:
+    device = torch.device("cuda:0")
 
 # 4. Training loop
 evaluator = PCQM4MEvaluator()
