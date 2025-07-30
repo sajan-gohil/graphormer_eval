@@ -24,7 +24,7 @@ def convert_to_single_emb(x, offset: int = 512):
     return x
 
 
-def preprocess_item(item, keep_features=True):
+def preprocess_item(item, config, keep_features=True):
     requires_backends(preprocess_item, ["cython"])
 
     if keep_features and "edge_attr" in item.keys():  # edge_attr
@@ -40,7 +40,10 @@ def preprocess_item(item, keep_features=True):
 
     edge_index = np.asarray(item["edge_index"], dtype=np.int64)
 
-    input_nodes = convert_to_single_emb(node_feature) + 1
+    input_nodes = node_feature
+    if config and config.dataset_name in ["pcqm4mv2"]:
+        input_nodes = convert_to_single_emb(node_feature) + 1
+
     num_nodes = item["x"].shape[0]
 
     if len(edge_attr.shape) == 1:
@@ -76,16 +79,16 @@ def preprocess_item(item, keep_features=True):
 
 
 class GraphormerDataCollator:
-    def __init__(self, spatial_pos_max=20, on_the_fly_processing=False):
+    def __init__(self, spatial_pos_max=20, on_the_fly_processing=False, config=None):
         if not is_cython_available():
             raise ImportError("Graphormer preprocessing needs Cython (pyximport)")
-
+        self.config = config
         self.spatial_pos_max = spatial_pos_max
         self.on_the_fly_processing = on_the_fly_processing
 
     def __call__(self, features: list[dict]) -> dict[str, Any]:
         if self.on_the_fly_processing:
-            features = [preprocess_item(i) for i in features]
+            features = [preprocess_item(i, config=self.config) for i in features]
 
         if not isinstance(features[0], Mapping):
             features = [vars(f) for f in features]

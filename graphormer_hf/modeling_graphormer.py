@@ -179,10 +179,13 @@ class GraphormerGraphNodeFeature(nn.Module):
 
     def __init__(self, config: GraphormerConfig):
         super().__init__()
+        self.config = config
         self.num_heads = config.num_attention_heads
         self.num_atoms = config.num_atoms
 
         self.atom_encoder = nn.Embedding(config.num_atoms + 1, config.hidden_size, padding_idx=config.pad_token_id)
+        self.feature_encoder = nn.LazyLinear(config.hidden_size//4)
+        self.feature_encoder_2 = nn.Linear(config.hidden_size//4, config.hidden_size)
         self.in_degree_encoder = nn.Embedding(
             config.num_in_degree, config.hidden_size, padding_idx=config.pad_token_id
         )
@@ -199,12 +202,20 @@ class GraphormerGraphNodeFeature(nn.Module):
         out_degree: torch.LongTensor,
     ) -> torch.Tensor:
         n_graph, n_node = input_nodes.size()[:2]
-
-        node_feature = (  # node feature + graph token
-            self.atom_encoder(input_nodes).sum(dim=-2)  # [n_graph, n_node, n_hidden]
-            + self.in_degree_encoder(in_degree)
-            + self.out_degree_encoder(out_degree)
-        )
+        print("Input nodes:", input_nodes.shape)
+        if self.config.dataset_name not in ["pcqm4mv2"]:
+            node_feature = (
+               self.feature_encoder_2(nn.functional.relu(self.feature_encoder(input_nodes.to(dtype=torch.float32))))
+               + self.in_degree_encoder(in_degree)
+               + self.out_degree_encoder(out_degree)
+            )
+            print("Processed")
+        else:
+            node_feature = (  # node feature + graph token
+                self.atom_encoder(input_nodes).sum(dim=-2)  # [n_graph, n_node, n_hidden]
+                + self.in_degree_encoder(in_degree)
+                + self.out_degree_encoder(out_degree)
+            )
 
         graph_token_feature = self.graph_token.weight.unsqueeze(0).repeat(n_graph, 1, 1)
 

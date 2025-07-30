@@ -111,7 +111,7 @@ dataset_classes = {
 # 2. Model Configuration - Graphormer-base
 config = GraphormerConfig(
     num_hidden_layers=12,
-    embedding_dim=768,
+    embedding_dim=768//4,
     ffn_embedding_dim=768,
     num_attention_heads=32,
     dropout=0.0,
@@ -207,6 +207,7 @@ for epoch in range(MAX_EPOCHS):
         assert "edge_index" in batch.keys()
         # print("batch index len = ", len(batch["edge_index"]))
         outputs = model(**batch)
+        print("Forwarded")
         # loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
         loss = outputs.loss
 

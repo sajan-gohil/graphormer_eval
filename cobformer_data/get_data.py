@@ -10,7 +10,7 @@ from torch_geometric.utils import add_remaining_self_loops, to_undirected, remov
 from torch_geometric.utils import scatter
 import torch_geometric.transforms as T
 from infomap import Infomap
-from Data.data_utils import *
+from .data_utils import *
 from ogb.nodeproppred import NodePropPredDataset
 import scipy
 import scipy.io
