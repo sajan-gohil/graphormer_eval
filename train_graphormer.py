@@ -19,10 +19,11 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 
-from ogb.lsc import PCQM4Mv2Dataset, PCQM4MEvaluator
-from graphormer_hf.modeling_graphormer import GraphormerForGraphClassification
+from ogb.lsc import PCQM4MEvaluator
+from graphormer_hf.modeling_graphormer import GraphormerForGraphClassification, GraphormerForNodeClassification
 from graphormer_hf.configuration_graphormer import GraphormerConfig
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
+import dataset_utils
 
 import os
 import sys
@@ -58,7 +59,9 @@ parser.add_argument("--batch_size", type=int, default=512, help="number of graph
 parser.add_argument("--diffusion_type", type=str, default="x0", help='Type of diffusion predictor ["x0", "delta", "noise_pred"]')
 parser.add_argument("--detached_denoiser", action="store_true", help="Detach embedding before passing to diffusion module to separate denoiser training")
 parser.add_argument("--pretrained_weights", type=str, default=None, help="path to checkpoint pt file")
-parser.add_argument("--diffusion_steps", type=int, default=100, help="Number of diffusion steps for the model")
+parser.add_argument("--diffusion_steps", type=int, default=50, help="Number of diffusion steps for the model")
+parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for data loading")
+parser.add_argument("--dataset_name", type=str, default="pcqm4mv2", help="Name of the dataset to use")
 
 args = parser.parse_args()
 
@@ -76,28 +79,35 @@ shutil.copy("graph_diffusion.py", args.experiment_dir)
 shutil.copytree("graphormer_hf/", os.path.join(args.experiment_dir, "graphormer_hf"))
 shutil.copy("train_graphormer.py", args.experiment_dir)
 
-# 1. Dataset setup
-split_dict = torch.load("split_dict.pt", weights_only=False)
-train_idx = split_dict['train']
-valid_idx = split_dict['valid']
-
-# Load preprocessed pyg graph objects
-pyg_data = torch.load("pyg_dataset_ogb.pt", weights_only=False)
-# # Assign num_nodes attribute
-# for i in range(len(pyg_data)):
-#     pyg_data[i].num_nodes = pyg_data[i].x.shape[0]
-# Create subsets
-train_dataset = Subset(pyg_data, train_idx[:len(train_idx) // 10])  # Use a smaller subset for faster training
-valid_dataset = Subset(pyg_data, valid_idx)
-
-# Data loaders
 BATCH_SIZE = args.batch_size  # 512
 
+# 1. Dataset setup
+# split_dict = torch.load("split_dict.pt", weights_only=False)
+# train_idx = split_dict['train']
+# valid_idx = split_dict['valid']
+
+# # Load preprocessed pyg graph objects
+# pyg_data = torch.load("pyg_dataset_ogb.pt", weights_only=False)
+# # Create subsets
+# train_dataset = Subset(pyg_data, train_idx[:len(train_idx) // 10])  # Use a smaller subset for faster training
+# valid_dataset = Subset(pyg_data, valid_idx)
+
+# # Data loaders
 collator = GraphormerDataCollator(on_the_fly_processing=True)
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, num_workers=1)
-valid_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE//8, shuffle=False, collate_fn=collator, num_workers=1)  # Val data has some big samples
-
+train_loader, valid_loader, test_loader = dataset_utils.load_data(args.dataset_name, num_workers=args.num_workers)
+# train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, num_workers=1)
+# val_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE//8, shuffle=False, collate_fn=collator, num_workers=1)  # Val data has some big samples
+dataset_classes = {
+    "cora": 7,
+    "citeseer": 6,
+    "pubmed": 3,
+    "film": 5,
+    "deezer": 6,
+    "ogbn-arxiv": 40,
+    "ogbn-products": 47,
+    "pcqm4mv2": 1,  # Regression task
+}
 # 2. Model Configuration - Graphormer-base
 config = GraphormerConfig(
     num_hidden_layers=12,
@@ -107,7 +117,7 @@ config = GraphormerConfig(
     dropout=0.0,
     attention_dropout=0.1,
     activation_dropout=0.1,
-    num_classes=1,
+    num_classes=dataset_classes[args.dataset_name],  # Default to 1 for regression tasks
     **vars(args)
     # edge_type=args.edge_type,
     # enable_spatial_encoder=args.enable_spatial_encoder,
@@ -117,8 +127,10 @@ config = GraphormerConfig(
     # experiment_dir=args.experiment_dir
 )
 
-
-model = GraphormerForGraphClassification(config)
+if args.dataset_name == "pcqm4mv2":
+    model = GraphormerForGraphClassification(config)
+else:
+    model = GraphormerForNodeClassification(config)
 
 # Tensor parallelism: split model across 2 GPUs if requested
 if getattr(args, "tensor_parallel", False):

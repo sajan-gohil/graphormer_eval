@@ -942,7 +942,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
 
         head_outputs = self.classifier(outputs)
-        logits = head_outputs[:, 0, :].contiguous()
+        logits = head_outputs[:, 0, :].contiguous()  # Graph/CLS token
 
         loss = None
         if labels is not None:
@@ -969,4 +969,94 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         return SequenceClassifierOutput(loss=loss, logits=logits, hidden_states=hidden_states, attentions=None)
 
 
-__all__ = ["GraphormerForGraphClassification", "GraphormerModel", "GraphormerPreTrainedModel"]
+class GraphormerForNodeClassification(GraphormerPreTrainedModel):
+    """
+    This model can be used for node-level classification or regression tasks.
+
+    It can be trained on
+    - regression (by setting config.num_classes to 1); there should be one float-type label per node
+    - single-task classification (by setting config.num_classes to the number of classes); there should be one integer label per node
+    - binary multi-task classification (by setting config.num_classes to the number of labels); there should be a list of integer labels for each node.
+    """
+
+    def __init__(self, config: GraphormerConfig):
+        super().__init__(config)
+        self.config = config
+        self.encoder = GraphormerModel(config)
+        self.embedding_dim = config.embedding_dim
+        self.num_classes = config.num_classes
+        self.classifier = GraphormerDecoderHead(self.embedding_dim, self.num_classes)
+        self.is_encoder_decoder = True
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def forward(
+        self,
+        input_nodes: torch.LongTensor,
+        input_edges: torch.LongTensor,
+        attn_bias: torch.Tensor,
+        in_degree: torch.LongTensor,
+        out_degree: torch.LongTensor,
+        spatial_pos: torch.LongTensor,
+        attn_edge_type: torch.LongTensor,
+        labels: Optional[torch.LongTensor] = None,
+        return_dict: Optional[bool] = None,
+        edge_index: Optional[torch.LongTensor] = None,
+        node_mask: Optional[torch.BoolTensor] = None,
+        **kwargs
+    ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        encoder_outputs = self.encoder(
+            input_nodes,
+            input_edges,
+            attn_bias,
+            in_degree,
+            out_degree,
+            spatial_pos,
+            attn_edge_type,
+            return_dict=True,
+            edge_index=edge_index
+        )
+        if self.config.optimize_diffuser:
+            encoder_outputs, attention_matching_loss = encoder_outputs
+        outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
+
+        # outputs: [batch, num_nodes+1, hidden_dim] (first token is graph token)
+        node_outputs = outputs[:, 1:, :]  # remove graph token
+        logits = self.classifier(node_outputs)  # [batch, num_nodes, num_classes]
+
+        loss = None
+        if labels is not None:
+            # labels: [batch, num_nodes] or [batch, num_nodes, num_classes]
+            if node_mask is not None:  # node mask required for train/val/test masks. graph has all
+                mask = node_mask & ~torch.isnan(labels)
+            else:
+                mask = ~torch.isnan(labels)
+
+            if self.num_classes == 1:  # regression
+                loss_fct = L1Loss()
+                loss = loss_fct(logits[mask].squeeze(), labels[mask].squeeze().float())
+            elif self.num_classes > 1 and len(labels.shape) == 2:  # single-task classification
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits[mask].view(-1, self.num_classes), labels[mask].view(-1))
+            else:  # binary multi-task classification
+                loss_fct = BCEWithLogitsLoss(reduction="sum")
+                loss = loss_fct(logits[mask], labels[mask])
+
+        if self.config.optimize_diffuser:
+            if np.random.rand() < 0.01:
+                with open(f"{self.config.experiment_dir}/losses_node.csv", "a") as f:
+                    print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)
+            loss = loss + attention_matching_loss
+        if not return_dict:
+            return tuple(x for x in [loss, logits, hidden_states] if x is not None)
+        return SequenceClassifierOutput(loss=loss, logits=logits, hidden_states=hidden_states, attentions=None)
+
+__all__ = [
+    "GraphormerForGraphClassification",
+    "GraphormerForNodeClassification",
+    "GraphormerModel",
+    "GraphormerPreTrainedModel"
+]
