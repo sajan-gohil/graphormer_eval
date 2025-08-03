@@ -30,10 +30,15 @@ class GATv2Denoiser(nn.Module):
         self.gat1 = GATv2Conv(in_channels, hidden_channels, heads=heads)
         self.gat2 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads)
         self.gat3 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads)
+        self.gat4 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads)      
+        self.gat5 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads) 
         self.out = nn.Linear(hidden_channels * heads, out_channels)
         # self.linear1 = nn.Linear(hidden_channels * heads)
         self.ln1 = nn.LayerNorm(hidden_channels * heads)
         self.ln2 = nn.LayerNorm(hidden_channels * heads)
+        self.ln3 = nn.LayerNorm(hidden_channels * heads)
+        self.ln4 = nn.LayerNorm(hidden_channels * heads)
+        self.ln5 = nn.LayerNorm(hidden_channels * heads)
         self.lnout = nn.LayerNorm(out_channels)
 
     def forward(self, x_batch, edge_index_list):
@@ -50,10 +55,12 @@ class GATv2Denoiser(nn.Module):
 
         batch = Batch.from_data_list(data_list)  # Automatically handles indexing
 
-        x1 = torch.nn.functional.elu(self.gat1(batch.x, batch.edge_index))
-        x2 = torch.nn.functional.elu(self.gat2(x1, batch.edge_index))
-        # x3 = torch.nn.functional.elu(self.ln2(self.gat2(x2, batch.edge_index) + x1))
-        x = self.lnout(self.out(x2))
+        x1 = self.ln1(torch.nn.functional.elu(self.gat1(batch.x, batch.edge_index)))
+        x2 = self.ln2(torch.nn.functional.elu(self.gat2(x1, batch.edge_index)))
+        x3 = self.ln3(torch.nn.functional.elu(self.gat3(x2, batch.edge_index)))
+        x4 = self.ln4(torch.nn.functional.elu(self.gat4(x3, batch.edge_index)) + x2)
+        x5 = self.ln5(torch.nn.functional.elu(self.gat5(x4, batch.edge_index)) + x1)
+        x = self.lnout(self.out(x5))
         out_per_graph = x.split(batch.batch.bincount().tolist(), dim=0)
         return torch.stack(out_per_graph, dim=0)  # Shape: [B, N, out_features] if N is fixed
 
@@ -189,7 +196,7 @@ class GraphLatentDiffusion(nn.Module):
         # Flatten embeddings [B, N, D] -> [sum(N), D]
         flat_node = node_emb_normed.reshape(-1, node_emb_normed.size(-1))
         flat_denoised = denoised_emb_normed.reshape(-1, denoised_emb_normed.size(-1))
-        if np.random.rand() < 0.01:
+        if np.random.rand() < 0.1:
             with open(f"{self.config.experiment_dir}/structural_associations.csv",
                       "a") as f:
                 struct_assn = self.calculate_structural_associations(flat_node.detach().cpu(),
@@ -242,7 +249,7 @@ class GraphLatentDiffusion(nn.Module):
         return max_node_recovery, max_denoised_recovery
 
     def log_embedding_distribution(self, node_embeddings, denoised_embeddings):
-        if np.random.rand() < 0.001:
+        if np.random.rand() < 0.01:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             plt.hist(denoised_embeddings.detach().cpu().reshape(-1))
             plt.savefig(
