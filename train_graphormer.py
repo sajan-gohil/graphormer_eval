@@ -5,9 +5,13 @@ torch.autograd.set_detect_anomaly(True)
 
 # For tensor parallelism
 from transformers import enable_full_determinism
+from transformers.utils import logging
+from transformers.modeling_utils import get_parameter_device
+enable_full_determinism()
 try:
     from transformers import infer_auto_device_map, dispatch_model
-    from transformers.utils import is_torch_tpu_available
+    import torch_xla.core.xla_model as xm
+    _ = xm.xla_device()
 except ImportError:
     infer_auto_device_map = None
     dispatch_model = None
@@ -81,17 +85,6 @@ shutil.copy("train_graphormer.py", args.experiment_dir)
 
 BATCH_SIZE = args.batch_size  # 512
 
-# 1. Dataset setup
-# split_dict = torch.load("split_dict.pt", weights_only=False)
-# train_idx = split_dict['train']
-# valid_idx = split_dict['valid']
-
-# # Load preprocessed pyg graph objects
-# pyg_data = torch.load("pyg_dataset_ogb.pt", weights_only=False)
-# # Create subsets
-# train_dataset = Subset(pyg_data, train_idx[:len(train_idx) // 10])  # Use a smaller subset for faster training
-# valid_dataset = Subset(pyg_data, valid_idx)
-
 # # Data loaders
 collator = GraphormerDataCollator(on_the_fly_processing=True)
 
@@ -110,21 +103,15 @@ dataset_classes = {
 }
 # 2. Model Configuration - Graphormer-base
 config = GraphormerConfig(
-    num_hidden_layers=12,
-    embedding_dim=768//4,
+    num_hidden_layers=6,
+    embedding_dim=768,
     ffn_embedding_dim=768,
-    num_attention_heads=32,
+    num_attention_heads=16,
     dropout=0.0,
     attention_dropout=0.1,
     activation_dropout=0.1,
     num_classes=dataset_classes[args.dataset_name],  # Default to 1 for regression tasks
     **vars(args)
-    # edge_type=args.edge_type,
-    # enable_spatial_encoder=args.enable_spatial_encoder,
-    # enable_diffusion=args.enable_diffusion,
-    # optimize_diffuser=args.optimize_diffuser,
-    # reconstruction_scale=args.reconstruction_scale,
-    # experiment_dir=args.experiment_dir
 )
 
 if args.dataset_name == "pcqm4mv2":
@@ -136,9 +123,15 @@ else:
 if getattr(args, "tensor_parallel", False):
     assert torch.cuda.device_count() >= 2, "Tensor parallelism requires at least 2 GPUs."
     if infer_auto_device_map is not None and dispatch_model is not None:
-        device_map = {k: i % 2 for i, k in enumerate([name for name, _ in model.named_parameters()])}
-        # Use Hugging Face's device map utility for tensor parallel
-        model = dispatch_model(model, device_map={"": [0, 1]})
+        # device_map = {k: i % 2 for i, k in enumerate([name for name, _ in model.named_parameters()])}
+        if infer_auto_device_map is not None:
+            device_map = infer_auto_device_map(
+                model,
+                max_memory={i: "16GiB" for i in range(torch.cuda.device_count())},
+                # no_split_module_classes=["GraphormerBlock", "GraphormerMultiheadAttention"]  # Customize as needed
+            )
+            model = dispatch_model(model, device_map=device_map)
+            logger.info(f"Model dispatched across devices: {device_map}")
         print("Model wrapped for tensor parallelism on GPUs 0 and 1.")
     else:
         print("Tensor parallelism requires transformers >=4.27.0. Proceeding without tensor parallelism.")
