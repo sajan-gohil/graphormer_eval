@@ -18,6 +18,7 @@ from torch.nn import functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
+from sklearn.metrics import f1_score
 
 from ogb.lsc import PCQM4MEvaluator
 from graphormer_hf.modeling_graphormer import GraphormerForGraphClassification, GraphormerForNodeClassification
@@ -110,10 +111,10 @@ dataset_classes = {
 }
 # 2. Model Configuration - Graphormer-base
 config = GraphormerConfig(
-    num_hidden_layers=12,
-    embedding_dim=768//4,
+    num_hidden_layers=8,
+    embedding_dim=768,
     ffn_embedding_dim=768,
-    num_attention_heads=32,
+    num_attention_heads=8,
     dropout=0.0,
     attention_dropout=0.1,
     activation_dropout=0.1,
@@ -144,9 +145,9 @@ if getattr(args, "tensor_parallel", False):
         print("Tensor parallelism requires transformers >=4.27.0. Proceeding without tensor parallelism.")
 
 # 3. Optimizer and Scheduler
-LEARNING_RATE = 2e-4
+LEARNING_RATE = 5e-4
 WEIGHT_DECAY = 0.0
-WARMUP_STEPS = 60000
+WARMUP_STEPS = 10 # 60000
 MAX_STEPS = 1000000
 ADAM_EPS = 1e-8
 BETA1, BETA2 = 0.9, 0.999
@@ -187,7 +188,7 @@ else:
 # 4. Training loop
 evaluator = PCQM4MEvaluator()
 step = 0
-MAX_EPOCHS = 100
+MAX_EPOCHS = 1000
 best_valid_mae = float('inf')
 
 for epoch in range(MAX_EPOCHS):
@@ -206,8 +207,11 @@ for epoch in range(MAX_EPOCHS):
         # Pass edge_index to model if present
         assert "edge_index" in batch.keys()
         # print("batch index len = ", len(batch["edge_index"]))
-        outputs = model(**batch)
-        print("Forwarded")
+        # print(type(train_loader.dataset), dir(train_loader.dataset))
+        node_mask = getattr(train_loader.dataset[0], "train_mask", None)
+        if node_mask is not None:
+            node_mask = node_mask.to(device)
+        outputs = model(**batch, node_mask=node_mask)
         # loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
         loss = outputs.loss
 
@@ -235,20 +239,34 @@ for epoch in range(MAX_EPOCHS):
                     batch[k] = batch[k].to(device)
                 except:
                     batch[k] = [i.to(device) for i in batch[k]]
+            node_mask = getattr(valid_loader.dataset[0], "val_mask", None).view(-1)
+            if node_mask is not None:
+                node_mask = node_mask.to(device) & ~torch.isnan(labels.view(-1))
+            else:
+                node_mask = torch.ones(labels.shape, dtype=torch.int32)
             labels = batch["labels"]
-            outputs = model(**batch)
-            y_pred.append(outputs[1].view(-1).cpu())
-            y_true.append(labels.view(-1).cpu())
+            outputs = model(**batch, node_mask=node_mask)
+            # y_pred.append(outputs[1].view(-1).cpu())
+            if config.num_classes > 1:
+                y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
+            else:
+                y_pred.append(outputs[1].view(-1).cpu())
+            y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
 
     y_pred = torch.cat(y_pred, dim=0)
     y_true = torch.cat(y_true, dim=0)
-
+    
     input_dict = {"y_true": y_true.numpy(), "y_pred": y_pred.numpy()}
-    valid_mae = evaluator.eval(input_dict)["mae"]
+    if args.dataset_name in ["pcqm4mv2"]:
+        valid_mae = evaluator.eval(input_dict)["mae"]
+        valid_score = str(valid_mae)
+    else:
+        valid_score = f'{f1_score(y_true, y_pred, average="micro")},{f1_score(y_true, y_pred, average="macro")}'
+        valid_mae = f1_score(y_true, y_pred, average="micro")
     with open(f"{args.experiment_dir}/val_metric.csv", "a") as f:
-        f.write(f"epoch_{epoch},{valid_mae}\n")
+        f.write(f"epoch_{epoch},{valid_score}\n")
 
-    print(f"Validation MAE: {valid_mae:.6f}")
+    print(f"Validation MAE: {valid_score}")
     if valid_mae < best_valid_mae:
         best_valid_mae = valid_mae
         torch.save(

@@ -184,8 +184,8 @@ class GraphormerGraphNodeFeature(nn.Module):
         self.num_atoms = config.num_atoms
 
         self.atom_encoder = nn.Embedding(config.num_atoms + 1, config.hidden_size, padding_idx=config.pad_token_id)
-        self.feature_encoder = nn.LazyLinear(config.hidden_size//4)
-        self.feature_encoder_2 = nn.Linear(config.hidden_size//4, config.hidden_size)
+        self.feature_encoder = nn.LazyLinear(config.hidden_size)
+        self.feature_encoder_2 = nn.Linear(config.hidden_size, config.hidden_size)
         self.in_degree_encoder = nn.Embedding(
             config.num_in_degree, config.hidden_size, padding_idx=config.pad_token_id
         )
@@ -202,14 +202,14 @@ class GraphormerGraphNodeFeature(nn.Module):
         out_degree: torch.LongTensor,
     ) -> torch.Tensor:
         n_graph, n_node = input_nodes.size()[:2]
-        print("Input nodes:", input_nodes.shape)
+        # print("Input nodes:", input_nodes.shape)
         if self.config.dataset_name not in ["pcqm4mv2"]:
             node_feature = (
-               self.feature_encoder_2(nn.functional.relu(self.feature_encoder(input_nodes.to(dtype=torch.float32))))
+               self.feature_encoder(input_nodes.to(dtype=torch.float32))  # nn.functional.relu(self.feature_encoder(input_nodes.to(dtype=torch.float32))))
                + self.in_degree_encoder(in_degree)
                + self.out_degree_encoder(out_degree)
             )
-            print("Processed")
+            # print("Processed")
         else:
             node_feature = (  # node feature + graph token
                 self.atom_encoder(input_nodes).sum(dim=-2)  # [n_graph, n_node, n_hidden]
@@ -1042,6 +1042,7 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
         if labels is not None:
             # labels: [batch, num_nodes] or [batch, num_nodes, num_classes]
             if node_mask is not None:  # node mask required for train/val/test masks. graph has all
+                # print("MASK:", node_mask.device, "LABELS:", torch.isnan(labels).device)
                 mask = node_mask & ~torch.isnan(labels)
             else:
                 mask = ~torch.isnan(labels)
