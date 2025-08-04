@@ -4,11 +4,14 @@
 from collections.abc import Mapping
 from typing import Any
 
+import random
 import numpy as np
 import torch
 
 from transformers.utils import is_cython_available, requires_backends
-# from torch_geometric.utils import k_hop_subgraph
+from torch_geometric.data import Data
+from torch_geometric.utils import to_undirected
+
 from functools import lru_cache
 from torch import Tensor
 from torch_geometric.utils import maybe_num_nodes
@@ -212,8 +215,6 @@ class GraphormerDataCollator:
         edge_feat_size = len(features[0]["attn_edge_type"][0][0])
         max_dist = max(len(i["input_edges"][0][0]) for i in features)
         edge_input_size = len(features[0]["input_edges"][0][0][0])
-        # for i in features:
-        #     print("edge input size = ", i["input_edges"])
         batch_size = len(features)
 
         batch["attn_bias"] = torch.zeros(batch_size, max_node_num + 1, max_node_num + 1, dtype=torch.float)
@@ -225,6 +226,10 @@ class GraphormerDataCollator:
             batch_size, max_node_num, max_node_num, max_dist, edge_input_size, dtype=torch.long
         )
 
+        aug_added_edges = []  # List of (src, dst) tuples per graph
+        aug_removed_edges = []
+        aug_original_edges = []
+        # Auxiliary edge augmentation: add/remove random edges and record them for loss
         for ix, f in enumerate(features):
             for k in ["attn_bias", "attn_edge_type", "spatial_pos", "in_degree", "input_nodes", "input_edges"]:
                 f[k] = torch.tensor(f[k])
@@ -243,10 +248,30 @@ class GraphormerDataCollator:
                 ix, : f["input_edges"].shape[0], : f["input_edges"].shape[1], : f["input_edges"].shape[2], :
             ] = f["input_edges"]
 
-        batch["out_degree"] = batch["in_degree"]
+            # --- Augmentation ---
+            if self.config.augment_edges:
+                edge_index = torch.tensor(f["edge_index"], dtype=torch.long)
+                num_nodes = f["input_nodes"].shape[0]
+                # Make undirected for augmentation
+                edge_index = to_undirected(edge_index)
+                edge_set = set((int(edge_index[0, i]), int(edge_index[1, i])) for i in range(edge_index.shape[1]))
+                all_possible = set((i, j) for i in range(num_nodes) for j in range(num_nodes) if i != j)
+                non_edges = list(all_possible - edge_set)
+                # Randomly add/remove edges
+                n_add = max(1, int(0.05 * len(non_edges)))
+                n_remove = max(1, int(0.05 * edge_index.shape[1]))
+                added = random.sample(non_edges, min(n_add, len(non_edges))) if len(non_edges) > 0 else []
+                removed = random.sample(list(edge_set), min(n_remove, len(edge_set))) if len(edge_set) > 0 else []
+                aug_added_edges.append(torch.tensor(added, dtype=torch.long) if added else torch.empty((0,2), dtype=torch.long))
+                aug_removed_edges.append(torch.tensor(removed, dtype=torch.long) if removed else torch.empty((0,2), dtype=torch.long))
+                aug_original_edges.append(edge_index.clone())
 
-        # Add edge_index as a list of tensors (one per graph in batch)
-        batch["edge_index"] = [i["edge_index"] for i in features] # if "edge_index" in i]
+        batch["out_degree"] = batch["in_degree"]
+        batch["edge_index"] = [i["edge_index"] for i in features]
+
+        batch["aug_added_edges"] = aug_added_edges if aug_added_edges else None
+        batch["aug_removed_edges"] = aug_removed_edges if aug_removed_edges else None
+        batch["aug_original_edges"] = aug_original_edges if aug_original_edges else None
 
         sample = features[0]["labels"]
         if len(sample) == 1:  # one task
@@ -256,5 +281,4 @@ class GraphormerDataCollator:
                 batch["labels"] = torch.from_numpy(np.concatenate([i["labels"] for i in features]))
         else:  # multi task classification, left to float to keep the NaNs
             batch["labels"] = torch.from_numpy(np.stack([i["labels"] for i in features], axis=0))
-        # print("Batch keys:", batch.keys(), len(batch["edge_index"]))
         return batch

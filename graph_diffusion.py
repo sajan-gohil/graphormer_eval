@@ -295,7 +295,7 @@ class GraphLatentDiffusion(nn.Module):
                     timestamp + ".png"))
             plt.clf()
 
-    def forward(self, node_embeddings, edge_index_list):
+    def forward(self, node_embeddings, edge_index_list, aug_added_edges=None, aug_removed_edges=None, aug_original_edges=None):
         # print("NODE EMBEDDINGS SHAPE = ", node_embeddings.shape)  # B, N, D
         B = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps-1, (B,), device=node_embeddings.device)
@@ -343,8 +343,60 @@ class GraphLatentDiffusion(nn.Module):
         attn_loss = 0
         if self.structure_scale > 0:
             attn_loss = self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index_list)
-        return denoised_embeddings, (attn_loss*self.structure_scale) + (reconstruction_loss*self.reconstruction_scale)
 
+        # Auxiliary edge attention loss (if augmentation info provided)
+        aux_loss = 0
+        if aug_added_edges is not None and aug_removed_edges is not None and aug_original_edges is not None:
+            aux_loss = self.aux_edge_attention_loss(denoised_embeddings, aug_added_edges, aug_removed_edges, aug_original_edges)
+        total_loss = (attn_loss*self.structure_scale) + (reconstruction_loss*self.reconstruction_scale)
+        if aux_loss != 0:
+            total_loss = total_loss + 0.1 * aux_loss  # weight for aux loss
+        return denoised_embeddings, total_loss
+        # return denoised_embeddings, (attn_loss*self.structure_scale) + (reconstruction_loss*self.reconstruction_scale)
+
+    def aux_edge_attention_loss(self, denoised_embeddings, aug_added_edges, aug_removed_edges, aug_original_edges):
+        """
+        For each graph in batch:
+        - For randomly added edges: attention score should be close to zero.
+        - For randomly removed edges: attention score should be higher than for non-existing edges.
+        """
+        # denoised_embeddings: [B, N, D]
+        # aug_added_edges, aug_removed_edges, aug_original_edges: list of tensors per graph
+        losses = []
+        margin = 0.0
+        for b in range(denoised_embeddings.size(0)):
+            emb = denoised_embeddings[b]  # [N, D]
+            # Compute attention scores (dot product)
+            attn_scores = torch.matmul(emb, emb.T)  # [N, N]
+            # Clamp to [0,1] for interpretability
+            attn_scores = torch.sigmoid(attn_scores)
+            # Added edges: want attn ~ 0
+            added = aug_added_edges[b]
+            if added.numel() > 0:
+                added_scores = attn_scores[added[:,0], added[:,1]]
+                loss_added = (added_scores ** 2).mean()  # penalize nonzero
+            else:
+                loss_added = 0.0
+            # Removed edges: want attn > non-edge mean + margin
+            removed = aug_removed_edges[b]
+            orig = aug_original_edges[b]
+            if removed.numel() > 0:
+                removed_scores = attn_scores[removed[:,0], removed[:,1]]
+                # Compute mean of all non-edges (excluding original edges)
+                N = emb.size(0)
+                all_idx = torch.ones((N,N), dtype=torch.bool, device=emb.device)
+                all_idx[orig[0], orig[1]] = False
+                non_edge_scores = attn_scores[all_idx]
+                if non_edge_scores.numel() > 0:
+                    non_edge_mean = non_edge_scores.mean()
+                else:
+                    non_edge_mean = 0.0
+                # Encourage removed edge attn to be higher than non-edge mean + margin
+                loss_removed = torch.relu(non_edge_mean + margin - removed_scores).mean()
+            else:
+                loss_removed = 0.0
+            losses.append(loss_added + loss_removed)
+        return sum(losses) / max(1, len(losses))
 
 if __name__ == "__main__":
     from torch_geometric.utils import erdos_renyi_graph
