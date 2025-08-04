@@ -24,45 +24,76 @@ def linear_beta_schedule(timesteps, beta_start=1e-4, beta_end=0.02):
 
 
 class GATv2Denoiser(nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, heads=4):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=4, heads=4, use_linear=False, **kwargs):
         super().__init__()
-        print("INITIALIZING DIFFUSION")
-        self.gat1 = GATv2Conv(in_channels, hidden_channels, heads=heads)
-        self.gat2 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads)
-        self.gat3 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads)
-        self.gat4 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads)      
-        self.gat5 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads) 
-        self.out = nn.Linear(hidden_channels * heads, out_channels)
-        # self.linear1 = nn.Linear(hidden_channels * heads)
-        self.ln1 = nn.LayerNorm(hidden_channels * heads)
-        self.ln2 = nn.LayerNorm(hidden_channels * heads)
-        self.ln3 = nn.LayerNorm(hidden_channels * heads)
-        self.ln4 = nn.LayerNorm(hidden_channels * heads)
-        self.ln5 = nn.LayerNorm(hidden_channels * heads)
-        self.lnout = nn.LayerNorm(out_channels)
+        print("INITIALIZING GENERALIZED DENOISER")
+        self.use_linear = use_linear
+        self.num_layers = num_layers
+        self.heads = heads
+        self.hidden_channels = hidden_channels
+
+        self.down_blocks = nn.ModuleList()
+        self.down_norms = nn.ModuleList()
+        self.up_blocks = nn.ModuleList()
+        self.up_norms = nn.ModuleList()
+
+        # Build downsampling path
+        for i in range(num_layers):
+            in_dim = in_channels if i == 0 else hidden_channels * heads
+            out_dim = hidden_channels
+            if use_linear:
+                layer = nn.Linear(in_dim, out_dim)
+            else:
+                layer = GATv2Conv(in_dim, out_dim, heads=heads)
+            self.down_blocks.append(layer)
+            self.down_norms.append(nn.LayerNorm(out_dim * heads if not use_linear else out_dim))
+
+        # Build upsampling path (same number of layers, reverse direction)
+        for i in range(num_layers):
+            in_dim = hidden_channels * heads
+            out_dim = hidden_channels
+            if use_linear:
+                layer = nn.Linear(in_dim, out_dim)
+            else:
+                layer = GATv2Conv(in_dim, out_dim, heads=heads)
+            self.up_blocks.append(layer)
+            self.up_norms.append(nn.LayerNorm(out_dim * heads if not use_linear else out_dim))
+
+        final_in = hidden_channels * heads if not use_linear else hidden_channels
+        self.output_layer = nn.Linear(final_in, out_channels)
+        self.output_norm = nn.LayerNorm(out_channels)
 
     def forward(self, x_batch, edge_index_list):
-        """
-            x_batch: Tensor of shape [B, N, F]
-            edge_index_list: list of [2, E_i] tensors
-        """
         B, N, F = x_batch.shape
-        data_list = []
-
-        for b in range(B):
-            data = Data(x=x_batch[b], edge_index=edge_index_list[b])
-            data_list.append(data)
-
-        batch = Batch.from_data_list(data_list)  # Automatically handles indexing
-
-        x1 = self.ln1(torch.nn.functional.elu(self.gat1(batch.x, batch.edge_index)))
-        x2 = self.ln2(torch.nn.functional.elu(self.gat2(x1, batch.edge_index)))
-        x3 = self.ln3(torch.nn.functional.elu(self.gat3(x2, batch.edge_index)))
-        x4 = self.ln4(torch.nn.functional.elu(self.gat4(x3, batch.edge_index)) + x2)
-        x5 = self.ln5(torch.nn.functional.elu(self.gat5(x4, batch.edge_index)) + x1)
-        x = self.lnout(self.out(x5))
+        data_list = [Data(x=x_batch[b], edge_index=edge_index_list[b]) for b in range(B)]
+        batch = Batch.from_data_list(data_list)
+        x = batch.x
+        edge_index = batch.edge_index
+        skip_connections = []
+        # Down path
+        for i in range(self.num_layers):
+            layer = self.down_blocks[i]
+            norm = self.down_norms[i]
+            if self.use_linear:
+                x = F.elu(norm(layer(x)))
+            else:
+                x = F.elu(norm(layer(x, edge_index)))
+            skip_connections.append(x)
+        # Up path
+        for i in range(self.num_layers):
+            layer = self.up_blocks[i]
+            norm = self.up_norms[i]
+            skip_x = skip_connections[-(i + 2)] if i < self.num_layers - 1 else torch.zeros_like(x)
+            x = x + skip_x  # residual from down path
+            if self.use_linear:
+                x = F.elu(norm(layer(x)))
+            else:
+                x = F.elu(norm(layer(x, edge_index)))
+        # Final projection
+        x = self.output_norm(self.output_layer(x))
+        # Split batched graph output
         out_per_graph = x.split(batch.batch.bincount().tolist(), dim=0)
-        return torch.stack(out_per_graph, dim=0)  # Shape: [B, N, out_features] if N is fixed
+        return torch.stack(out_per_graph, dim=0)  # [B, N, out_channels]
 
 
 class GraphLatentDiffusion(nn.Module):
