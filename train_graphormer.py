@@ -67,6 +67,7 @@ parser.add_argument("--pretrained_weights", type=str, default=None, help="path t
 parser.add_argument("--diffusion_steps", type=int, default=50, help="Number of diffusion steps for the model")
 parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for data loading")
 parser.add_argument("--dataset_name", type=str, default="pcqm4mv2", help="Name of the dataset to use")
+parser.add_argument("--create_subgraph", action="store_true", help="Create subgraphs from given large graph")
 
 args = parser.parse_args()
 
@@ -85,13 +86,6 @@ shutil.copytree("graphormer_hf/", os.path.join(args.experiment_dir, "graphormer_
 shutil.copy("train_graphormer.py", args.experiment_dir)
 
 BATCH_SIZE = args.batch_size  # 512
-
-# # Data loaders
-collator = GraphormerDataCollator(on_the_fly_processing=True)
-
-train_loader, valid_loader, test_loader = dataset_utils.load_data(args.dataset_name, num_workers=args.num_workers)
-# train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collator, num_workers=1)
-# val_loader = DataLoader(valid_dataset, batch_size=BATCH_SIZE//8, shuffle=False, collate_fn=collator, num_workers=1)  # Val data has some big samples
 dataset_classes = {
     "cora": 7,
     "citeseer": 6,
@@ -114,6 +108,11 @@ config = GraphormerConfig(
     num_classes=dataset_classes[args.dataset_name],  # Default to 1 for regression tasks
     **vars(args)
 )
+
+# Data loaders
+collator = GraphormerDataCollator(on_the_fly_processing=True, config=config)
+
+train_loader, valid_loader, test_loader = dataset_utils.load_data(args.dataset_name, num_workers=args.num_workers)
 
 if args.dataset_name == "pcqm4mv2":
     model = GraphormerForGraphClassification(config)

@@ -8,7 +8,8 @@ import numpy as np
 import torch
 
 from transformers.utils import is_cython_available, requires_backends
-
+from torch_geometric.utils import k_hop_subgraph
+from functools import lru_cache
 
 if is_cython_available():
     import pyximport
@@ -23,7 +24,73 @@ def convert_to_single_emb(x, offset: int = 512):
     x = x + feature_offset
     return x
 
+def k_hop_subgraph(
+    node_idx: Union[int, List[int], Tensor],
+    num_hops: int,
+    edge_index: Tensor,
+    relabel_nodes: bool = False,
+    num_nodes: Optional[int] = None,
+    flow: str = 'source_to_target',
+    directed: bool = False,
+    sample_ratio_per_hop: Union[float, List[float]] = 1.0,
+    rng: Optional[torch.Generator] = None,
+) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    """From: https://pytorch-geometric.readthedocs.io/en/stable/_modules/torch_geometric/utils/_subgraph.html#k_hop_subgraph"""
+    num_nodes = maybe_num_nodes(edge_index, num_nodes)
 
+    assert flow in ['source_to_target', 'target_to_source']
+    if flow == 'target_to_source':
+        row, col = edge_index
+    else:
+        col, row = edge_index
+
+    node_mask = row.new_empty(num_nodes, dtype=torch.bool)
+    edge_mask = row.new_empty(row.size(0), dtype=torch.bool)
+
+    if isinstance(node_idx, int):
+        node_idx = torch.tensor([node_idx], device=row.device)
+    elif isinstance(node_idx, (list, tuple)):
+        node_idx = torch.tensor(node_idx, device=row.device)
+    else:
+        node_idx = node_idx.to(row.device)
+
+    subsets = [node_idx]
+
+    for _ in range(num_hops):
+        node_mask.fill_(False)
+        node_mask[subsets[-1]] = True
+        # torch.index_select(node_mask, 0, row, out=edge_mask)
+        # subsets.append(col[edge_mask])
+        # Sample only a subset of edges at this hop
+        idx = edge_mask_hop.nonzero(as_tuple=False).view(-1)
+        num_sample = int(sample_ratio_per_hop[hop] * idx.size(0))
+        if num_sample < idx.size(0):
+            perm = torch.randperm(idx.size(0), generator=rng, device=idx.device)[:num_sample]
+            idx = idx[perm]
+
+        edge_mask[idx] = True
+        subsets.append(col[idx])
+
+    subset, inv = torch.cat(subsets).unique(return_inverse=True)
+    inv = inv[:node_idx.numel()]
+
+    node_mask.fill_(False)
+    node_mask[subset] = True
+
+    if not directed:
+        edge_mask = node_mask[row] & node_mask[col]
+
+    edge_index = edge_index[:, edge_mask]
+
+    if relabel_nodes:
+        mapping = row.new_full((num_nodes, ), -1)
+        mapping[subset] = torch.arange(subset.size(0), device=row.device)
+        edge_index = mapping[edge_index]
+
+    return subset, edge_index, inv, edge_mask
+
+
+@lru_cache(maxsize=512)
 def preprocess_item(item, config, keep_features=True):
     requires_backends(preprocess_item, ["cython"])
 
@@ -86,7 +153,49 @@ class GraphormerDataCollator:
         self.spatial_pos_max = spatial_pos_max
         self.on_the_fly_processing = on_the_fly_processing
 
+    def sample_subgraph(self, graphs):
+        subgraphs = []
+        for graph in graphs:
+            node_set = set(list(range(graph.x.shape[0])))
+            while node_set:
+                node_idx = node_set.pop()
+                subset, edge_index, mapping, edge_mask = k_hop_subgraph(
+                    node_idx,
+                    num_hops=10,
+                    edge_index=graph.edge_index,
+                    relabel_nodes=False,
+                    num_nodes=graph.x.shape[0],
+                    flow="target_to_source",
+                    directed=True,
+                    sample_ratio_per_hop=0.5,
+                )
+                for i in subset:
+                    if i in node_set:
+                        node_set.remove(i)
+                x_sub = data.x[subset]
+                y_sub = data.y[subset]
+                edge_attr = data.edge_attr[edge_mask]
+                # Optional masks (check if they exist)
+                train_mask_sub = data.train_mask[subset] if hasattr(data, 'train_mask') else None
+                val_mask_sub   = data.val_mask[subset] if hasattr(data, 'val_mask') else None
+                test_mask_sub  = data.test_mask[subset] if hasattr(data, 'test_mask') else None
+
+                sub_data = Data(
+                    x=x_sub,
+                    y=y_sub,
+                    edge_index=edge_index,
+                    edge_attr=edge_attr,
+                    train_mask=train_mask_sub,
+                    val_mask=val_mask_sub,
+                    test_mask=test_mask_sub
+                )
+                subgraphs.append(sub_data)
+        return subgraphs
+
     def __call__(self, features: list[dict]) -> dict[str, Any]:
+        if self.config.create_subgraph:
+            features = self.sample_subgraph(features)
+
         if self.on_the_fly_processing:
             features = [preprocess_item(i, config=self.config) for i in features]
 
