@@ -176,13 +176,13 @@ class GraphormerDataCollator:
                 for i in subset:
                     if i in node_set:
                         node_set.remove(i)
-                x_sub = data.x[subset]
-                y_sub = data.y[subset]
-                edge_attr = data.edge_attr[edge_mask]
+                x_sub = graph.x[subset]
+                y_sub = graph.y[subset]
+                edge_attr = graph.edge_attr[edge_mask]
                 # Optional masks (check if they exist)
-                train_mask_sub = data.train_mask[subset] if hasattr(data, 'train_mask') else None
-                val_mask_sub   = data.val_mask[subset] if hasattr(data, 'val_mask') else None
-                test_mask_sub  = data.test_mask[subset] if hasattr(data, 'test_mask') else None
+                train_mask_sub = graph.train_mask[subset] if hasattr(graph, 'train_mask') else None
+                val_mask_sub   = graph.val_mask[subset] if hasattr(graph, 'val_mask') else None
+                test_mask_sub  = graph.test_mask[subset] if hasattr(graph, 'test_mask') else None
 
                 sub_data = Data(
                     x=x_sub,
