@@ -8,8 +8,11 @@ import numpy as np
 import torch
 
 from transformers.utils import is_cython_available, requires_backends
-from torch_geometric.utils import k_hop_subgraph
+# from torch_geometric.utils import k_hop_subgraph
 from functools import lru_cache
+from torch import Tensor
+from torch_geometric.utils import maybe_num_nodes
+from typing import Union, List, Optional, Tuple
 
 if is_cython_available():
     import pyximport
@@ -56,12 +59,13 @@ def k_hop_subgraph(
 
     subsets = [node_idx]
 
-    for _ in range(num_hops):
+    for hop in range(num_hops):
         node_mask.fill_(False)
         node_mask[subsets[-1]] = True
         # torch.index_select(node_mask, 0, row, out=edge_mask)
         # subsets.append(col[edge_mask])
         # Sample only a subset of edges at this hop
+        edge_mask_hop = node_mask[row]
         idx = edge_mask_hop.nonzero(as_tuple=False).view(-1)
         num_sample = int(sample_ratio_per_hop[hop] * idx.size(0))
         if num_sample < idx.size(0):
