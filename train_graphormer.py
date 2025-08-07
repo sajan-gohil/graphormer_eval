@@ -71,6 +71,7 @@ parser.add_argument("--dataset_name", type=str, default="pcqm4mv2", help="Name o
 parser.add_argument("--create_subgraph", action="store_true", help="Create subgraphs from given large graph")
 parser.add_argument("--num_denoiser_layers", type=int, default=4, help="Number of layers in the denoiser")
 parser.add_argument("--use_linear_denoiser", action="store_true", help="Use linear layers in the denoiser")
+parser.add_argument("--optimize_only_diffuser", action="store_true", help="Optimize only the diffuser model")
 args = parser.parse_args()
 
 args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
@@ -120,6 +121,9 @@ if args.dataset_name == "pcqm4mv2":
     model = GraphormerForGraphClassification(config)
 else:
     model = GraphormerForNodeClassification(config)
+    # Compile as graph is always same
+    model.compile()
+    print("Model compiled successfully.")
 
 # Tensor parallelism: split model across 2 GPUs if requested
 if getattr(args, "tensor_parallel", False):
@@ -133,7 +137,7 @@ if getattr(args, "tensor_parallel", False):
                 # no_split_module_classes=["GraphormerBlock", "GraphormerMultiheadAttention"]  # Customize as needed
             )
             model = dispatch_model(model, device_map=device_map)
-            logger.info(f"Model dispatched across devices: {device_map}")
+            print(f"Model dispatched across devices: {device_map}")
         print("Model wrapped for tensor parallelism on GPUs 0 and 1.")
     else:
         print("Tensor parallelism requires transformers >=4.27.0. Proceeding without tensor parallelism.")
@@ -150,6 +154,9 @@ GRAD_CLIP_NORM = 5.0
 param_list = [{"params": [i for n,i in model.named_parameters() if "diffusion_model" not in n], "lr":LEARNING_RATE}]
 if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model.parameters(), "lr": 2e-4}]
 optimizer = Adam(param_list, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
+if args.optimize_only_diffuser:
+    assert args.pretrained_weights is not None, "Pretrained weights must be provided to optimize only the diffuser."
+    optimizer = Adam(model.encoder.diffusion_model.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
 
 # Linear warmup and decay scheduler
 def lr_lambda(current_step):
