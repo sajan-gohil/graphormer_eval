@@ -54,7 +54,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument("--edge_type", type=str, default="multi_hop", help="Type of edge encoding (multi_hop, single_hop, etc.)")
 parser.add_argument("--enable_spatial_encoder", action="store_true", help="Enable spatial encoder")
 parser.add_argument("--enable_diffusion", action="store_true", help="Enable diffusion")
-parser.add_argument("--optimize_diffuser", action="store_true", help="Optimize diffuser")
+parser.add_argument("--optimize_diffuser", action="store_true", help="Optimize diffuser  # NOT USED. DEPRECATED")
 parser.add_argument("--tensor_parallel", action="store_true", help="Enable tensor parallelism on 2 GPUs (requires >=2 GPUs)")
 parser.add_argument("--experiment_dir", type=str, default="./experiments", help="Directory to save experiment results")
 parser.add_argument("--name", type=str, default="graphormer_experiment", help="Name of the experiment")
@@ -69,7 +69,8 @@ parser.add_argument("--diffusion_steps", type=int, default=50, help="Number of d
 parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for data loading")
 parser.add_argument("--dataset_name", type=str, default="pcqm4mv2", help="Name of the dataset to use")
 parser.add_argument("--create_subgraph", action="store_true", help="Create subgraphs from given large graph")
-
+parser.add_argument("--num_denoiser_layers", type=int, default=4, help="Number of layers in the denoiser")
+parser.add_argument("--use_linear_denoiser", action="store_true", help="Use linear layers in the denoiser")
 args = parser.parse_args()
 
 args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))

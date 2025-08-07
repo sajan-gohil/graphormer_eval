@@ -24,7 +24,7 @@ def linear_beta_schedule(timesteps, beta_start=1e-4, beta_end=0.02):
 
 
 class GATv2Denoiser(nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=4, heads=4, use_linear=False, **kwargs):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=4, heads=4, use_linear=False):
         super().__init__()
         print("INITIALIZING GENERALIZED DENOISER")
         self.use_linear = use_linear
@@ -105,7 +105,7 @@ class GraphLatentDiffusion(nn.Module):
         self.num_denoising_steps = num_denoising_steps
         self.config = config
         self.reconstruction_scale = getattr(config, "reconstruction_scale", 0.5)
-        self.structure_scale = getattr(config, "structure_scale", 0.1)
+        self.structure_scale = getattr(config, "structure_scale", 0.5)
         self.timestep_embeddings = nn.Embedding(num_denoising_steps, latent_dim)
         
         if config.diffusion_type == "ddim":
@@ -121,7 +121,9 @@ class GraphLatentDiffusion(nn.Module):
         self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1 - alphas_cumprod))
 
-        self.denoiser = GATv2Denoiser(input_dim+latent_dim, latent_dim//4, input_dim, heads=4)
+        self.denoiser = GATv2Denoiser(input_dim+latent_dim, latent_dim//4, input_dim, heads=4, 
+                                     num_layers=config.num_denoiser_layers,
+                                     use_linear=config.use_linear_denoiser)
         self.diffusion_optimizer = torch.optim.Adam(self.denoiser.parameters(), lr=1e-4)
 
     def add_noise(self, x, t):
@@ -155,11 +157,11 @@ class GraphLatentDiffusion(nn.Module):
             noise_pred = self.denoiser(noisy_with_t, edge_index_list)
 
             loss = MSELoss()(true_noise, noise_pred)
-            if self.config.optimize_diffuser:
+            # if self.config.optimize_diffuser:
                 # print("TRYING ========")
-                self.diffusion_optimizer.zero_grad()
-                loss.backward(retain_graph=False)
-                self.diffusion_optimizer.step()
+            self.diffusion_optimizer.zero_grad()
+            loss.backward(retain_graph=False)
+            self.diffusion_optimizer.step()
                 # print("====optimized")
 
             # Update x_t -> x_{t-1} (DDIM-like deterministic step)
