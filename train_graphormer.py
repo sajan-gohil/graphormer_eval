@@ -7,7 +7,7 @@ torch.autograd.set_detect_anomaly(True)
 from transformers import enable_full_determinism
 from transformers.utils import logging
 from transformers.modeling_utils import get_parameter_device
-enable_full_determinism()
+enable_full_determinism(42)
 try:
     from transformers import infer_auto_device_map, dispatch_model
     import torch_xla.core.xla_model as xm
@@ -101,13 +101,13 @@ dataset_classes = {
 }
 # 2. Model Configuration - Graphormer-base
 config = GraphormerConfig(
-    num_hidden_layers=8,
-    embedding_dim=768,
-    ffn_embedding_dim=768,
+    num_hidden_layers=6,
+    embedding_dim=768//4,
+    ffn_embedding_dim=768//4,
     num_attention_heads=8,
     dropout=0.0,
-    attention_dropout=0.1,
-    activation_dropout=0.1,
+    attention_dropout=0.5,
+    activation_dropout=0.5,
     num_classes=dataset_classes[args.dataset_name],  # Default to 1 for regression tasks
     **vars(args)
 )
@@ -145,7 +145,7 @@ if getattr(args, "tensor_parallel", False):
 # 3. Optimizer and Scheduler
 LEARNING_RATE = 5e-4
 WEIGHT_DECAY = 0.0
-WARMUP_STEPS = 10 # 60000
+WARMUP_STEPS = 2 # 60000
 MAX_STEPS = 1000000
 ADAM_EPS = 1e-8
 BETA1, BETA2 = 0.9, 0.999
