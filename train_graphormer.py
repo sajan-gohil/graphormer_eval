@@ -38,6 +38,7 @@ import random
 import numpy as np
 import datetime
 import argparse
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 
 os.environ['PYTHONHASHSEED'] = '42'
@@ -159,6 +160,7 @@ def lr_lambda(current_step):
     )
 
 scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+reduce_lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=5, min_lr=1e-8)
 
 # Load pretrained weights if specified
 if args.pretrained_weights:
@@ -214,6 +216,7 @@ for epoch in range(MAX_EPOCHS):
         optimizer.step()
         # diffusion_optimizer.step()
         scheduler.step()
+        reduce_lr_scheduler.step(loss.item())
 
         step += 1
         pbar.set_postfix({"loss": loss.item(), "lr": scheduler.get_last_lr()[0]})
