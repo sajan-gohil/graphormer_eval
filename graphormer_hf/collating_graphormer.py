@@ -14,7 +14,7 @@ from torch_geometric.utils import to_undirected
 
 from functools import lru_cache
 from torch import Tensor
-from torch_geometric.utils import maybe_num_nodes
+from torch_geometric.utils.num_nodes import maybe_num_nodes
 from typing import Union, List, Optional, Tuple
 
 if is_cython_available():
