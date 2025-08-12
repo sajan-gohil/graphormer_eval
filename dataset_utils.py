@@ -5,8 +5,8 @@ from torch.utils.data import DataLoader, Dataset
 from typing import List
 from torch.utils.data import Subset
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
-from cobformer_data.get_data import get_data
-from cobformer_data.data_utils import load_fixed_splits
+# from cobformer_data.get_data import get_data
+# from cobformer_data.data_utils import load_fixed_splits
 
 cobformer_datasets_n_patches = {
     "cora": 112,

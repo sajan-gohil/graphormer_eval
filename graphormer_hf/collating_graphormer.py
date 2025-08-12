@@ -17,12 +17,21 @@ from torch import Tensor
 from torch_geometric.utils.num_nodes import maybe_num_nodes
 from typing import Union, List, Optional, Tuple
 
-if is_cython_available():
-    import pyximport
-
-    pyximport.install(setup_args={"include_dirs": np.get_include()})
-    from . import algos_graphormer  # noqa E402
-
+#if is_cython_available():
+#    import pyximport
+#    import numpy as np
+#
+#    pyximport.install(
+#        setup_args={
+#            "include_dirs": [
+#                np.get_include(),
+#                "/usr/include",
+#                "/usr/include/linux",
+#            ],
+#	"extra_compile_args": ["-I/usr/include", "-I/usr/include/linux"]
+#        }
+#    )
+from . import algos_graphormer  # noqa E402
 
 def convert_to_single_emb(x, offset: int = 512):
     feature_num = x.shape[1] if len(x.shape) > 1 else 1
