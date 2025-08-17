@@ -223,7 +223,7 @@ for epoch in range(MAX_EPOCHS):
             temp_grad_clip = GRAD_CLIP_NORM            
             prev_loss = loss.item()
         else:
-            temp_grad_clip = GRAD_CLIP_NORM//2
+            temp_grad_clip = GRAD_CLIP_NORM  # //2
         optimizer.zero_grad()
         # diffusion_optimizer.zero_grad()
         loss.backward()
