@@ -176,9 +176,11 @@ reduce_lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=5, min_l
 if args.pretrained_weights:
     state_dicts = torch.load(args.pretrained_weights, weights_only=False)
     model.load_state_dict(state_dicts["model"], strict=False)
-    optimizer.load_state_dict(state_dicts["optimizer"])
+    optimizer.load_state_dict(state_dicts.get("optimizer", {}))
     if "scheduler" in state_dicts:
         scheduler.load_state_dict(state_dicts["scheduler"])
+    if "reduce_lr_scheduler" in state_dicts:
+        reduce_lr_scheduler.load_state_dict(state_dicts["reduce_lr_scheduler"])
     print(f"Loaded pretrained weights from {args.pretrained_weights}")
 
 
@@ -194,6 +196,7 @@ evaluator = PCQM4MEvaluator()
 step = 0
 MAX_EPOCHS = 2000
 best_valid_mae = float('inf')
+prev_loss = float('-inf')
 
 for epoch in range(MAX_EPOCHS):
     print("EPOCH: ", epoch)
@@ -218,11 +221,15 @@ for epoch in range(MAX_EPOCHS):
         outputs = model(**batch, node_mask=node_mask)
         # loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
         loss = outputs.loss
-
+        if loss.item() < prev_loss:
+            temp_grad_clip = GRAD_CLIP_NORM            
+            prev_loss = loss.item()
+        else:
+            temp_grad_clip = GRAD_CLIP_NORM  # //2
         optimizer.zero_grad()
         # diffusion_optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), temp_grad_clip)
         optimizer.step()
         # diffusion_optimizer.step()
         scheduler.step()
@@ -278,6 +285,7 @@ for epoch in range(MAX_EPOCHS):
             {"model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
+                "reduce_lr_scheduler": reduce_lr_scheduler.state_dict(),
                 "epoch": epoch,
                 "step": step},
             f"{args.experiment_dir}/training_checkpoints/best_model_{epoch}.pt"
