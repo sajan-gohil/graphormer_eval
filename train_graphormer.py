@@ -196,6 +196,7 @@ evaluator = PCQM4MEvaluator()
 step = 0
 MAX_EPOCHS = 2000
 best_valid_mae = float('inf')
+best_f1 = -float("inf")
 prev_loss = float('-inf')
 
 for epoch in range(MAX_EPOCHS):
@@ -279,7 +280,8 @@ for epoch in range(MAX_EPOCHS):
         f.write(f"epoch_{epoch},{valid_score}\n")
 
     print(f"Validation MAE: {valid_score}")
-    if valid_mae < best_valid_mae:
+    is_better = valid_mae < best_valid_mae if args.dataset_name in ["pcqm4mv2"] else valid_mae >= best_valid_mae
+    if is_better::
         best_valid_mae = valid_mae
         torch.save(
             {"model": model.state_dict(),
@@ -291,6 +293,15 @@ for epoch in range(MAX_EPOCHS):
             f"{args.experiment_dir}/training_checkpoints/best_model_{epoch}.pt"
         )
         print("Best model updated.")
+    torch.save(
+            {"model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "reduce_lr_scheduler": reduce_lr_scheduler.state_dict(),
+                "epoch": epoch,
+                "step": step},
+            f"{args.experiment_dir}/training_checkpoints/latest_model.pt"
+        )
 
     if step >= MAX_STEPS:
         print("Reached max training steps.")
