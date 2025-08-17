@@ -14,7 +14,7 @@ from torch_geometric.utils import to_undirected
 
 from functools import lru_cache
 from torch import Tensor
-from torch_geometric.utils import maybe_num_nodes
+from torch_geometric.utils.num_nodes import maybe_num_nodes
 from typing import Union, List, Optional, Tuple
 
 if is_cython_available():
@@ -97,8 +97,12 @@ def k_hop_subgraph(
     return subset, edge_index, inv, edge_mask
 
 
-@lru_cache(maxsize=512)
+CACHED = None
+# @lru_cache(maxsize=512)
 def preprocess_item(item, config, keep_features=True):
+    # global CACHED
+    # if config.dataset_name == "cora" and CACHED is not None:
+    #    return CACHED
     requires_backends(preprocess_item, ["cython"])
 
     if keep_features and "edge_attr" in item.keys():  # edge_attr
@@ -148,7 +152,8 @@ def preprocess_item(item, config, keep_features=True):
     item["input_edges"] = input_edges + 1  # we shift all indices by one for padding  # equal to max dist, encoding of edges along shortest path from i to j [edge 1 feat, edge 2 feat, ... 0,0,0]
     if "labels" not in item:
         item["labels"] = item["y"]
-
+    if config.dataset_name == "cora":
+        CACHED = item
     return item
 
 
@@ -201,6 +206,7 @@ class GraphormerDataCollator:
 
     def __call__(self, features: list[dict]) -> dict[str, Any]:
         if self.config.create_subgraph:
+            print("CREATING SUBGRAPHS")
             features = self.sample_subgraph(features)
 
         if self.on_the_fly_processing:
@@ -232,7 +238,10 @@ class GraphormerDataCollator:
         # Auxiliary edge augmentation: add/remove random edges and record them for loss
         for ix, f in enumerate(features):
             for k in ["attn_bias", "attn_edge_type", "spatial_pos", "in_degree", "input_nodes", "input_edges"]:
-                f[k] = torch.tensor(f[k])
+                try:
+                    f[k] = torch.from_numpy(f[k])
+                except:
+                    f[k] = torch.tensor(f[k].detach().clone())
 
             if len(f["attn_bias"][1:, 1:][f["spatial_pos"] >= self.spatial_pos_max]) > 0:
                 f["attn_bias"][1:, 1:][f["spatial_pos"] >= self.spatial_pos_max] = float("-inf")
@@ -250,7 +259,7 @@ class GraphormerDataCollator:
 
             # --- Augmentation ---
             if self.config.augment_edges:
-                edge_index = torch.tensor(f["edge_index"], dtype=torch.long)
+                edge_index = f["edge_index"].detach().clone().to(dtype=torch.long)
                 num_nodes = f["input_nodes"].shape[0]
                 # Make undirected for augmentation
                 edge_index = to_undirected(edge_index)
@@ -269,9 +278,10 @@ class GraphormerDataCollator:
         batch["out_degree"] = batch["in_degree"]
         batch["edge_index"] = [i["edge_index"] for i in features]
 
-        batch["aug_added_edges"] = aug_added_edges if aug_added_edges else None
-        batch["aug_removed_edges"] = aug_removed_edges if aug_removed_edges else None
-        batch["aug_original_edges"] = aug_original_edges if aug_original_edges else None
+        if self.config.augment_edges:
+            batch["aug_added_edges"] = aug_added_edges if aug_added_edges else None
+            batch["aug_removed_edges"] = aug_removed_edges if aug_removed_edges else None
+            batch["aug_original_edges"] = aug_original_edges if aug_original_edges else None
 
         sample = features[0]["labels"]
         if len(sample) == 1:  # one task

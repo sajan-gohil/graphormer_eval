@@ -72,6 +72,8 @@ parser.add_argument("--create_subgraph", action="store_true", help="Create subgr
 parser.add_argument("--num_denoiser_layers", type=int, default=4, help="Number of layers in the denoiser")
 parser.add_argument("--use_linear_denoiser", action="store_true", help="Use linear layers in the denoiser")
 parser.add_argument("--optimize_only_diffuser", action="store_true", help="Optimize only the diffuser model")
+parser.add_argument("--augment_edges", action="store_true", help="Remove/add dummy edges and calculate separate loss")
+
 args = parser.parse_args()
 
 args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
@@ -115,15 +117,15 @@ config = GraphormerConfig(
 # Data loaders
 collator = GraphormerDataCollator(on_the_fly_processing=True, config=config)
 
-train_loader, valid_loader, test_loader = dataset_utils.load_data(args.dataset_name, num_workers=args.num_workers)
+train_loader, valid_loader, test_loader = dataset_utils.load_data(args.dataset_name, num_workers=args.num_workers, config=config)
 
 if args.dataset_name == "pcqm4mv2":
     model = GraphormerForGraphClassification(config)
 else:
     model = GraphormerForNodeClassification(config)
     # Compile as graph is always same
-    model.compile()
-    print("Model compiled successfully.")
+    # if config.diffusion_type != "ddim":model.compile()
+    # print("Model compiled successfully.")
 
 # Tensor parallelism: split model across 2 GPUs if requested
 if getattr(args, "tensor_parallel", False):
@@ -143,7 +145,7 @@ if getattr(args, "tensor_parallel", False):
         print("Tensor parallelism requires transformers >=4.27.0. Proceeding without tensor parallelism.")
 
 # 3. Optimizer and Scheduler
-LEARNING_RATE = 5e-4
+LEARNING_RATE = 2e-5
 WEIGHT_DECAY = 0.0
 WARMUP_STEPS = 2 # 60000
 MAX_STEPS = 1000000
@@ -152,7 +154,7 @@ BETA1, BETA2 = 0.9, 0.999
 GRAD_CLIP_NORM = 5.0
 
 param_list = [{"params": [i for n,i in model.named_parameters() if "diffusion_model" not in n], "lr":LEARNING_RATE}]
-if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model.parameters(), "lr": 2e-4}]
+if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model.parameters(), "lr": 1e-5}]
 optimizer = Adam(param_list, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
 if args.optimize_only_diffuser:
     assert args.pretrained_weights is not None, "Pretrained weights must be provided to optimize only the diffuser."
@@ -190,7 +192,7 @@ else:
 # 4. Training loop
 evaluator = PCQM4MEvaluator()
 step = 0
-MAX_EPOCHS = 1000
+MAX_EPOCHS = 2000
 best_valid_mae = float('inf')
 
 for epoch in range(MAX_EPOCHS):

@@ -21,7 +21,7 @@ cobformer_datasets_n_patches = {
 COBFORMER_DATASETS = {"cora", "citeseer", "pubmed", "film", "deezer", "ogbn-arxiv", "ogbn-products"}
 
 
-def load_data(dataset_name, num_workers=0, batch_size=512):
+def load_data(dataset_name, num_workers=0, batch_size=512, config=None):
     if dataset_name in COBFORMER_DATASETS:
         # Use get_data from cobformer_data for consistent processing
         path = f"datasets/{dataset_name}"
@@ -31,7 +31,7 @@ def load_data(dataset_name, num_workers=0, batch_size=512):
         # patch = data.partition_patch(n_patch)
         # print(data, split_dict, patch)
         # dataloader
-        collate_fn = GraphormerDataCollator(on_the_fly_processing=True, config = namedtuple("config", ["dataset_name"])(dataset_name))
+        collate_fn = GraphormerDataCollator(on_the_fly_processing=True, config = config)
         train_loader = val_loader = test_loader = DataLoader(data, batch_size=1, shuffle=True, num_workers=0, collate_fn=collate_fn)
         return train_loader, val_loader, test_loader
 
