@@ -281,7 +281,7 @@ for epoch in range(MAX_EPOCHS):
 
     print(f"Validation MAE: {valid_score}")
     is_better = valid_mae < best_valid_mae if args.dataset_name in ["pcqm4mv2"] else valid_mae >= best_valid_mae
-    if is_better::
+    if is_better:
         best_valid_mae = valid_mae
         torch.save(
             {"model": model.state_dict(),
