@@ -73,6 +73,7 @@ parser.add_argument("--num_denoiser_layers", type=int, default=4, help="Number o
 parser.add_argument("--use_linear_denoiser", action="store_true", help="Use linear layers in the denoiser")
 parser.add_argument("--optimize_only_diffuser", action="store_true", help="Optimize only the diffuser model")
 parser.add_argument("--augment_edges", action="store_true", help="Remove/add dummy edges and calculate separate loss")
+parser.add_argument("--gnn_only", action="store_true", help="Instead of diffusion, treat denoiser as gnn")
 
 args = parser.parse_args()
 

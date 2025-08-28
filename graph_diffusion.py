@@ -121,7 +121,11 @@ class GraphLatentDiffusion(nn.Module):
         self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1 - alphas_cumprod))
 
-        self.denoiser = GATv2Denoiser(input_dim+latent_dim, latent_dim//4, input_dim, heads=4, 
+        if self.config.gnn_only:
+            denoiser_input_dim = input_dim
+        else:
+            denoiser_input_dim = input_dim + latent_dim
+        self.denoiser = GATv2Denoiser(denoiser_input_dim, latent_dim//4, input_dim, heads=4, 
                                      num_layers=config.num_denoiser_layers,
                                      use_linear=config.use_linear_denoiser)
         self.diffusion_optimizer = torch.optim.Adam(self.denoiser.parameters(), lr=1e-4)
@@ -173,7 +177,6 @@ class GraphLatentDiffusion(nn.Module):
 
         return x_t  # final denoised embeddings after training
 
-    
     def sample_diffusion(self, node_embeddings, edge_index_list):
         """
         Run deterministic DDIM-like sampling (no optimizer update).
@@ -307,8 +310,13 @@ class GraphLatentDiffusion(nn.Module):
 
         if self.config.detached_denoiser:
             noisy_embeddings, true_noise = self.add_noise(node_embeddings.detach().clone(), t)
+        elif self.config.gnn_only:
+            noisy_embeddings = node_embeddings
+            true_noise = torch.zeros_like(node_embeddings)
+            t_emb = torch.Tensor()
         else:
             noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
+
         noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
         
         if not self.config.diffusion_type == "ddim":
@@ -316,9 +324,17 @@ class GraphLatentDiffusion(nn.Module):
         
         if self.config.diffusion_type == "x0":
             reconstruction_loss = MSELoss()(node_embeddings, denoised_embeddings)
+
         elif self.config.diffusion_type == "delta":
             reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
             denoised_embeddings = node_embeddings + denoised_embeddings
+
+        elif self.config.diffusion_type == "noise_pred_single":
+            reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
+            sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
+            sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)  # Remove more noise than added
+            denoised_embeddings = (noisy_embeddings - sqrt_one_minus_alpha*denoised_embeddings)/sqrt_alpha
+
         elif self.config.diffusion_type == "noise_pred":
             reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
             sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
