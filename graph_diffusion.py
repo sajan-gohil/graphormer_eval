@@ -370,7 +370,7 @@ class GraphLatentDiffusion(nn.Module):
             aux_loss = self.aux_edge_attention_loss(denoised_embeddings, aug_added_edges, aug_removed_edges, aug_original_edges)
         total_loss = (attn_loss*self.structure_scale) + (reconstruction_loss*self.reconstruction_scale)
         if aux_loss != 0:
-            total_loss = total_loss + 0.99 * aux_loss  # weight for aux loss
+            total_loss = total_loss + (aux_loss*self.config.aug_loss_scale)  # weight for aux loss
         return denoised_embeddings, total_loss
         # return denoised_embeddings, (attn_loss*self.structure_scale) + (reconstruction_loss*self.reconstruction_scale)
 
