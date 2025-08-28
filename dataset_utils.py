@@ -31,8 +31,10 @@ def load_data(dataset_name, num_workers=0, batch_size=512, config=None):
         # patch = data.partition_patch(n_patch)
         # print(data, split_dict, patch)
         # dataloader
-        collate_fn = GraphormerDataCollator(on_the_fly_processing=True, config = config)
-        train_loader = val_loader = test_loader = DataLoader(data, batch_size=1, shuffle=True, num_workers=0, collate_fn=collate_fn)
+        train_collate_fn = GraphormerDataCollator(on_the_fly_processing=True, config=config, split="train")
+        val_collate_fn = GraphormerDataCollator(on_the_fly_processing=True, config=config, split="val")
+        train_loader = DataLoader(data, batch_size=1, shuffle=True, num_workers=0, collate_fn=train_collate_fn)
+        val_loader = test_loader = DataLoader(data, batch_size=1, shuffle=True, num_workers=0, collate_fn=val_collate_fn)
         return train_loader, val_loader, test_loader
 
     else:

@@ -299,6 +299,8 @@ class GraphLatentDiffusion(nn.Module):
 
     def forward(self, node_embeddings, edge_index_list, aug_added_edges=None, aug_removed_edges=None, aug_original_edges=None):
         # print("NODE EMBEDDINGS SHAPE = ", node_embeddings.shape)  # B, N, D
+        if self.config.augment_edges:  # Temporary, wont work for val/test set
+            assert len(aug_added_edges) > 0, "PASSED AUGMENTED VALUES DONT EXIST"
         B = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps-1, (B,), device=node_embeddings.device)
         t_emb = self.timestep_embeddings(t).unsqueeze(1).expand(-1, node_embeddings.size(1), -1)

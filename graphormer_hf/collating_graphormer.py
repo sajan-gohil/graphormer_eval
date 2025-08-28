@@ -158,12 +158,13 @@ def preprocess_item(item, config, keep_features=True):
 
 
 class GraphormerDataCollator:
-    def __init__(self, spatial_pos_max=20, on_the_fly_processing=False, config=None):
+    def __init__(self, spatial_pos_max=20, on_the_fly_processing=False, config=None, split="train"):
         if not is_cython_available():
             raise ImportError("Graphormer preprocessing needs Cython (pyximport)")
         self.config = config
         self.spatial_pos_max = spatial_pos_max
         self.on_the_fly_processing = on_the_fly_processing
+        self.split = split
 
     def sample_subgraph(self, graphs):
         subgraphs = []
@@ -258,7 +259,7 @@ class GraphormerDataCollator:
             ] = f["input_edges"]
 
             # --- Augmentation ---
-            if self.config.augment_edges:
+            if self.config.augment_edges and self.split == "train":
                 edge_index = f["edge_index"].detach().clone().to(dtype=torch.long)
                 num_nodes = f["input_nodes"].shape[0]
                 # Make undirected for augmentation
@@ -278,7 +279,7 @@ class GraphormerDataCollator:
         batch["out_degree"] = batch["in_degree"]
         batch["edge_index"] = [i["edge_index"] for i in features]
 
-        if self.config.augment_edges:
+        if self.config.augment_edges and self.split == "train":
             batch["aug_added_edges"] = aug_added_edges if aug_added_edges else None
             batch["aug_removed_edges"] = aug_removed_edges if aug_removed_edges else None
             batch["aug_original_edges"] = aug_original_edges if aug_original_edges else None
