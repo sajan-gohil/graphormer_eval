@@ -217,13 +217,15 @@ for epoch in range(MAX_EPOCHS):
         # print("batch index len = ", len(batch["edge_index"]))
         # print(type(train_loader.dataset), dir(train_loader.dataset))
         node_mask = getattr(train_loader.dataset[0], "train_mask", None)
+        if args.dataset_name not in ["pcqm4mv2"]:
+            assert node_mask is not None
         if node_mask is not None:
             node_mask = node_mask.to(device)
         outputs = model(**batch, node_mask=node_mask)
         # loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
         loss = outputs.loss
         if loss.item() < prev_loss:
-            temp_grad_clip = GRAD_CLIP_NORM            
+            temp_grad_clip = GRAD_CLIP_NORM
             prev_loss = loss.item()
         else:
             temp_grad_clip = GRAD_CLIP_NORM  # //2
@@ -303,6 +305,36 @@ for epoch in range(MAX_EPOCHS):
             f"{args.experiment_dir}/training_checkpoints/latest_model.pt"
         )
 
+    # Test set results
+    # Load best model and get test set results
+    if args.dataset_name not in ["pcqm4mv2"]:
+        y_pred, y_true = [], []
+        with torch.no_grad():
+            for batch in test_loader:
+                for k in batch:
+                    try:
+                        batch[k] = batch[k].to(device)
+                    except:
+                        batch[k] = [i.to(device) for i in batch[k]]
+                node_mask = getattr(test_loader.dataset[0], "test_mask", None)
+                if node_mask is not None:
+                    node_mask = node_mask.to(device)
+                labels = batch["labels"]
+                outputs = model(**batch, node_mask=node_mask)
+                if config.num_classes > 1:
+                    y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
+                else:
+                    y_pred.append(outputs[1].view(-1).cpu())
+                y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
+
+        y_pred = torch.cat(y_pred, dim=0)
+        y_true = torch.cat(y_true, dim=0)
+        micro_f1 = f1_score(y_true, y_pred, average="micro")
+        macro_f1 = f1_score(y_true, y_pred, average="macro")
+        print(f"Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}")
+        with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
+            # f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\n")
+            f.write(f"epoch_{epoch},{micro_f1},{macro_f1}\n")
     if step >= MAX_STEPS:
         print("Reached max training steps.")
         break
@@ -342,5 +374,5 @@ if args.dataset_name not in ["pcqm4mv2"]:
     micro_f1 = f1_score(y_true, y_pred, average="micro")
     macro_f1 = f1_score(y_true, y_pred, average="macro")
     print(f"Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}")
-    with open(f"{args.experiment_dir}/test_metric.csv", "w") as f:
+    with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
         f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\n")
