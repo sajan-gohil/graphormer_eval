@@ -863,7 +863,12 @@ class GraphormerModel(GraphormerPreTrainedModel):
             graph_token = input_nodes[:, :1, :]
             node_emb = input_nodes[:, 1:, :]
             # edge_index should be a list of edge_index tensors for each graph in batch
-            node_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index)
+            node_emb, attention_matching_loss = self.diffusion_model(
+                node_emb, edge_index,
+                aug_added_edges=kwargs.get("aug_added_edges", None),
+                aug_removed_edges=kwargs.get("aug_removed_edges", None),
+                aug_original_edges=kwargs.get("aug_original_edges", None)
+            )
             # print("ATM LOSS = ", attention_matching_loss)
             # if self.config.optimize_diffuser:
             #     self.diffusion_optimizer.zero_grad()
@@ -1028,7 +1033,8 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
             spatial_pos,
             attn_edge_type,
             return_dict=True,
-            edge_index=edge_index
+            edge_index=edge_index,
+            **kwargs
         )
         if self.config.optimize_diffuser:
             encoder_outputs, attention_matching_loss = encoder_outputs

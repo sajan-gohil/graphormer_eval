@@ -106,8 +106,12 @@ def k_hop_subgraph(
     return subset, edge_index, inv, edge_mask
 
 
-@lru_cache(maxsize=512)
+CACHED = None
+# @lru_cache(maxsize=512)
 def preprocess_item(item, config, keep_features=True):
+    # global CACHED
+    # if config.dataset_name == "cora" and CACHED is not None:
+    #    return CACHED
     requires_backends(preprocess_item, ["cython"])
 
     if keep_features and "edge_attr" in item.keys():  # edge_attr
@@ -157,17 +161,19 @@ def preprocess_item(item, config, keep_features=True):
     item["input_edges"] = input_edges + 1  # we shift all indices by one for padding  # equal to max dist, encoding of edges along shortest path from i to j [edge 1 feat, edge 2 feat, ... 0,0,0]
     if "labels" not in item:
         item["labels"] = item["y"]
-
+    if config.dataset_name == "cora":
+        CACHED = item
     return item
 
 
 class GraphormerDataCollator:
-    def __init__(self, spatial_pos_max=20, on_the_fly_processing=False, config=None):
+    def __init__(self, spatial_pos_max=20, on_the_fly_processing=False, config=None, split="train"):
         if not is_cython_available():
             raise ImportError("Graphormer preprocessing needs Cython (pyximport)")
         self.config = config
         self.spatial_pos_max = spatial_pos_max
         self.on_the_fly_processing = on_the_fly_processing
+        self.split = split
 
     def sample_subgraph(self, graphs):
         subgraphs = []
@@ -210,6 +216,7 @@ class GraphormerDataCollator:
 
     def __call__(self, features: list[dict]) -> dict[str, Any]:
         if self.config.create_subgraph:
+            print("CREATING SUBGRAPHS")
             features = self.sample_subgraph(features)
 
         if self.on_the_fly_processing:
@@ -241,7 +248,10 @@ class GraphormerDataCollator:
         # Auxiliary edge augmentation: add/remove random edges and record them for loss
         for ix, f in enumerate(features):
             for k in ["attn_bias", "attn_edge_type", "spatial_pos", "in_degree", "input_nodes", "input_edges"]:
-                f[k] = torch.tensor(f[k])
+                try:
+                    f[k] = torch.from_numpy(f[k])
+                except:
+                    f[k] = torch.tensor(f[k].detach().clone())
 
             if len(f["attn_bias"][1:, 1:][f["spatial_pos"] >= self.spatial_pos_max]) > 0:
                 f["attn_bias"][1:, 1:][f["spatial_pos"] >= self.spatial_pos_max] = float("-inf")
@@ -258,8 +268,8 @@ class GraphormerDataCollator:
             ] = f["input_edges"]
 
             # --- Augmentation ---
-            if self.config.augment_edges:
-                edge_index = torch.tensor(f["edge_index"], dtype=torch.long)
+            if self.config.augment_edges and self.split == "train":
+                edge_index = f["edge_index"].detach().clone().to(dtype=torch.long)
                 num_nodes = f["input_nodes"].shape[0]
                 # Make undirected for augmentation
                 edge_index = to_undirected(edge_index)
@@ -278,9 +288,10 @@ class GraphormerDataCollator:
         batch["out_degree"] = batch["in_degree"]
         batch["edge_index"] = [i["edge_index"] for i in features]
 
-        batch["aug_added_edges"] = aug_added_edges if aug_added_edges else None
-        batch["aug_removed_edges"] = aug_removed_edges if aug_removed_edges else None
-        batch["aug_original_edges"] = aug_original_edges if aug_original_edges else None
+        if self.config.augment_edges and self.split == "train":
+            batch["aug_added_edges"] = aug_added_edges if aug_added_edges else None
+            batch["aug_removed_edges"] = aug_removed_edges if aug_removed_edges else None
+            batch["aug_original_edges"] = aug_original_edges if aug_original_edges else None
 
         sample = features[0]["labels"]
         if len(sample) == 1:  # one task

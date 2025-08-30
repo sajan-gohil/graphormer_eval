@@ -64,7 +64,7 @@ class GATv2Denoiser(nn.Module):
         self.output_norm = nn.LayerNorm(out_channels)
 
     def forward(self, x_batch, edge_index_list):
-        B, N, F = x_batch.shape
+        B, N, Feat = x_batch.shape
         data_list = [Data(x=x_batch[b], edge_index=edge_index_list[b]) for b in range(B)]
         batch = Batch.from_data_list(data_list)
         x = batch.x
@@ -121,7 +121,11 @@ class GraphLatentDiffusion(nn.Module):
         self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1 - alphas_cumprod))
 
-        self.denoiser = GATv2Denoiser(input_dim+latent_dim, latent_dim//4, input_dim, heads=4, 
+        if self.config.gnn_only:
+            denoiser_input_dim = input_dim
+        else:
+            denoiser_input_dim = input_dim + latent_dim
+        self.denoiser = GATv2Denoiser(denoiser_input_dim, latent_dim//4, input_dim, heads=4, 
                                      num_layers=config.num_denoiser_layers,
                                      use_linear=config.use_linear_denoiser)
         self.diffusion_optimizer = torch.optim.Adam(self.denoiser.parameters(), lr=1e-4)
@@ -173,7 +177,6 @@ class GraphLatentDiffusion(nn.Module):
 
         return x_t  # final denoised embeddings after training
 
-    
     def sample_diffusion(self, node_embeddings, edge_index_list):
         """
         Run deterministic DDIM-like sampling (no optimizer update).
@@ -299,14 +302,21 @@ class GraphLatentDiffusion(nn.Module):
 
     def forward(self, node_embeddings, edge_index_list, aug_added_edges=None, aug_removed_edges=None, aug_original_edges=None):
         # print("NODE EMBEDDINGS SHAPE = ", node_embeddings.shape)  # B, N, D
+        if self.config.augment_edges:  # Temporary, wont work for val/test set
+            assert len(aug_added_edges) > 0, "PASSED AUGMENTED VALUES DONT EXIST"
         B = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps-1, (B,), device=node_embeddings.device)
         t_emb = self.timestep_embeddings(t).unsqueeze(1).expand(-1, node_embeddings.size(1), -1)
 
         if self.config.detached_denoiser:
             noisy_embeddings, true_noise = self.add_noise(node_embeddings.detach().clone(), t)
+        elif self.config.gnn_only:
+            noisy_embeddings = node_embeddings
+            true_noise = torch.zeros_like(node_embeddings)
+            t_emb = torch.Tensor()
         else:
             noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
+
         noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
         
         if not self.config.diffusion_type == "ddim":
@@ -314,9 +324,17 @@ class GraphLatentDiffusion(nn.Module):
         
         if self.config.diffusion_type == "x0":
             reconstruction_loss = MSELoss()(node_embeddings, denoised_embeddings)
+
         elif self.config.diffusion_type == "delta":
             reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
             denoised_embeddings = node_embeddings + denoised_embeddings
+
+        elif self.config.diffusion_type == "noise_pred_single":
+            reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
+            sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
+            sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)  # Remove more noise than added
+            denoised_embeddings = (noisy_embeddings - sqrt_one_minus_alpha*denoised_embeddings)/sqrt_alpha
+
         elif self.config.diffusion_type == "noise_pred":
             reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
             sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
@@ -352,7 +370,7 @@ class GraphLatentDiffusion(nn.Module):
             aux_loss = self.aux_edge_attention_loss(denoised_embeddings, aug_added_edges, aug_removed_edges, aug_original_edges)
         total_loss = (attn_loss*self.structure_scale) + (reconstruction_loss*self.reconstruction_scale)
         if aux_loss != 0:
-            total_loss = total_loss + 0.1 * aux_loss  # weight for aux loss
+            total_loss = total_loss + (aux_loss*self.config.aug_loss_scale)  # weight for aux loss
         return denoised_embeddings, total_loss
         # return denoised_embeddings, (attn_loss*self.structure_scale) + (reconstruction_loss*self.reconstruction_scale)
 

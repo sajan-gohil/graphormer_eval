@@ -60,6 +60,7 @@ parser.add_argument("--experiment_dir", type=str, default="./experiments", help=
 parser.add_argument("--name", type=str, default="graphormer_experiment", help="Name of the experiment")
 parser.add_argument("--reconstruction_scale", type=float, default=0.0, help="How much to weigh diffusion reconstruction loss")
 parser.add_argument("--structure_scale", type=float, default=0.0, help="How much to weigh diffusion reconstruction loss")
+parser.add_argument("--aug_loss_scale", type=float, default=1, help="How much to weigh augmentation correction's reconstruction loss")
 parser.add_argument("--onscreen_logs", action="store_true", help="print logs on screen instead of log files in experiment dir")
 parser.add_argument("--batch_size", type=int, default=512, help="number of graphs in a batch")
 parser.add_argument("--diffusion_type", type=str, default="x0", help='Type of diffusion predictor ["x0", "delta", "noise_pred"]')
@@ -72,6 +73,9 @@ parser.add_argument("--create_subgraph", action="store_true", help="Create subgr
 parser.add_argument("--num_denoiser_layers", type=int, default=4, help="Number of layers in the denoiser")
 parser.add_argument("--use_linear_denoiser", action="store_true", help="Use linear layers in the denoiser")
 parser.add_argument("--optimize_only_diffuser", action="store_true", help="Optimize only the diffuser model")
+parser.add_argument("--augment_edges", action="store_true", help="Remove/add dummy edges and calculate separate loss")
+parser.add_argument("--gnn_only", action="store_true", help="Instead of diffusion, treat denoiser as gnn")
+
 args = parser.parse_args()
 
 args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
@@ -115,15 +119,15 @@ config = GraphormerConfig(
 # Data loaders
 collator = GraphormerDataCollator(on_the_fly_processing=True, config=config)
 
-train_loader, valid_loader, test_loader = dataset_utils.load_data(args.dataset_name, num_workers=args.num_workers)
+train_loader, valid_loader, test_loader = dataset_utils.load_data(args.dataset_name, num_workers=args.num_workers, config=config)
 
 if args.dataset_name == "pcqm4mv2":
     model = GraphormerForGraphClassification(config)
 else:
     model = GraphormerForNodeClassification(config)
     # Compile as graph is always same
-    model.compile()
-    print("Model compiled successfully.")
+    # if config.diffusion_type != "ddim":model.compile()
+    # print("Model compiled successfully.")
 
 # Tensor parallelism: split model across 2 GPUs if requested
 if getattr(args, "tensor_parallel", False):
@@ -143,7 +147,7 @@ if getattr(args, "tensor_parallel", False):
         print("Tensor parallelism requires transformers >=4.27.0. Proceeding without tensor parallelism.")
 
 # 3. Optimizer and Scheduler
-LEARNING_RATE = 5e-4
+LEARNING_RATE = 2e-5
 WEIGHT_DECAY = 0.0
 WARMUP_STEPS = 2 # 60000
 MAX_STEPS = 1000000
@@ -152,7 +156,7 @@ BETA1, BETA2 = 0.9, 0.999
 GRAD_CLIP_NORM = 5.0
 
 param_list = [{"params": [i for n,i in model.named_parameters() if "diffusion_model" not in n], "lr":LEARNING_RATE}]
-if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model.parameters(), "lr": 2e-4}]
+if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model.parameters(), "lr": 1e-5}]
 optimizer = Adam(param_list, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
 if args.optimize_only_diffuser:
     assert args.pretrained_weights is not None, "Pretrained weights must be provided to optimize only the diffuser."
@@ -194,6 +198,7 @@ evaluator = PCQM4MEvaluator()
 step = 0
 MAX_EPOCHS = 2000
 best_valid_mae = float('inf')
+best_f1 = -float("inf")
 prev_loss = float('-inf')
 
 for epoch in range(MAX_EPOCHS):
@@ -214,16 +219,18 @@ for epoch in range(MAX_EPOCHS):
         # print("batch index len = ", len(batch["edge_index"]))
         # print(type(train_loader.dataset), dir(train_loader.dataset))
         node_mask = getattr(train_loader.dataset[0], "train_mask", None)
+        if args.dataset_name not in ["pcqm4mv2"]:
+            assert node_mask is not None
         if node_mask is not None:
             node_mask = node_mask.to(device)
         outputs = model(**batch, node_mask=node_mask)
         # loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
         loss = outputs.loss
         if loss.item() < prev_loss:
-            temp_grad_clip = GRAD_CLIP_NORM            
+            temp_grad_clip = GRAD_CLIP_NORM
             prev_loss = loss.item()
         else:
-            temp_grad_clip = GRAD_CLIP_NORM//2
+            temp_grad_clip = GRAD_CLIP_NORM  # //2
         optimizer.zero_grad()
         # diffusion_optimizer.zero_grad()
         loss.backward()
@@ -277,7 +284,8 @@ for epoch in range(MAX_EPOCHS):
         f.write(f"epoch_{epoch},{valid_score}\n")
 
     print(f"Validation MAE: {valid_score}")
-    if valid_mae < best_valid_mae:
+    is_better = valid_mae < best_valid_mae if args.dataset_name in ["pcqm4mv2"] else valid_mae >= best_valid_mae
+    if is_better:
         best_valid_mae = valid_mae
         torch.save(
             {"model": model.state_dict(),
@@ -289,9 +297,84 @@ for epoch in range(MAX_EPOCHS):
             f"{args.experiment_dir}/training_checkpoints/best_model_{epoch}.pt"
         )
         print("Best model updated.")
+    torch.save(
+            {"model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "reduce_lr_scheduler": reduce_lr_scheduler.state_dict(),
+                "epoch": epoch,
+                "step": step},
+            f"{args.experiment_dir}/training_checkpoints/latest_model.pt"
+        )
 
+    # Test set results
+    # Load best model and get test set results
+    if args.dataset_name not in ["pcqm4mv2"]:
+        y_pred, y_true = [], []
+        with torch.no_grad():
+            for batch in test_loader:
+                for k in batch:
+                    try:
+                        batch[k] = batch[k].to(device)
+                    except:
+                        batch[k] = [i.to(device) for i in batch[k]]
+                node_mask = getattr(test_loader.dataset[0], "test_mask", None)
+                if node_mask is not None:
+                    node_mask = node_mask.to(device)
+                labels = batch["labels"]
+                outputs = model(**batch, node_mask=node_mask)
+                if config.num_classes > 1:
+                    y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
+                else:
+                    y_pred.append(outputs[1].view(-1).cpu())
+                y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
+
+        y_pred = torch.cat(y_pred, dim=0)
+        y_true = torch.cat(y_true, dim=0)
+        micro_f1 = f1_score(y_true, y_pred, average="micro")
+        macro_f1 = f1_score(y_true, y_pred, average="macro")
+        print(f"Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}")
+        with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
+            # f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\n")
+            f.write(f"epoch_{epoch},{micro_f1},{macro_f1}\n")
     if step >= MAX_STEPS:
         print("Reached max training steps.")
         break
 
 print(f"Best Validation MAE: {best_valid_mae:.6f}")
+
+# Test set results
+# Load best model and get test set results
+if args.dataset_name not in ["pcqm4mv2"]:
+    # Load best model checkpoint
+    best_ckpt = sorted(os.listdir(f"{args.experiment_dir}/training_checkpoints"), key=lambda x: os.path.getmtime(os.path.join(args.experiment_dir, "training_checkpoints", x)))[-1]
+    state_dicts = torch.load(os.path.join(args.experiment_dir, "training_checkpoints", best_ckpt), map_location=device)
+    model.load_state_dict(state_dicts["model"], strict=False)
+    model.eval()
+
+    y_pred, y_true = [], []
+    with torch.no_grad():
+        for batch in test_loader:
+            for k in batch:
+                try:
+                    batch[k] = batch[k].to(device)
+                except:
+                    batch[k] = [i.to(device) for i in batch[k]]
+            node_mask = getattr(test_loader.dataset[0], "test_mask", None)
+            if node_mask is not None:
+                node_mask = node_mask.to(device)
+            labels = batch["labels"]
+            outputs = model(**batch, node_mask=node_mask)
+            if config.num_classes > 1:
+                y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
+            else:
+                y_pred.append(outputs[1].view(-1).cpu())
+            y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
+
+    y_pred = torch.cat(y_pred, dim=0)
+    y_true = torch.cat(y_true, dim=0)
+    micro_f1 = f1_score(y_true, y_pred, average="micro")
+    macro_f1 = f1_score(y_true, y_pred, average="macro")
+    print(f"Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}")
+    with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
+        f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\n")
