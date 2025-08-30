@@ -75,6 +75,7 @@ parser.add_argument("--use_linear_denoiser", action="store_true", help="Use line
 parser.add_argument("--optimize_only_diffuser", action="store_true", help="Optimize only the diffuser model")
 parser.add_argument("--augment_edges", action="store_true", help="Remove/add dummy edges and calculate separate loss")
 parser.add_argument("--gnn_only", action="store_true", help="Instead of diffusion, treat denoiser as gnn")
+parser.add_argument("--keep_attn_bias", action="store_true", help="Remove attention bias module altogether")
 
 args = parser.parse_args()
 

@@ -595,6 +595,7 @@ class GraphormerGraphEncoder(nn.Module):
     def __init__(self, config: GraphormerConfig):
         super().__init__()
 
+        self.config = config
         self.dropout_module = torch.nn.Dropout(p=config.dropout, inplace=False)
         self.layerdrop = config.layerdrop
         self.embedding_dim = config.embedding_dim
@@ -661,7 +662,9 @@ class GraphormerGraphEncoder(nn.Module):
         padding_mask_cls = torch.zeros(n_graph, 1, device=padding_mask.device, dtype=padding_mask.dtype)
         padding_mask = torch.cat((padding_mask_cls, padding_mask), dim=1)
 
-        attn_bias = self.graph_attn_bias(input_nodes, attn_bias, spatial_pos, input_edges, attn_edge_type)
+        attn_bias = None
+        if self.config.keep_attn_bias:
+            attn_bias = self.graph_attn_bias(input_nodes, attn_bias, spatial_pos, input_edges, attn_edge_type)
 
         if token_embeddings is not None:
             input_nodes = token_embeddings
