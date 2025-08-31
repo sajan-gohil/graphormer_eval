@@ -309,7 +309,7 @@ for epoch in range(MAX_EPOCHS):
 
     # Test set results
     # Load best model and get test set results
-    if args.dataset_name not in ["pcqm4mv2"]:
+    if args.dataset_name not in ["pcqm4mv2"] and epoch % 25 == 0:
         y_pred, y_true = [], []
         with torch.no_grad():
             for batch in test_loader:
