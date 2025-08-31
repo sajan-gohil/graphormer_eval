@@ -462,9 +462,11 @@ class GraphormerMultiheadAttention(nn.Module):
             raise AssertionError("The attention weights generated do not match the expected dimensions.")
 
         if attn_bias is not None:
+        if attn_bias is not None:  # centrality, edge, etc embeddings
             attn_weights += attn_bias.view(bsz * self.num_heads, tgt_len, src_len)
 
         if attn_mask is not None:
+            print("ATTN MASK EXISTS: ", attn_mask)
             attn_mask = attn_mask.unsqueeze(0)
             attn_weights += attn_mask
 
@@ -603,7 +605,8 @@ class GraphormerGraphEncoder(nn.Module):
         self.traceable = config.traceable
 
         self.graph_node_feature = GraphormerGraphNodeFeature(config)
-        self.graph_attn_bias = GraphormerGraphAttnBias(config)
+        if not self.config.remove_attn_bias:
+            self.graph_attn_bias = GraphormerGraphAttnBias(config)
 
         self.embed_scale = config.embed_scale
 
@@ -663,7 +666,7 @@ class GraphormerGraphEncoder(nn.Module):
         padding_mask = torch.cat((padding_mask_cls, padding_mask), dim=1)
 
         attn_bias = None
-        if self.config.keep_attn_bias:
+        if not self.config.remove_attn_bias:
             attn_bias = self.graph_attn_bias(input_nodes, attn_bias, spatial_pos, input_edges, attn_edge_type)
 
         if token_embeddings is not None:
