@@ -75,6 +75,7 @@ parser.add_argument("--use_linear_denoiser", action="store_true", help="Use line
 parser.add_argument("--optimize_only_diffuser", action="store_true", help="Optimize only the diffuser model")
 parser.add_argument("--augment_edges", action="store_true", help="Remove/add dummy edges and calculate separate loss")
 parser.add_argument("--gnn_only", action="store_true", help="Instead of diffusion, treat denoiser as gnn")
+parser.add_argument("--remove_attn_bias", action="store_true", help="Remove attention bias module altogether")
 
 args = parser.parse_args()
 
@@ -309,7 +310,7 @@ for epoch in range(MAX_EPOCHS):
 
     # Test set results
     # Load best model and get test set results
-    if args.dataset_name not in ["pcqm4mv2"]:
+    if args.dataset_name not in ["pcqm4mv2"] and epoch % 25 == 0:
         y_pred, y_true = [], []
         with torch.no_grad():
             for batch in test_loader:

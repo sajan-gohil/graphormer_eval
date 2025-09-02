@@ -313,7 +313,7 @@ class GraphLatentDiffusion(nn.Module):
         elif self.config.gnn_only:
             noisy_embeddings = node_embeddings
             true_noise = torch.zeros_like(node_embeddings)
-            t_emb = torch.Tensor()
+            t_emb = torch.Tensor().to(noisy_embeddings.device)
         else:
             noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
 
