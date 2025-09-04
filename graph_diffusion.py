@@ -40,28 +40,31 @@ class GATv2Denoiser(nn.Module):
         # Build downsampling path
         for i in range(num_layers):
             in_dim = in_channels if i == 0 else hidden_channels * heads
-            out_dim = hidden_channels
+            out_dim = hidden_channels if not self.use_linear else hidden_channels * heads
             if use_linear:
                 layer = nn.Linear(in_dim, out_dim)
             else:
                 layer = GATv2Conv(in_dim, out_dim, heads=heads)
             self.down_blocks.append(layer)
-            self.down_norms.append(nn.LayerNorm(out_dim * heads if not use_linear else out_dim))
+            self.down_norms.append(nn.LayerNorm(out_dim))  # * heads if not use_linear else out_dim))
+            # print("DOWN:", i, in_dim, out_dim)
 
         # Build upsampling path (same number of layers, reverse direction)
         for i in range(num_layers):
             in_dim = hidden_channels * heads
-            out_dim = hidden_channels
+            out_dim = hidden_channels if not self.use_linear else hidden_channels * heads
             if use_linear:
                 layer = nn.Linear(in_dim, out_dim)
             else:
                 layer = GATv2Conv(in_dim, out_dim, heads=heads)
             self.up_blocks.append(layer)
             self.up_norms.append(nn.LayerNorm(out_dim * heads if not use_linear else out_dim))
+            # print("UP:", i, in_dim, out_dim)
 
-        final_in = hidden_channels * heads if not use_linear else hidden_channels
-        self.output_layer = nn.Linear(final_in, out_channels)
+        final_in = hidden_channels * heads  # if not use_linear else hidden_channels
+        self.output_layer = nn.Linear(final_in, out_channels)  # Out channels half of in because in has timestep embedding
         self.output_norm = nn.LayerNorm(out_channels)
+        # print("OUT:", out_channels)
 
     def forward(self, x_batch, edge_index_list):
         B, N, Feat = x_batch.shape
@@ -75,6 +78,7 @@ class GATv2Denoiser(nn.Module):
             layer = self.down_blocks[i]
             norm = self.down_norms[i]
             if self.use_linear:
+                # print("FWD DOWN:", i, x.shape)
                 x = F.elu(norm(layer(x)))
             else:
                 x = F.elu(norm(layer(x, edge_index)))
@@ -83,9 +87,11 @@ class GATv2Denoiser(nn.Module):
         for i in range(self.num_layers):
             layer = self.up_blocks[i]
             norm = self.up_norms[i]
+            # print("FWD UP SKIP:", i, -(i+2), i<self.num_layers-1)
             skip_x = skip_connections[-(i + 2)] if i < self.num_layers - 1 else torch.zeros_like(x)
             x = x + skip_x  # residual from down path
             if self.use_linear:
+                # print("FWD UP:", i, x.shape)
                 x = F.elu(norm(layer(x)))
             else:
                 x = F.elu(norm(layer(x, edge_index)))
