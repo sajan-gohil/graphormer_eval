@@ -76,6 +76,7 @@ parser.add_argument("--optimize_only_diffuser", action="store_true", help="Optim
 parser.add_argument("--augment_edges", action="store_true", help="Remove/add dummy edges and calculate separate loss")
 parser.add_argument("--gnn_only", action="store_true", help="Instead of diffusion, treat denoiser as gnn")
 parser.add_argument("--remove_attn_bias", action="store_true", help="Remove attention bias module altogether")
+parser.add_argument("--enable_layerwise_diffusion", action="store_true", help="Perform diffusion after each attention step")
 
 args = parser.parse_args()
 
@@ -145,7 +146,7 @@ if getattr(args, "tensor_parallel", False):
             print(f"Model dispatched across devices: {device_map}")
         print("Model wrapped for tensor parallelism on GPUs 0 and 1.")
     else:
-        print("Tensor parallelism requires transformers >=4.27.0. Proceeding without tensor parallelism.")
+        print("Auto device map not inferred.")
 
 # 3. Optimizer and Scheduler
 LEARNING_RATE = 2e-5
