@@ -46,7 +46,7 @@ class GATv2Denoiser(nn.Module):
             else:
                 layer = GATv2Conv(in_dim, out_dim, heads=heads)
             self.down_blocks.append(layer)
-            self.down_norms.append(nn.LayerNorm(out_dim))  # * heads if not use_linear else out_dim))
+            self.down_norms.append(nn.LayerNorm(out_dim * heads if not use_linear else out_dim))
             # print("DOWN:", i, in_dim, out_dim)
 
         # Build upsampling path (same number of layers, reverse direction)
@@ -63,6 +63,9 @@ class GATv2Denoiser(nn.Module):
 
         final_in = hidden_channels * heads  # if not use_linear else hidden_channels
         self.output_layer = nn.Linear(final_in, out_channels)  # Out channels half of in because in has timestep embedding
+        nn.init.zeros_(self.output_layer.weight)
+        nn.init.zeros_(self.output_layer.bias)
+        self.output_scale = nn.Parameter(torch.tensor(0.0))
         self.output_norm = nn.LayerNorm(out_channels)
         # print("OUT:", out_channels)
 
@@ -79,9 +82,9 @@ class GATv2Denoiser(nn.Module):
             norm = self.down_norms[i]
             if self.use_linear:
                 # print("FWD DOWN:", i, x.shape)
-                x = F.elu(norm(layer(x)))
+                x = F.silu(norm(layer(x)))
             else:
-                x = F.elu(norm(layer(x, edge_index)))
+                x = F.silu(norm(layer(x, edge_index)))
             skip_connections.append(x)
         # Up path
         for i in range(self.num_layers):
@@ -92,11 +95,14 @@ class GATv2Denoiser(nn.Module):
             x = x + skip_x  # residual from down path
             if self.use_linear:
                 # print("FWD UP:", i, x.shape)
-                x = F.elu(norm(layer(x)))
+                x = F.silu(norm(layer(x)))
             else:
-                x = F.elu(norm(layer(x, edge_index)))
+                x = F.silu(norm(layer(x, edge_index)))
         # Final projection
-        x = self.output_norm(self.output_layer(x))
+        # x = self.output_norm(self.output_layer(x))
+        # per-sample LayerNorm at the end removes per-sample mean/std information and will prevent exact reconstruction of Gaussian signals
+        x = self.output_layer(x)  # Norm layer norm used if output dist blows up, this was a workaround.
+        x = x * torch.tanh(self.output_scale)  # TODO: try later
         # Split batched graph output
         out_per_graph = x.split(batch.batch.bincount().tolist(), dim=0)
         return torch.stack(out_per_graph, dim=0)  # [B, N, out_channels]
@@ -311,7 +317,7 @@ class GraphLatentDiffusion(nn.Module):
         if self.config.augment_edges:  # Temporary, wont work for val/test set
             assert len(aug_added_edges) > 0, "PASSED AUGMENTED VALUES DONT EXIST"
         B = node_embeddings.shape[0]
-        t = torch.randint(0, self.num_denoising_steps-1, (B,), device=node_embeddings.device)
+        t = torch.randint(0, self.num_denoising_steps, (B,), device=node_embeddings.device)
         t_emb = self.timestep_embeddings(t).unsqueeze(1).expand(-1, node_embeddings.size(1), -1)
 
         if self.config.detached_denoiser:
@@ -319,12 +325,15 @@ class GraphLatentDiffusion(nn.Module):
         elif self.config.gnn_only:
             noisy_embeddings = node_embeddings
             true_noise = torch.zeros_like(node_embeddings)
-            t_emb = torch.Tensor().to(noisy_embeddings.device)
+            t_emb = None  # torch.Tensor().to(noisy_embeddings.device)
         else:
             noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
 
-        noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
-        
+        if (t_emb is not None) and (t_emb.numel() != 0):
+            noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
+        else:
+            noisy_embeddings_with_t = noisy_embeddings
+       
         if not self.config.diffusion_type == "ddim":
             denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index_list)
         
@@ -353,7 +362,7 @@ class GraphLatentDiffusion(nn.Module):
            
             sqrt_alpha_1 = self.sqrt_alphas_cumprod[t_2].unsqueeze(1).unsqueeze(2)
             sqrt_one_minus_alpha_1 = self.sqrt_one_minus_alphas_cumprod[t_2].unsqueeze(1).unsqueeze(2)
-            denoised_embeddings = (denoised_embeddings - sqrt_one_minus_alpha_1*last_noise_pred)/sqrt_alpha
+            denoised_embeddings = (denoised_embeddings - sqrt_one_minus_alpha_1*last_noise_pred)/sqrt_alpha_1
             denoised_embeddings = (denoised_embeddings - denoised_embeddings.mean())/denoised_embeddings.std()
             # denoised_embeddings = (0.1*node_embeddings) + (0.9*denoised_embeddings)
         
