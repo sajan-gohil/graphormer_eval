@@ -323,6 +323,7 @@ class GraphormerMultiheadAttention(nn.Module):
 
     def __init__(self, config: GraphormerConfig):
         super().__init__()
+        self.config = config
         self.embedding_dim = config.embedding_dim
         self.kdim = config.kdim if config.kdim is not None else config.embedding_dim
         self.vdim = config.vdim if config.vdim is not None else config.embedding_dim
@@ -365,6 +366,7 @@ class GraphormerMultiheadAttention(nn.Module):
         )
 
         self.onnx_trace = False
+        self.diffusion_model = GraphLatentDiffusion(self.kdim, config.embedding_dim, config.diffusion_steps)
 
     def reset_parameters(self):
         if self.qkv_same_dim:
@@ -382,6 +384,13 @@ class GraphormerMultiheadAttention(nn.Module):
         if self.out_proj.bias is not None:
             nn.init.constant_(self.out_proj.bias, 0.0)
 
+    def remove_attention_noise(self, attn_weights, q, k, v, batch_size, target_len, source_len, edge_index_list):
+        # attn_weights = [bsz * self.num_heads, tgt_len, src_len]
+        attn_weights_float = torch.nn.functional.softmax(attn_weights, dim=-1)
+        attn_weights = attn_weights_float.type_as(attn_weights)
+        
+
+
     def forward(
         self,
         query: torch.LongTensor,
@@ -393,6 +402,7 @@ class GraphormerMultiheadAttention(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
         before_softmax: bool = False,
         need_head_weights: bool = False,
+        edge_index_list: list = None
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Args:
@@ -456,7 +466,7 @@ class GraphormerMultiheadAttention(nn.Module):
                     "The shape of the generated padding mask for the key does not match expected dimensions."
                 )
         attn_weights = torch.bmm(q, k.transpose(1, 2))
-        attn_weights = self.apply_sparse_mask(attn_weights, tgt_len, src_len, bsz)
+        # attn_weights = self.apply_sparse_mask(attn_weights, tgt_len, src_len, bsz)  # Returns same thing
 
         if list(attn_weights.size()) != [bsz * self.num_heads, tgt_len, src_len]:
             raise AssertionError("The attention weights generated do not match the expected dimensions.")
@@ -477,12 +487,21 @@ class GraphormerMultiheadAttention(nn.Module):
             )
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
+
         if before_softmax:
             return attn_weights, v
+
+        # --- Diffusion part ----
+        if self.config.enable_layerwise_diffusion:
+            attn_weights = self.remove_attention_noise(
+                attn_weights, q, k, v, batch_size=bsz,
+                target_len=tgt_len, source_len=src_len, edge_index_list=edge_index_list)
+        # --- Diffusion part ----
 
         attn_weights_float = torch.nn.functional.softmax(attn_weights, dim=-1)
         attn_weights = attn_weights_float.type_as(attn_weights)
         attn_probs = self.attention_dropout_module(attn_weights)
+
 
         if v is None:
             raise AssertionError("No value generated")
@@ -873,12 +892,6 @@ class GraphormerModel(GraphormerPreTrainedModel):
                 aug_removed_edges=kwargs.get("aug_removed_edges", None),
                 aug_original_edges=kwargs.get("aug_original_edges", None)
             )
-            # print("ATM LOSS = ", attention_matching_loss)
-            # if self.config.optimize_diffuser:
-            #     self.diffusion_optimizer.zero_grad()
-            #     attention_matching_loss.backward(retain_graph=True)
-            #     self.diffusion_optimizer.step()
-
             input_nodes = torch.cat([graph_token, node_emb], dim=1)
         # --- End diffusion integration ---
 
@@ -933,7 +946,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         self,
         input_nodes: torch.LongTensor,
         input_edges: torch.LongTensor,
-        attn_bias: torch.Tensor,
+        attn_bias: torch.Tensor,  # Zeros by default
         in_degree: torch.LongTensor,
         out_degree: torch.LongTensor,
         spatial_pos: torch.LongTensor,
