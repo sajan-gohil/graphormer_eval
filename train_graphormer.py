@@ -24,7 +24,11 @@ from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from sklearn.metrics import f1_score
 
-from ogb.lsc import PCQM4MEvaluator
+try:
+    from ogb.lsc import PCQM4MEvaluator
+except:
+    temp = lambda *args: 1
+    PCQM4MEvaluator = temp 
 from graphormer_hf.modeling_graphormer import GraphormerForGraphClassification, GraphormerForNodeClassification
 from graphormer_hf.configuration_graphormer import GraphormerConfig
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
