@@ -199,7 +199,7 @@ else:
 evaluator = PCQM4MEvaluator()
 step = 0
 MAX_EPOCHS = 2000
-best_valid_mae = float('inf')
+best_valid_mae = float('inf') if args.dataset_name in ["pcqm4mv2"] else float("-inf")
 best_f1 = -float("inf")
 prev_loss = float('-inf')
 
