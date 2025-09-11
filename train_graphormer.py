@@ -77,6 +77,7 @@ parser.add_argument("--augment_edges", action="store_true", help="Remove/add dum
 parser.add_argument("--gnn_only", action="store_true", help="Instead of diffusion, treat denoiser as gnn")
 parser.add_argument("--remove_attn_bias", action="store_true", help="Remove attention bias module altogether")
 parser.add_argument("--enable_layerwise_diffusion", action="store_true", help="Perform diffusion after each attention step")
+parser.add_argument("--freeze_pretrained_encoder", type=str, default=None, help="Freeze the pretrained encoder and set weights from given path")
 
 args = parser.parse_args()
 
@@ -187,6 +188,15 @@ if args.pretrained_weights:
         reduce_lr_scheduler.load_state_dict(state_dicts["reduce_lr_scheduler"])
     print(f"Loaded pretrained weights from {args.pretrained_weights}")
 
+
+if args.freeze_pretrained_encoder:
+    print(f"Freezing pretrained encoder weights from {args.freeze_pretrained_encoder}")
+    state_dicts = torch.load(args.freeze_pretrained_encoder, weights_only=False)
+    model.load_state_dict(state_dicts["model"], strict=False)
+    for name, param in model.named_parameters():
+        if "graph_encoder" in name or "GraphEncoder" in name:
+            param.requires_grad = False
+            print(f"Froze parameter: {name}")
 
 # Only move to device if not tensor parallel (dispatch_model handles device placement)
 if not (getattr(args, "tensor_parallel", False) and infer_auto_device_map is not None and dispatch_model is not None):
