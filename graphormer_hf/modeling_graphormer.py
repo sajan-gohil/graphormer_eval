@@ -873,9 +873,15 @@ class GraphormerModel(GraphormerPreTrainedModel):
     ) -> Union[tuple[torch.LongTensor], BaseModelOutputWithNoAttention]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        inner_states, graph_rep = self.graph_encoder(
-            input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index
-        )
+        if self.config.freeze_pretrained_encoder:
+            with torch.no_grad():
+                inner_states, graph_rep = self.graph_encoder(
+                    input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index
+                )
+        else:
+            inner_states, graph_rep = self.graph_encoder(
+                input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index
+            )
         # last inner state, then revert Batch and Graph len
         input_nodes = inner_states[-1].transpose(0, 1)
 
