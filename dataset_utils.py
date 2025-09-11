@@ -53,11 +53,12 @@ def load_data(dataset_name, num_workers=0, batch_size=512, config=None):
             valid_idx = indices[int(0.5 * num_nodes):int(0.75 * num_nodes)]
             test_idx = indices[int(0.75 * num_nodes):]
 
-        train_dataset = Subset(data, train_idx[:len(train_idx) // 10])  # Use a smaller subset for faster training
+        # Use full training indices (no subsampling)
+        train_dataset = Subset(data, train_idx)
         val_dataset = Subset(data, valid_idx)
         test_dataset = Subset(data, test_idx)
 
-        collate_fn = GraphormerDataCollator(on_the_fly_processing=True)
+        collate_fn = GraphormerDataCollator(on_the_fly_processing=True, config=config)
 
         train_loader = DataLoader(
             train_dataset,

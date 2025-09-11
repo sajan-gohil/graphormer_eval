@@ -661,6 +661,38 @@ class GraphormerGraphEncoder(nn.Module):
                 for p in m.parameters():
                     p.requires_grad = False
 
+        # Model parallel attributes
+        self.model_parallel = False
+        self.layer_devices: list[str] = []
+
+    def set_model_parallel(self, devices: list[str]):
+        """Enable simple layer-wise model parallelism.
+        Args:
+            devices: list of cuda device strings (e.g., ['cuda:0','cuda:1']). Layers are split evenly.
+        """
+        if len(devices) < 2:
+            raise ValueError("Provide at least two devices for model parallelism.")
+        total_layers = len(self.layers)
+        per = (total_layers + len(devices) - 1) // len(devices)
+        self.layer_devices = []
+        for i, layer in enumerate(self.layers):
+            d = devices[i // per]
+            layer.to(d)
+            self.layer_devices.append(d)
+        # Keep feature/bias modules on first device
+        anchor = devices[0]
+        self.graph_node_feature.to(anchor)
+        if not self.config.remove_attn_bias:
+            self.graph_attn_bias.to(anchor)
+        if self.emb_layer_norm is not None:
+            self.emb_layer_norm.to(anchor)
+        if self.quant_noise is not None:
+            self.quant_noise.to(anchor)
+        if self.config.pre_layernorm:
+            self.final_layer_norm.to(self.layer_devices[-1])  # place final norm with last layer's device
+        self.model_parallel = True
+        self.mp_anchor_device = anchor
+
     def forward(
         self,
         input_nodes: torch.LongTensor,
@@ -711,13 +743,21 @@ class GraphormerGraphEncoder(nn.Module):
         if not last_state_only:
             inner_states.append(input_nodes)
 
-        for layer in self.layers:
+        for idx, layer in enumerate(self.layers):
+            if self.model_parallel:
+                target_device = self.layer_devices[idx]
+                if input_nodes.device.type != 'cuda' or input_nodes.device != torch.device(target_device):
+                    input_nodes = input_nodes.to(target_device, non_blocking=True)
+                    padding_mask = padding_mask.to(target_device, non_blocking=True)
+                    if attn_mask is not None:
+                        attn_mask = attn_mask.to(target_device, non_blocking=True)
+                    attn_bias = attn_bias.to(target_device, non_blocking=True)
             input_nodes, _ = layer(
-                input_nodes,
-                self_attn_padding_mask=padding_mask,
-                self_attn_mask=attn_mask,
-                self_attn_bias=attn_bias,
-            )
+                    input_nodes,
+                    self_attn_padding_mask=padding_mask,
+                    self_attn_mask=attn_mask,
+                    self_attn_bias=attn_bias,
+                )
             if not last_state_only:
                 inner_states.append(input_nodes)
 
@@ -851,6 +891,20 @@ class GraphormerModel(GraphormerPreTrainedModel):
             self.diffusion_optimizer = None
 
         self.post_init()
+        self.model_parallel = False
+        self.mp_devices: list[str] = []
+
+    def set_model_parallel(self, devices: list[str]):
+        self.graph_encoder.set_model_parallel(devices)
+        # Keep head on first device
+        anchor = devices[0]
+        self.lm_head_transform_weight.to(anchor)
+        self.layer_norm.to(anchor)
+        if self.diffusion_model is not None:
+            # put diffusion model on last device to reduce transfers after encoder if heavy
+            self.diffusion_model.to(devices[-1])
+        self.model_parallel = True
+        self.mp_devices = devices
 
     def reset_output_layer_parameters(self):
         self.lm_output_learned_bias = nn.Parameter(torch.zeros(1))
@@ -891,14 +945,21 @@ class GraphormerModel(GraphormerPreTrainedModel):
             # Remove graph token for diffusion, then re-attach after
             graph_token = input_nodes[:, :1, :]
             node_emb = input_nodes[:, 1:, :]
+            # Move to diffusion device if model parallel
+            if self.model_parallel and len(self.mp_devices) > 1:
+                diff_device = next(self.diffusion_model.parameters()).device
+                node_emb = node_emb.to(diff_device, non_blocking=True)
             # edge_index should be a list of edge_index tensors for each graph in batch
             node_emb, attention_matching_loss = self.diffusion_model(
-                node_emb, edge_index,
-                aug_added_edges=kwargs.get("aug_added_edges", None),
-                aug_removed_edges=kwargs.get("aug_removed_edges", None),
-                aug_original_edges=kwargs.get("aug_original_edges", None)
-            )
+                    node_emb, edge_index,
+                    aug_added_edges=kwargs.get("aug_added_edges", None),
+                    aug_removed_edges=kwargs.get("aug_removed_edges", None),
+                    aug_original_edges=kwargs.get("aug_original_edges", None)
+                )
             input_nodes = torch.cat([graph_token, node_emb], dim=1)
+        # Ensure final tensors on anchor device for head
+        if self.model_parallel and input_nodes.device != self.lm_head_transform_weight.weight.device:
+            input_nodes = input_nodes.to(self.lm_head_transform_weight.weight.device, non_blocking=True)
         # --- End diffusion integration ---
 
         # project masked tokens only
