@@ -40,28 +40,34 @@ class GATv2Denoiser(nn.Module):
         # Build downsampling path
         for i in range(num_layers):
             in_dim = in_channels if i == 0 else hidden_channels * heads
-            out_dim = hidden_channels
+            out_dim = hidden_channels if not self.use_linear else hidden_channels * heads
             if use_linear:
                 layer = nn.Linear(in_dim, out_dim)
             else:
                 layer = GATv2Conv(in_dim, out_dim, heads=heads)
             self.down_blocks.append(layer)
             self.down_norms.append(nn.LayerNorm(out_dim * heads if not use_linear else out_dim))
+            # print("DOWN:", i, in_dim, out_dim)
 
         # Build upsampling path (same number of layers, reverse direction)
         for i in range(num_layers):
             in_dim = hidden_channels * heads
-            out_dim = hidden_channels
+            out_dim = hidden_channels if not self.use_linear else hidden_channels * heads
             if use_linear:
                 layer = nn.Linear(in_dim, out_dim)
             else:
                 layer = GATv2Conv(in_dim, out_dim, heads=heads)
             self.up_blocks.append(layer)
             self.up_norms.append(nn.LayerNorm(out_dim * heads if not use_linear else out_dim))
+            # print("UP:", i, in_dim, out_dim)
 
-        final_in = hidden_channels * heads if not use_linear else hidden_channels
-        self.output_layer = nn.Linear(final_in, out_channels)
+        final_in = hidden_channels * heads  # if not use_linear else hidden_channels
+        self.output_layer = nn.Linear(final_in, out_channels)  # Out channels half of in because in has timestep embedding
+        nn.init.zeros_(self.output_layer.weight)
+        nn.init.zeros_(self.output_layer.bias)
+        self.output_scale = nn.Parameter(torch.tensor(0.0))
         self.output_norm = nn.LayerNorm(out_channels)
+        # print("OUT:", out_channels)
 
     def forward(self, x_batch, edge_index_list):
         B, N, Feat = x_batch.shape
@@ -75,22 +81,28 @@ class GATv2Denoiser(nn.Module):
             layer = self.down_blocks[i]
             norm = self.down_norms[i]
             if self.use_linear:
-                x = F.elu(norm(layer(x)))
+                # print("FWD DOWN:", i, x.shape)
+                x = F.silu(norm(layer(x)))
             else:
-                x = F.elu(norm(layer(x, edge_index)))
+                x = F.silu(norm(layer(x, edge_index)))
             skip_connections.append(x)
         # Up path
         for i in range(self.num_layers):
             layer = self.up_blocks[i]
             norm = self.up_norms[i]
+            # print("FWD UP SKIP:", i, -(i+2), i<self.num_layers-1)
             skip_x = skip_connections[-(i + 2)] if i < self.num_layers - 1 else torch.zeros_like(x)
             x = x + skip_x  # residual from down path
             if self.use_linear:
-                x = F.elu(norm(layer(x)))
+                # print("FWD UP:", i, x.shape)
+                x = F.silu(norm(layer(x)))
             else:
-                x = F.elu(norm(layer(x, edge_index)))
+                x = F.silu(norm(layer(x, edge_index)))
         # Final projection
-        x = self.output_norm(self.output_layer(x))
+        # x = self.output_norm(self.output_layer(x))
+        # per-sample LayerNorm at the end removes per-sample mean/std information and will prevent exact reconstruction of Gaussian signals
+        x = self.output_layer(x)  # Norm layer norm used if output dist blows up, this was a workaround.
+        x = x * torch.tanh(self.output_scale)  # TODO: try later
         # Split batched graph output
         out_per_graph = x.split(batch.batch.bincount().tolist(), dim=0)
         return torch.stack(out_per_graph, dim=0)  # [B, N, out_channels]
@@ -137,10 +149,13 @@ class GraphLatentDiffusion(nn.Module):
         noisy_x = sqrt_alpha * x + sqrt_one_minus_alpha * noise
         return noisy_x, noise
 
+    def add_structured_noise(self, x, t, edge_index_list):
+        pass
+
     def predict_x0_from_noise(self, noisy_x, noise_pred, t):
         sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
         sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
-        return (noisy_x - sqrt_one_minus_alpha * noise_pred) / sqrt_alpha
+        return (noisy_x - sqrt_one_minus_alpha * noise_pred) / (sqrt_alpha + 1e-12)
 
     def optimize_diffusion(self, node_embeddings, edge_index_list):
         """
@@ -151,6 +166,8 @@ class GraphLatentDiffusion(nn.Module):
         noisy_x, true_noise = self.add_noise(node_embeddings.detach().clone(), t)
 
         x_t = noisy_x.clone()
+        losses = []
+        mse = MSELoss()
 
         for step in reversed(range(self.num_denoising_steps)):
             x_t = x_t.detach()
@@ -160,12 +177,15 @@ class GraphLatentDiffusion(nn.Module):
             noisy_with_t = torch.cat([x_t, t_emb], dim=-1)
             noise_pred = self.denoiser(noisy_with_t, edge_index_list)
 
-            loss = MSELoss()(true_noise, noise_pred)
+            loss = mse(true_noise, noise_pred)
+            losses.append(loss)
             # if self.config.optimize_diffuser:
                 # print("TRYING ========")
-            self.diffusion_optimizer.zero_grad()
-            loss.backward(retain_graph=False)
-            self.diffusion_optimizer.step()
+
+            # NOT ideal to update denoiser mid single denoising process
+            # self.diffusion_optimizer.zero_grad()
+            # loss.backward(retain_graph=False)
+            # self.diffusion_optimizer.step()
                 # print("====optimized")
 
             # Update x_t -> x_{t-1} (DDIM-like deterministic step)
@@ -174,6 +194,14 @@ class GraphLatentDiffusion(nn.Module):
                 alpha_prev = self.alphas_cumprod[step - 1]
                 x_t = torch.sqrt(alpha_prev).unsqueeze(0).unsqueeze(-1) * x0_pred + \
                       torch.sqrt(1 - alpha_prev).unsqueeze(0).unsqueeze(-1) * noise_pred
+            else:
+                x_t = x0_pred.detach()
+
+        total_loss = torch.stack(losses).mean()
+        self.diffusion_optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.denoiser.parameters(), 5.0)  # optional
+        self.diffusion_optimizer.step()
 
         return x_t  # final denoised embeddings after training
 
@@ -305,7 +333,7 @@ class GraphLatentDiffusion(nn.Module):
         if self.config.augment_edges:  # Temporary, wont work for val/test set
             assert len(aug_added_edges) > 0, "PASSED AUGMENTED VALUES DONT EXIST"
         B = node_embeddings.shape[0]
-        t = torch.randint(0, self.num_denoising_steps-1, (B,), device=node_embeddings.device)
+        t = torch.randint(0, self.num_denoising_steps, (B,), device=node_embeddings.device)
         t_emb = self.timestep_embeddings(t).unsqueeze(1).expand(-1, node_embeddings.size(1), -1)
 
         if self.config.detached_denoiser:
@@ -313,12 +341,15 @@ class GraphLatentDiffusion(nn.Module):
         elif self.config.gnn_only:
             noisy_embeddings = node_embeddings
             true_noise = torch.zeros_like(node_embeddings)
-            t_emb = torch.Tensor().to(noisy_embeddings.device)
+            t_emb = None  # torch.Tensor().to(noisy_embeddings.device)
         else:
             noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
 
-        noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
-        
+        if (t_emb is not None) and (t_emb.numel() != 0):
+            noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
+        else:
+            noisy_embeddings_with_t = noisy_embeddings
+       
         if not self.config.diffusion_type == "ddim":
             denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index_list)
         
@@ -347,7 +378,7 @@ class GraphLatentDiffusion(nn.Module):
            
             sqrt_alpha_1 = self.sqrt_alphas_cumprod[t_2].unsqueeze(1).unsqueeze(2)
             sqrt_one_minus_alpha_1 = self.sqrt_one_minus_alphas_cumprod[t_2].unsqueeze(1).unsqueeze(2)
-            denoised_embeddings = (denoised_embeddings - sqrt_one_minus_alpha_1*last_noise_pred)/sqrt_alpha
+            denoised_embeddings = (denoised_embeddings - sqrt_one_minus_alpha_1*last_noise_pred)/sqrt_alpha_1
             denoised_embeddings = (denoised_embeddings - denoised_embeddings.mean())/denoised_embeddings.std()
             # denoised_embeddings = (0.1*node_embeddings) + (0.9*denoised_embeddings)
         

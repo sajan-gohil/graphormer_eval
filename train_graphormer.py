@@ -76,6 +76,8 @@ parser.add_argument("--optimize_only_diffuser", action="store_true", help="Optim
 parser.add_argument("--augment_edges", action="store_true", help="Remove/add dummy edges and calculate separate loss")
 parser.add_argument("--gnn_only", action="store_true", help="Instead of diffusion, treat denoiser as gnn")
 parser.add_argument("--remove_attn_bias", action="store_true", help="Remove attention bias module altogether")
+parser.add_argument("--enable_layerwise_diffusion", action="store_true", help="Perform diffusion after each attention step")
+parser.add_argument("--freeze_pretrained_encoder", type=str, default=None, help="Freeze the pretrained encoder and set weights from given path")
 
 args = parser.parse_args()
 
@@ -145,7 +147,7 @@ if getattr(args, "tensor_parallel", False):
             print(f"Model dispatched across devices: {device_map}")
         print("Model wrapped for tensor parallelism on GPUs 0 and 1.")
     else:
-        print("Tensor parallelism requires transformers >=4.27.0. Proceeding without tensor parallelism.")
+        print("Auto device map not inferred.")
 
 # 3. Optimizer and Scheduler
 LEARNING_RATE = 2e-5
@@ -187,6 +189,15 @@ if args.pretrained_weights:
     print(f"Loaded pretrained weights from {args.pretrained_weights}")
 
 
+if args.freeze_pretrained_encoder:
+    print(f"Freezing pretrained encoder weights from {args.freeze_pretrained_encoder}")
+    state_dicts = torch.load(args.freeze_pretrained_encoder, weights_only=False)
+    model.load_state_dict(state_dicts["model"], strict=False)
+    for name, param in model.named_parameters():
+        if "graph_encoder" in name or "GraphEncoder" in name:
+            param.requires_grad = False
+            print(f"Froze parameter: {name}")
+
 # Only move to device if not tensor parallel (dispatch_model handles device placement)
 if not (getattr(args, "tensor_parallel", False) and infer_auto_device_map is not None and dispatch_model is not None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -198,7 +209,7 @@ else:
 evaluator = PCQM4MEvaluator()
 step = 0
 MAX_EPOCHS = 2000
-best_valid_mae = float('inf')
+best_valid_mae = float('inf') if args.dataset_name in ["pcqm4mv2"] else float("-inf")
 best_f1 = -float("inf")
 prev_loss = float('-inf')
 
