@@ -184,8 +184,7 @@ class GraphormerGraphNodeFeature(nn.Module):
         self.num_atoms = config.num_atoms
 
         self.atom_encoder = nn.Embedding(config.num_atoms + 1, config.hidden_size, padding_idx=config.pad_token_id)
-        self.feature_encoder = nn.LazyLinear(config.hidden_size)
-        self.feature_encoder_2 = nn.Linear(config.hidden_size, config.hidden_size)
+        self.feature_encoder = nn.Linear(config.hidden_size, config.hidden_size)
         self.in_degree_encoder = nn.Embedding(
             config.num_in_degree, config.hidden_size, padding_idx=config.pad_token_id
         )
@@ -898,8 +897,9 @@ class GraphormerModel(GraphormerPreTrainedModel):
         self.graph_encoder.set_model_parallel(devices)
         # Keep head on first device
         anchor = devices[0]
-        self.lm_head_transform_weight.to(anchor)
-        self.layer_norm.to(anchor)
+        # self.lm_head_transform_weight.to(anchor)
+        self.lm_head_transform_weight.to(devices[-1])
+        self.layer_norm.to(devices[-1])
         if self.diffusion_model is not None:
             # put diffusion model on last device to reduce transfers after encoder if heavy
             self.diffusion_model.to(devices[-1])
@@ -1090,6 +1090,14 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    def set_model_parallel(self, devices: list[str]):
+        self.encoder.set_model_parallel(devices)
+        # Keep head on first device
+        anchor = devices[0]
+        self.classifier.to(devices[-1])
+        self.model_parallel = True
+        self.mp_devices = devices
 
     def forward(
         self,
