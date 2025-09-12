@@ -97,6 +97,7 @@ print(f"Parameters: {json.dumps(vars(args), indent=4)}")
 shutil.copy("graph_diffusion.py", args.experiment_dir)
 shutil.copytree("graphormer_hf/", os.path.join(args.experiment_dir, "graphormer_hf"))
 shutil.copy("train_graphormer.py", args.experiment_dir)
+shutil.copy("dataset_utils.py", args.experiment_dir)
 
 BATCH_SIZE = args.batch_size  # 512
 dataset_classes = {
@@ -180,15 +181,25 @@ def lr_lambda(current_step):
 scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 reduce_lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=5, min_lr=1e-8)
 
+pre_epoch = 0
 # Load pretrained weights if specified
 if args.pretrained_weights:
     state_dicts = torch.load(args.pretrained_weights, weights_only=False)
     model.load_state_dict(state_dicts["model"], strict=False)
+    model.to("cuda")  # TODO: FIX THIS HACK
     optimizer.load_state_dict(state_dicts.get("optimizer", {}))
+    # Ensure optimizer states are on the same device as model params
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if torch.is_tensor(v):
+                state[k] = v.to(next(model.parameters()).device)
+
     if "scheduler" in state_dicts:
         scheduler.load_state_dict(state_dicts["scheduler"])
     if "reduce_lr_scheduler" in state_dicts:
         reduce_lr_scheduler.load_state_dict(state_dicts["reduce_lr_scheduler"])
+    if "epoch" in state_dicts:
+        pre_epoch = state_dicts["epoch"]
     print(f"Loaded pretrained weights from {args.pretrained_weights}")
 
 
@@ -198,6 +209,7 @@ if not (getattr(args, "tensor_parallel", False) and infer_auto_device_map is not
     model.to(device)
 else:
     device = torch.device("cuda:0")
+    model.to(device)
 
 # 4. Training loop
 evaluator = PCQM4MEvaluator()
@@ -207,7 +219,7 @@ best_valid_mae = float('inf') if args.dataset_name in ["pcqm4mv2"] else float("-
 best_f1 = -float("inf")
 prev_loss = float('-inf')
 
-for epoch in range(MAX_EPOCHS):
+for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     print("EPOCH: ", epoch)
     model.train()
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{MAX_EPOCHS}")
