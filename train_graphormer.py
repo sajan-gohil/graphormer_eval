@@ -74,8 +74,10 @@ parser.add_argument("--diffusion_steps", type=int, default=50, help="Number of d
 parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for data loading")
 parser.add_argument("--dataset_name", type=str, default="pcqm4mv2", help="Name of the dataset to use")
 parser.add_argument("--create_subgraph", action="store_true", help="Create subgraphs from given large graph")
-parser.add_argument("--num_denoiser_layers", type=int, default=4, help="Number of layers in the denoiser")
-parser.add_argument("--use_linear_denoiser", action="store_true", help="Use linear layers in the denoiser")
+parser.add_argument("--num_denoiser_layers", type=int, default=3, help="Number of layers in the denoiser: n down, n-1 up + 1 final projection")
+parser.add_argument("--use_linear_denoiser", action="store_true", help="[Deprecated with denoisers.py] Use linear layers in the denoiser")
+parser.add_argument("--denoiser_type", type=str, default="gat", help="Denoiser layer type. Accepted: gat, linear, mha")
+
 parser.add_argument("--optimize_only_diffuser", action="store_true", help="Optimize only the diffuser model")
 parser.add_argument("--augment_edges", action="store_true", help="Remove/add dummy edges and calculate separate loss")
 parser.add_argument("--gnn_only", action="store_true", help="Instead of diffusion, treat denoiser as gnn")

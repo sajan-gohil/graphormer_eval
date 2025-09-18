@@ -12,12 +12,12 @@ import datetime
 
 
 class DenoiserModel(nn.Module):
-    def __init__(self, in_channels, time_embedding, num_layers=3, heads=4, layer_type="gat", config=None):
+    def __init__(self, in_channels, timestep_size, num_layers=3, heads=4, layer_type="gat", config=None):
         super().__init__()
         self.config = config
         self.in_channels = in_channels
-        self.time_embedding = time_embedding
-        self.timestep_sise = time_embedding.shape[-1]
+        # self.time_embedding = time_embedding
+        self.timestep_size = timestep_size # time_embedding.shape[-1]
         self.num_layers = num_layers
         # Increase dim only for linear/GNN
         self.num_channels = [
@@ -34,7 +34,7 @@ class DenoiserModel(nn.Module):
         ])
 
         self.t_proj = nn.ModuleList([
-            nn.Linear(self.timestep_sise, self.num_channels[i])
+            nn.Linear(self.timestep_size, self.num_channels[i])
             for i in range(len(self.num_channels[:-1]))
         ])
 
@@ -56,22 +56,23 @@ class DenoiserModel(nn.Module):
                                            batch_first=True)
                 for i in range(len(self.num_channels[:-1]))
             ])
+        print("DENOISER:", self.layers)
 
 
-    def forward(self, x_batch, edge_index_list):
+    def forward(self, x_batch, time_embedding, edge_index_list):
         if self.layer_type == "gat":
             B, N, Feat = x_batch.shape
             data_list = [Data(x=x_batch[b], edge_index=edge_index_list[b]) for b in range(B)]
             batch = Batch.from_data_list(data_list)
             x_batch = batch.x
             edge_index_list = batch.edge_index
-            time_embedding_batch = self.time_embedding[batch.batch]
+            time_embedding_batch = time_embedding[batch.batch]
         else:
-            time_embedding_batch = self.time_embedding
+            time_embedding_batch = time_embedding
 
         down_res = []
         for i in range(self.num_layers):
-            print("=-=-=-=-", x_batch.shape, self.t_proj[i](time_embedding_batch).unsqueeze(1).shape)
+            # print("=-=-=-=-", x_batch.shape, self.t_proj[i](time_embedding_batch).unsqueeze(1).shape)
             t_emb = self.t_proj[i](time_embedding_batch)
             if len(x_batch.shape) == 3:
                 t_emb = t_emb.unsqueeze(1)
@@ -79,10 +80,11 @@ class DenoiserModel(nn.Module):
             x_batch = self.layers[i](x_batch) if self.layer_type != "gat" else self.layers[i](
                 x_batch, edge_index_list)
             if self.layer_type != "mha":
-                x_batch = self.norms[i](x_batch)
+                x_batch = F.silu(self.norms[i](x_batch))
             down_res.append(x_batch)
-
+        # print("Down res shapes:", [i.shape for i in down_res])
         down_res = down_res[::-1]
+        # print("Down res shapes:", [i.shape for i in down_res])
         for idx, i in enumerate(list(range(self.num_layers, len(self.layers))), 1): # Start from 1 to skip bottleneck
             t_emb = self.t_proj[i](time_embedding_batch)
             if len(x_batch.shape) == 3:
@@ -90,12 +92,13 @@ class DenoiserModel(nn.Module):
             x_batch += t_emb
             x_batch = self.layers[i](x_batch) if self.layer_type != "gat" else self.layers[i](
                 x_batch, edge_index_list)
-            if idx < len(down_res):
-                x_batch += down_res[idx]
-            # elif down_res[idx].shape == x_batch.shape:
-            #     x_batch += down_res[idx]
             if self.layer_type != "mha":
-                x_batch = self.norms[i](x_batch)
+                if idx < len(down_res):
+                    print("Adding down res:", idx, down_res[idx].shape)
+                    x_batch += down_res[idx]
+                x_batch = F.silu(self.norms[i](x_batch))
+        if self.layer_type == "gat":
+            x_batch = torch.stack(x_batch.split(batch.batch.bincount().tolist(), dim=0), dim=0)
         return x_batch
 
 if __name__ == "__main__":
@@ -118,7 +121,7 @@ if __name__ == "__main__":
     def main():
         in_channels = 8
         timestep_dim = 16
-        num_layers = 2
+        num_layers = 3
         # fake embedding layer for timesteps (like nn.Embedding)
         # simulate B=2 with random timestep ids
         batch_size = 2
@@ -135,13 +138,13 @@ if __name__ == "__main__":
         # create model (test with GAT)
         model = DenoiserModel(
             in_channels=in_channels,
-            time_embedding=timestep_embedding,
+            timestep_size=timestep_dim,
             num_layers=num_layers,
             heads=4,
-            layer_type="mha",
+            layer_type="linear",
         )
         print("Input shape:", x_batch.shape)
         # forward pass
-        out = model(x_batch, edge_index_list)
+        out = model(x_batch, timestep_embedding, edge_index_list)
         print("Output shape:", out.shape)
     main()
