@@ -8,6 +8,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, L1Loss
 from torch_geometric.nn import GATv2Conv
 from torch_geometric.data import Data, Batch
 import datetime
+from denoiser import DenoiserModel
 
 
 def cosine_beta_schedule(timesteps, s=0.008):
@@ -113,7 +114,7 @@ class GATv2Denoiser(nn.Module):
         # x = self.output_norm(self.output_layer(x))
         # per-sample LayerNorm at the end removes per-sample mean/std information and will prevent exact reconstruction of Gaussian signals
         x = self.output_layer(x)  # Norm layer norm used if output dist blows up, this was a workaround.
-        x = x * torch.tanh(self.output_scale)  # TODO: try later
+        # x = x * torch.tanh(self.output_scale)  # TODO: try later
         # Split batched graph output
         out_per_graph = x.split(batch.batch.bincount().tolist(), dim=0)
         return torch.stack(out_per_graph, dim=0)  # [B, N, out_channels]
@@ -148,9 +149,15 @@ class GraphLatentDiffusion(nn.Module):
             denoiser_input_dim = input_dim
         else:
             denoiser_input_dim = input_dim + latent_dim
-        self.denoiser = GATv2Denoiser(denoiser_input_dim, latent_dim//4, input_dim, heads=4, 
-                                     num_layers=config.num_denoiser_layers,
-                                     use_linear=config.use_linear_denoiser)
+        # self.denoiser = GATv2Denoiser(denoiser_input_dim, latent_dim//4, input_dim, heads=4, 
+        #                              num_layers=config.num_denoiser_layers,
+        #                              use_linear=config.use_linear_denoiser)
+        self.denoiser = DenoiserModel(in_channels=input_dim,
+                                      timestep_sie=latent_dim,
+                                      num_layers=config.num_denoiser_layers,
+                                      heads=4,
+                                      layer_type=config.denoiser_type,
+                                      config=self.config)
         self.diffusion_optimizer = torch.optim.Adam(self.denoiser.parameters(), lr=1e-4)
 
     def add_noise(self, x, t):
@@ -186,7 +193,8 @@ class GraphLatentDiffusion(nn.Module):
             t_emb = self.timestep_embeddings(t_step).unsqueeze(1).expand(-1, x_t.size(1), -1)
 
             noisy_with_t = torch.cat([x_t, t_emb], dim=-1)
-            noise_pred = self.denoiser(noisy_with_t, edge_index_list)
+            # noise_pred = self.denoiser(noisy_with_t, edge_index_list)
+            noise_pred = self.denoiser(x_t, t_emb, edge_index_list)
 
             loss = mse(true_noise, noise_pred)
             losses.append(loss)
@@ -231,7 +239,8 @@ class GraphLatentDiffusion(nn.Module):
             t_emb = self.timestep_embeddings(t_step).unsqueeze(1).expand(-1, x_t.size(1), -1)
 
             noisy_with_t = torch.cat([x_t, t_emb], dim=-1)
-            noise_pred = self.denoiser(noisy_with_t, edge_index_list)
+            # noise_pred = self.denoiser(noisy_with_t, edge_index_list)
+            noise_pred = self.denoiser(x_t, t_emb, edge_index_list)
 
             x0_pred = self.predict_x0_from_noise(x_t, noise_pred, t_step)
             if step > 0:
@@ -345,6 +354,7 @@ class GraphLatentDiffusion(nn.Module):
             assert len(aug_added_edges) > 0, "PASSED AUGMENTED VALUES DONT EXIST"
         B = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps, (B,), device=node_embeddings.device)
+
         t_emb = self.timestep_embeddings(t).unsqueeze(1).expand(-1, node_embeddings.size(1), -1)
 
         if self.config.detached_denoiser:
@@ -361,31 +371,39 @@ class GraphLatentDiffusion(nn.Module):
         else:
             noisy_embeddings_with_t = noisy_embeddings
        
+        reconstruction_loss = 0
         if not self.config.diffusion_type == "ddim":
-            denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index_list)
+            # denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index_list)
+            denoised_embeddings = self.denoiser(noisy_embeddings, t_emb, edge_index_list)
         
         if self.config.diffusion_type == "x0":
-            reconstruction_loss = MSELoss()(node_embeddings, denoised_embeddings)
+            if self.config.reconstruction_scale:
+                reconstruction_loss = MSELoss()(node_embeddings, denoised_embeddings)
 
         elif self.config.diffusion_type == "delta":
-            reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
             denoised_embeddings = node_embeddings + denoised_embeddings
+            if self.config.reconstruction_scale:
+                reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
 
         elif self.config.diffusion_type == "noise_pred_single":
-            reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
             sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
             sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)  # Remove more noise than added
             denoised_embeddings = (noisy_embeddings - sqrt_one_minus_alpha*denoised_embeddings)/sqrt_alpha
+            if self.config.reconstruction_scale:
+                reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
 
         elif self.config.diffusion_type == "noise_pred":
-            reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
+            if self.config.reconstruction_scale:
+                reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
             sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
             sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)  # Remove more noise than added
             denoised_embeddings = (noisy_embeddings - sqrt_one_minus_alpha*denoised_embeddings)/sqrt_alpha
            
             t_2 = torch.ones((B,), dtype=torch.long, device=node_embeddings.device)
             t_emb_2 = self.timestep_embeddings(t_2).unsqueeze(1).expand(-1, node_embeddings.size(1), -1)
-            last_noise_pred = self.denoiser(torch.cat([denoised_embeddings, t_emb_2], dim=-1), edge_index_list)
+            # last_noise_pred = self.denoiser(torch.cat([denoised_embeddings, t_emb_2], dim=-1), edge_index_list)
+            last_noise_pred = self.denoiser(denoised_embeddings, t_emb_2, edge_index_list)
+            
            
             sqrt_alpha_1 = self.sqrt_alphas_cumprod[t_2].unsqueeze(1).unsqueeze(2)
             sqrt_one_minus_alpha_1 = self.sqrt_one_minus_alphas_cumprod[t_2].unsqueeze(1).unsqueeze(2)

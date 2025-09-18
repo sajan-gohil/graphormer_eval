@@ -24,7 +24,11 @@ from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from sklearn.metrics import f1_score
 
-from ogb.lsc import PCQM4MEvaluator
+try:
+    from ogb.lsc import PCQM4MEvaluator
+except:
+    temp = lambda *args: 1
+    PCQM4MEvaluator = temp 
 from graphormer_hf.modeling_graphormer import GraphormerForGraphClassification, GraphormerForNodeClassification
 from graphormer_hf.configuration_graphormer import GraphormerConfig
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
@@ -70,8 +74,10 @@ parser.add_argument("--diffusion_steps", type=int, default=50, help="Number of d
 parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for data loading")
 parser.add_argument("--dataset_name", type=str, default="pcqm4mv2", help="Name of the dataset to use")
 parser.add_argument("--create_subgraph", action="store_true", help="Create subgraphs from given large graph")
-parser.add_argument("--num_denoiser_layers", type=int, default=4, help="Number of layers in the denoiser")
-parser.add_argument("--use_linear_denoiser", action="store_true", help="Use linear layers in the denoiser")
+parser.add_argument("--num_denoiser_layers", type=int, default=3, help="Number of layers in the denoiser: n down, n-1 up + 1 final projection")
+parser.add_argument("--use_linear_denoiser", action="store_true", help="[Deprecated with denoisers.py] Use linear layers in the denoiser")
+parser.add_argument("--denoiser_type", type=str, default="gat", help="Denoiser layer type. Accepted: gat, linear, mha")
+
 parser.add_argument("--optimize_only_diffuser", action="store_true", help="Optimize only the diffuser model")
 parser.add_argument("--augment_edges", action="store_true", help="Remove/add dummy edges and calculate separate loss")
 parser.add_argument("--gnn_only", action="store_true", help="Instead of diffusion, treat denoiser as gnn")
@@ -94,6 +100,7 @@ print(f"Parameters: {json.dumps(vars(args), indent=4)}")
 shutil.copy("graph_diffusion.py", args.experiment_dir)
 shutil.copytree("graphormer_hf/", os.path.join(args.experiment_dir, "graphormer_hf"))
 shutil.copy("train_graphormer.py", args.experiment_dir)
+shutil.copy("dataset_utils.py", args.experiment_dir)
 
 BATCH_SIZE = args.batch_size  # 512
 dataset_classes = {
@@ -179,15 +186,25 @@ def lr_lambda(current_step):
 scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 reduce_lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=5, min_lr=1e-8)
 
+pre_epoch = 0
 # Load pretrained weights if specified
 if args.pretrained_weights:
     state_dicts = torch.load(args.pretrained_weights, weights_only=False)
     model.load_state_dict(state_dicts["model"], strict=False)
+    model.to("cuda")  # TODO: FIX THIS HACK
     optimizer.load_state_dict(state_dicts.get("optimizer", {}))
+    # Ensure optimizer states are on the same device as model params
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if torch.is_tensor(v):
+                state[k] = v.to(next(model.parameters()).device)
+
     if "scheduler" in state_dicts:
         scheduler.load_state_dict(state_dicts["scheduler"])
     if "reduce_lr_scheduler" in state_dicts:
         reduce_lr_scheduler.load_state_dict(state_dicts["reduce_lr_scheduler"])
+    if "epoch" in state_dicts:
+        pre_epoch = state_dicts["epoch"]
     print(f"Loaded pretrained weights from {args.pretrained_weights}")
 
 
@@ -206,6 +223,7 @@ if not (getattr(args, "tensor_parallel", False) and infer_auto_device_map is not
     model.to(device)
 else:
     device = torch.device("cuda:0")
+    model.to(device)
 
 # 4. Training loop
 evaluator = PCQM4MEvaluator()
@@ -215,7 +233,7 @@ best_valid_mae = float('inf') if args.dataset_name in ["pcqm4mv2"] else float("-
 best_f1 = -float("inf")
 prev_loss = float('-inf')
 
-for epoch in range(MAX_EPOCHS):
+for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     print("EPOCH: ", epoch)
     model.train()
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{MAX_EPOCHS}")
