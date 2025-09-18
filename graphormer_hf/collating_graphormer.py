@@ -100,9 +100,9 @@ def k_hop_subgraph(
 CACHED = None
 # @lru_cache(maxsize=512)
 def preprocess_item(item, config, keep_features=True):
-    # global CACHED
-    # if config.dataset_name == "cora" and CACHED is not None:
-    #    return CACHED
+    global CACHED
+    if not config.augment_edges and config.dataset_name == "cora" and CACHED is not None:
+       return CACHED
     requires_backends(preprocess_item, ["cython"])
 
     if keep_features and "edge_attr" in item.keys():  # edge_attr
@@ -152,7 +152,8 @@ def preprocess_item(item, config, keep_features=True):
     item["input_edges"] = input_edges + 1  # we shift all indices by one for padding  # equal to max dist, encoding of edges along shortest path from i to j [edge 1 feat, edge 2 feat, ... 0,0,0]
     if "labels" not in item:
         item["labels"] = item["y"]
-    if config.dataset_name == "cora":
+
+    if not config.augment_edges and config.dataset_name == "cora":
         CACHED = item
     return item
 
