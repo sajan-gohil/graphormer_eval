@@ -69,10 +69,21 @@ class GATv2Denoiser(nn.Module):
         self.output_norm = nn.LayerNorm(out_channels)
         # print("OUT:", out_channels)
 
+    @torch._dynamo.disable
+    def build_data_list_eager(self, x_batch, edge_index_list):
+        B = x_batch.size(0)
+        data_list = []
+        for b in range(B):
+            # ensure you pass real tensors — this runs eagerly
+            data_list.append(Data(x=x_batch[b], edge_index=edge_index_list[b]))
+        batch = Batch.from_data_list(data_list) 
+        return data_list, batch
+    
     def forward(self, x_batch, edge_index_list):
         B, N, Feat = x_batch.shape
-        data_list = [Data(x=x_batch[b], edge_index=edge_index_list[b]) for b in range(B)]
-        batch = Batch.from_data_list(data_list)
+        # data_list = [Data(x=x_batch[b], edge_index=edge_index_list[b]) for b in range(B)]
+        data_list, batch = self.build_data_list_eager(x_batch, edge_index_list)
+        # batch = Batch.from_data_list(data_list)
         x = batch.x
         edge_index = batch.edge_index
         skip_connections = []

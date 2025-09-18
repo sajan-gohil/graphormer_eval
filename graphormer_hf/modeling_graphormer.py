@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """PyTorch Graphormer model."""
-
+import logging
+logging.basicConfig(level=logging.INFO)
 import math
 from collections.abc import Iterable, Iterator
 from typing import Optional, Union
@@ -184,8 +185,7 @@ class GraphormerGraphNodeFeature(nn.Module):
         self.num_atoms = config.num_atoms
 
         self.atom_encoder = nn.Embedding(config.num_atoms + 1, config.hidden_size, padding_idx=config.pad_token_id)
-        self.feature_encoder = nn.LazyLinear(config.hidden_size)
-        self.feature_encoder_2 = nn.Linear(config.hidden_size, config.hidden_size)
+        self.feature_encoder = nn.Linear(1433, config.hidden_size)
         self.in_degree_encoder = nn.Embedding(
             config.num_in_degree, config.hidden_size, padding_idx=config.pad_token_id
         )
@@ -678,6 +678,7 @@ class GraphormerGraphEncoder(nn.Module):
     ) -> tuple[Union[torch.Tensor, list[torch.LongTensor]], torch.Tensor]:
         # compute padding mask. This is needed for multi-head attention
         data_x = input_nodes
+        # logging.info(f"DATA X SHAPE = , {tuple(data_x.shape)}")
         n_graph, n_node = data_x.size()[:2]
         padding_mask = (data_x[:, :, 0]).eq(0)
         padding_mask_cls = torch.zeros(n_graph, 1, device=padding_mask.device, dtype=padding_mask.dtype)
@@ -712,6 +713,7 @@ class GraphormerGraphEncoder(nn.Module):
             inner_states.append(input_nodes)
 
         for layer in self.layers:
+            # logging.info(f"Processing layer:, {layer}, FOR INPUT:, {tuple(input_nodes.shape)}")
             input_nodes, _ = layer(
                 input_nodes,
                 self_attn_padding_mask=padding_mask,

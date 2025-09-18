@@ -129,8 +129,10 @@ if args.dataset_name == "pcqm4mv2":
 else:
     model = GraphormerForNodeClassification(config)
     # Compile as graph is always same
-    # if config.diffusion_type != "ddim":model.compile()
-    # print("Model compiled successfully.")
+    # if config.diffusion_type != "ddim":
+    #   # _ = model(torch.randn(1, 2708, 1433))
+    #   model = torch.compile(model, fullgraph=False, dynamic=True)
+    #print("Model compiled successfully.")
 
 # Tensor parallelism: split model across 2 GPUs if requested
 if getattr(args, "tensor_parallel", False):
