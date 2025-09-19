@@ -8,7 +8,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, L1Loss
 from torch_geometric.nn import GATv2Conv
 from torch_geometric.data import Data, Batch
 import datetime
-from denoiser import DenoiserModel
+from denoisers import DenoiserModel
 
 
 def cosine_beta_schedule(timesteps, s=0.008):
@@ -153,7 +153,7 @@ class GraphLatentDiffusion(nn.Module):
         #                              num_layers=config.num_denoiser_layers,
         #                              use_linear=config.use_linear_denoiser)
         self.denoiser = DenoiserModel(in_channels=input_dim,
-                                      timestep_sie=latent_dim,
+                                      timestep_size=latent_dim,
                                       num_layers=config.num_denoiser_layers,
                                       heads=4,
                                       layer_type=config.denoiser_type,
@@ -190,7 +190,7 @@ class GraphLatentDiffusion(nn.Module):
         for step in reversed(range(self.num_denoising_steps)):
             x_t = x_t.detach()
             t_step = torch.tensor([step], device=node_embeddings.device).repeat(B)
-            t_emb = self.timestep_embeddings(t_step).unsqueeze(1).expand(-1, x_t.size(1), -1)
+            t_emb = self.timestep_embeddings(t_step)#.unsqueeze(1)#.expand(-1, x_t.size(1), -1)
 
             noisy_with_t = torch.cat([x_t, t_emb], dim=-1)
             # noise_pred = self.denoiser(noisy_with_t, edge_index_list)
@@ -355,7 +355,7 @@ class GraphLatentDiffusion(nn.Module):
         B = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps, (B,), device=node_embeddings.device)
 
-        t_emb = self.timestep_embeddings(t).unsqueeze(1).expand(-1, node_embeddings.size(1), -1)
+        t_emb = self.timestep_embeddings(t)#.unsqueeze(1)#.expand(-1, node_embeddings.size(1), -1)
 
         if self.config.detached_denoiser:
             noisy_embeddings, true_noise = self.add_noise(node_embeddings.detach().clone(), t)
@@ -366,10 +366,10 @@ class GraphLatentDiffusion(nn.Module):
         else:
             noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
 
-        if (t_emb is not None) and (t_emb.numel() != 0):
-            noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
-        else:
-            noisy_embeddings_with_t = noisy_embeddings
+        #if (t_emb is not None) and (t_emb.numel() != 0):
+        #    noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
+        #else:
+        #    noisy_embeddings_with_t = noisy_embeddings
        
         reconstruction_loss = 0
         if not self.config.diffusion_type == "ddim":
