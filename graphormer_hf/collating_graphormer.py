@@ -297,7 +297,9 @@ class GraphormerDataCollator:
                 batch["labels"] = torch.from_numpy(np.concatenate([i["labels"] for i in features]))
         else:  # multi task classification, left to float to keep the NaNs
             batch["labels"] = torch.from_numpy(np.stack([i["labels"] for i in features], axis=0))
-
+        
+        if self.config.remove_attn_bias:
+            _ = batch.pop("attn_bias")
         if not self.config.augment_edges and not self.config.create_subgraph:
             self.cache = batch
         return batch
