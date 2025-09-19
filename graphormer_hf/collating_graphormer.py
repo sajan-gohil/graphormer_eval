@@ -101,7 +101,7 @@ CACHED = None
 # @lru_cache(maxsize=512)
 def preprocess_item(item, config, keep_features=True):
     global CACHED
-    if not config.augment_edges and config.dataset_name == "cora" and CACHED is not None:
+    if not config.augment_edges and not config.create_subgraph and config.dataset_name == "cora" and CACHED is not None:
        return CACHED
     requires_backends(preprocess_item, ["cython"])
 
@@ -166,6 +166,7 @@ class GraphormerDataCollator:
         self.spatial_pos_max = spatial_pos_max
         self.on_the_fly_processing = on_the_fly_processing
         self.split = split
+        self.cache = None
 
     def sample_subgraph(self, graphs):
         subgraphs = []
@@ -207,6 +208,9 @@ class GraphormerDataCollator:
         return subgraphs
 
     def __call__(self, features: list[dict]) -> dict[str, Any]:
+        if not self.config.augment_edges and not self.config.create_subgraph and self.cache:
+            return self.cache
+
         if self.config.create_subgraph:
             print("CREATING SUBGRAPHS")
             features = self.sample_subgraph(features)
@@ -243,7 +247,7 @@ class GraphormerDataCollator:
                 try:
                     f[k] = torch.from_numpy(f[k])
                 except:
-                    f[k] = f[k].detach().clone().requires_grad_(True)  #torch.tensor(f[k].detach().clone())
+                    f[k] = f[k].detach().clone()  #.requires_grad_(True)  #torch.tensor(f[k].detach().clone())
 
             if len(f["attn_bias"][1:, 1:][f["spatial_pos"] >= self.spatial_pos_max]) > 0:
                 f["attn_bias"][1:, 1:][f["spatial_pos"] >= self.spatial_pos_max] = float("-inf")
@@ -293,4 +297,7 @@ class GraphormerDataCollator:
                 batch["labels"] = torch.from_numpy(np.concatenate([i["labels"] for i in features]))
         else:  # multi task classification, left to float to keep the NaNs
             batch["labels"] = torch.from_numpy(np.stack([i["labels"] for i in features], axis=0))
+
+        if not self.config.augment_edges and not self.config.create_subgraph:
+            self.cache = batch
         return batch
