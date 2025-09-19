@@ -243,7 +243,7 @@ class GraphormerDataCollator:
                 try:
                     f[k] = torch.from_numpy(f[k])
                 except:
-                    f[k] = torch.tensor(f[k].detach().clone())
+                    f[k] = f[k].detach().clone().requires_grad_(True)  #torch.tensor(f[k].detach().clone())
 
             if len(f["attn_bias"][1:, 1:][f["spatial_pos"] >= self.spatial_pos_max]) > 0:
                 f["attn_bias"][1:, 1:][f["spatial_pos"] >= self.spatial_pos_max] = float("-inf")
