@@ -366,7 +366,8 @@ class GraphormerMultiheadAttention(nn.Module):
         )
 
         self.onnx_trace = False
-        self.diffusion_model = GraphLatentDiffusion(self.kdim, config.embedding_dim, config.diffusion_steps, config=self.config)
+        if self.config.enable_layerwise_diffusion:
+            self.diffusion_model = GraphLatentDiffusion(self.kdim, config.embedding_dim, config.diffusion_steps, config=self.config)
 
     def reset_parameters(self):
         if self.qkv_same_dim:
