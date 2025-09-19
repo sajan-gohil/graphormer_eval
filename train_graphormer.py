@@ -44,6 +44,9 @@ import datetime
 import argparse
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
+import wandb
+import dotenv
+dotenv.load_dotenv()
 
 os.environ['PYTHONHASHSEED'] = '42'
 seed_value = 42
@@ -85,7 +88,17 @@ parser.add_argument("--remove_attn_bias", action="store_true", help="Remove atte
 parser.add_argument("--enable_layerwise_diffusion", action="store_true", help="Perform diffusion after each attention step")
 parser.add_argument("--freeze_pretrained_encoder", type=str, default=None, help="Freeze the pretrained encoder and set weights from given path")
 
+
 args = parser.parse_args()
+
+# --- wandb init ---
+wandb.init(
+    project="graphormer_eval",
+    name=args.name,
+    config=vars(args),
+    dir=args.experiment_dir,
+    # mode="online" if args.onscreen_logs else "offline"
+)
 
 args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
 os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
@@ -237,6 +250,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     print("EPOCH: ", epoch)
     model.train()
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{MAX_EPOCHS}")
+
     for batch in pbar:
         for k in batch:
             try:
@@ -266,11 +280,20 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         optimizer.zero_grad()
         # diffusion_optimizer.zero_grad()
         loss.backward()
+
+        # --- wandb log gradients ---
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                wandb.log({f"gradients/{name}": wandb.Histogram(param.grad.detach().cpu().numpy())}, step=step)
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), temp_grad_clip)
         optimizer.step()
         # diffusion_optimizer.step()
         scheduler.step()
         reduce_lr_scheduler.step(loss.item())
+
+        # --- wandb log training loss ---
+        wandb.log({"train/loss": loss.item()}, step=step)
 
         step += 1
         pbar.set_postfix({"loss": loss.item(), "lr": scheduler.get_last_lr()[0]})
@@ -305,13 +328,19 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     y_pred = torch.cat(y_pred, dim=0)
     y_true = torch.cat(y_true, dim=0)
     
+
     input_dict = {"y_true": y_true.numpy(), "y_pred": y_pred.numpy()}
     if args.dataset_name in ["pcqm4mv2"]:
         valid_mae = evaluator.eval(input_dict)["mae"]
         valid_score = str(valid_mae)
+        wandb.log({"val/mae": valid_mae}, step=step)
     else:
         valid_score = f'{f1_score(y_true, y_pred, average="micro")},{f1_score(y_true, y_pred, average="macro")}'
         valid_mae = f1_score(y_true, y_pred, average="micro")
+        wandb.log({
+            "val/micro_f1": f1_score(y_true, y_pred, average="micro"),
+            "val/macro_f1": f1_score(y_true, y_pred, average="macro")
+        }, step=step)
     with open(f"{args.experiment_dir}/val_metric.csv", "a") as f:
         f.write(f"epoch_{epoch},{valid_score}\n")
 
