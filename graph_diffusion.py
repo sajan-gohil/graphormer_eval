@@ -11,7 +11,7 @@ import datetime
 from denoisers import DenoiserModel
 
 
-def cosine_beta_schedule(timesteps, s=0.008):
+def cosine_beta_schedule(timesteps, s=0.02):
     steps = timesteps + 1
     x = torch.linspace(0, timesteps, steps) / timesteps
     alphas_cumprod = torch.cos((x + s) / (1 + s) * torch.pi / 2) ** 2
