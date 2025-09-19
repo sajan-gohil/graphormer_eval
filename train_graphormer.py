@@ -91,18 +91,20 @@ parser.add_argument("--freeze_pretrained_encoder", type=str, default=None, help=
 
 args = parser.parse_args()
 
+
+args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
+            exist_ok=True)
+
 # --- wandb init ---
 wandb.init(
     project="graphormer_eval",
-    name=args.name,
+    name=args.experiment_dir,
     config=vars(args),
     dir=args.experiment_dir,
     # mode="online" if args.onscreen_logs else "offline"
 )
 
-args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
-            exist_ok=True)
 if not args.onscreen_logs:
     sys.stdout = open(os.path.join(args.experiment_dir, "training_log.txt"), "w")
     sys.stderr = open(os.path.join(args.experiment_dir, "training_error_log.txt"),"w")
