@@ -153,7 +153,7 @@ class GraphLatentDiffusion(nn.Module):
         #                              num_layers=config.num_denoiser_layers,
         #                              use_linear=config.use_linear_denoiser)
         self.denoiser = DenoiserModel(in_channels=input_dim,
-                                      timestep_size=latent_dim,
+                                      timestep_size=latent_dim if not self.config.gnn_only else 0,
                                       num_layers=config.num_denoiser_layers,
                                       heads=4,
                                       layer_type=config.denoiser_type,

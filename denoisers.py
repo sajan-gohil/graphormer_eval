@@ -66,17 +66,18 @@ class DenoiserModel(nn.Module):
             batch = Batch.from_data_list(data_list)
             x_batch = batch.x
             edge_index_list = batch.edge_index
-            time_embedding_batch = time_embedding[batch.batch]
+            time_embedding_batch = time_embedding[batch.batch] if time_embedding is not None else None
         else:
             time_embedding_batch = time_embedding
 
         down_res = []
         for i in range(self.num_layers):
             # print("=-=-=-=-", x_batch.shape, self.t_proj[i](time_embedding_batch).unsqueeze(1).shape)
-            t_emb = self.t_proj[i](time_embedding_batch)
-            if len(x_batch.shape) == 3:
-                t_emb = t_emb.unsqueeze(1)
-            x_batch += t_emb
+            if time_embedding_batch is not None:
+                t_emb = self.t_proj[i](time_embedding_batch)
+                if len(x_batch.shape) == 3:
+                    t_emb = t_emb.unsqueeze(1)
+                x_batch += t_emb
             x_batch = self.layers[i](x_batch) if self.layer_type != "gat" else self.layers[i](
                 x_batch, edge_index_list)
             if self.layer_type != "mha":
@@ -86,15 +87,16 @@ class DenoiserModel(nn.Module):
         down_res = down_res[::-1]
         # print("Down res shapes:", [i.shape for i in down_res])
         for idx, i in enumerate(list(range(self.num_layers, len(self.layers))), 1): # Start from 1 to skip bottleneck
-            t_emb = self.t_proj[i](time_embedding_batch)
-            if len(x_batch.shape) == 3:
-                t_emb = t_emb.unsqueeze(1)
-            x_batch += t_emb
+            if time_embedding_batch is not None:
+                t_emb = self.t_proj[i](time_embedding_batch)
+                if len(x_batch.shape) == 3:
+                    t_emb = t_emb.unsqueeze(1)
+                x_batch += t_emb
             x_batch = self.layers[i](x_batch) if self.layer_type != "gat" else self.layers[i](
                 x_batch, edge_index_list)
             if self.layer_type != "mha":
                 if idx < len(down_res):
-                    print("Adding down res:", idx, down_res[idx].shape)
+                    # print("Adding down res:", idx, down_res[idx].shape)
                     x_batch += down_res[idx]
                 x_batch = F.silu(self.norms[i](x_batch))
         if self.layer_type == "gat":
