@@ -75,7 +75,7 @@ parser.add_argument("--detached_denoiser", action="store_true", help="Detach emb
 parser.add_argument("--pretrained_weights", type=str, default=None, help="path to checkpoint pt file")
 parser.add_argument("--diffusion_steps", type=int, default=50, help="Number of diffusion steps for the model")
 parser.add_argument("--num_workers", type=int, default=0, help="Number of workers for data loading")
-parser.add_argument("--dataset_name", type=str, default="pcqm4mv2", help="Name of the dataset to use")
+parser.add_argument("--dataset_name", type=str, default="cora", help="Name of the dataset to use")
 parser.add_argument("--create_subgraph", action="store_true", help="Create subgraphs from given large graph")
 parser.add_argument("--num_denoiser_layers", type=int, default=3, help="Number of layers in the denoiser: n down, n-1 up + 1 final projection")
 parser.add_argument("--use_linear_denoiser", action="store_true", help="[Deprecated with denoisers.py] Use linear layers in the denoiser")
