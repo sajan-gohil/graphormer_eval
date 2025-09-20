@@ -37,8 +37,8 @@ main_params = {
     "remove_attn_bias": [False], # True, 
 }
 diffusion_params = {
-    # "reconstruction_scale": [0.0, 0.5],
-    "structure_scale": [0.0, 0.5],
+    "reconstruction_scale": [0.5, 1.0],
+    # "structure_scale": [1.0],
     # "aug_loss_scale": [0.0, 0.5, 1.0],
     "denoiser_type": ["gat", "linear", "mha"],
     "diffusion_type": ["x0", "noise_pred", "noise_pred_single"],  # "delta",
@@ -49,7 +49,15 @@ diffusion_params = {
     # "augment_edges": [True, False],
     "gnn_only": [True, False],
 }
-
+# # 0 0
+# # 0.5 0
+# 1 0
+# # 0 0.5
+# 0.5 0.5
+# 1 0.5
+# # 0 1
+# 0.5 1
+# 1 1
 configs = []
 
 # Create all configs
@@ -88,7 +96,7 @@ for config in configs:
         if config.get("diffusion_type", None) is not None:
             name += config["diffusion_type"] + "_"
         # name += "no_rec_"
-        # name += f"rec_{config.get('reconstruction_scale', 0.0)}_"
+        name += f"rec_{config.get('reconstruction_scale', 0.0)}_" if config.get("reconstruction_scale", 0.0) > 0 else ""
         name += f"struc_{config.get('structure_scale', 0.0)}_" if config.get("structure_scale", 0.0) > 0 else ""
     else:
         name += "base_"

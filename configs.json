@@ -8,8 +8,8 @@
         "gnn_only": true,
         "diffusion_type": "x0",
         "denoiser_type": "gat",
-        "structure_scale": 0.0,
-        "name": "cora_gnn_gat_x0_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_gnn_gat_x0_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -20,8 +20,8 @@
         "gnn_only": true,
         "diffusion_type": "x0",
         "denoiser_type": "gat",
-        "structure_scale": 0.5,
-        "name": "cora_gnn_gat_x0_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_gnn_gat_x0_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -32,8 +32,8 @@
         "gnn_only": true,
         "diffusion_type": "x0",
         "denoiser_type": "linear",
-        "structure_scale": 0.0,
-        "name": "cora_gnn_linear_x0_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_gnn_linear_x0_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -44,8 +44,8 @@
         "gnn_only": true,
         "diffusion_type": "x0",
         "denoiser_type": "linear",
-        "structure_scale": 0.5,
-        "name": "cora_gnn_linear_x0_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_gnn_linear_x0_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -56,8 +56,8 @@
         "gnn_only": true,
         "diffusion_type": "x0",
         "denoiser_type": "mha",
-        "structure_scale": 0.0,
-        "name": "cora_gnn_mha_x0_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_gnn_mha_x0_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -68,8 +68,8 @@
         "gnn_only": true,
         "diffusion_type": "x0",
         "denoiser_type": "mha",
-        "structure_scale": 0.5,
-        "name": "cora_gnn_mha_x0_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_gnn_mha_x0_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -80,8 +80,8 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred",
         "denoiser_type": "gat",
-        "structure_scale": 0.0,
-        "name": "cora_gnn_gat_noise_pred_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_gnn_gat_noise_pred_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -92,8 +92,8 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred",
         "denoiser_type": "gat",
-        "structure_scale": 0.5,
-        "name": "cora_gnn_gat_noise_pred_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_gnn_gat_noise_pred_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -104,8 +104,8 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred",
         "denoiser_type": "linear",
-        "structure_scale": 0.0,
-        "name": "cora_gnn_linear_noise_pred_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_gnn_linear_noise_pred_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -116,8 +116,8 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred",
         "denoiser_type": "linear",
-        "structure_scale": 0.5,
-        "name": "cora_gnn_linear_noise_pred_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_gnn_linear_noise_pred_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -128,8 +128,8 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred",
         "denoiser_type": "mha",
-        "structure_scale": 0.0,
-        "name": "cora_gnn_mha_noise_pred_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_gnn_mha_noise_pred_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -140,8 +140,8 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred",
         "denoiser_type": "mha",
-        "structure_scale": 0.5,
-        "name": "cora_gnn_mha_noise_pred_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_gnn_mha_noise_pred_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -152,8 +152,8 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "gat",
-        "structure_scale": 0.0,
-        "name": "cora_gnn_gat_noise_pred_single_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_gnn_gat_noise_pred_single_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -164,8 +164,8 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "gat",
-        "structure_scale": 0.5,
-        "name": "cora_gnn_gat_noise_pred_single_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_gnn_gat_noise_pred_single_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -176,8 +176,8 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "linear",
-        "structure_scale": 0.0,
-        "name": "cora_gnn_linear_noise_pred_single_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_gnn_linear_noise_pred_single_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -188,8 +188,8 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "linear",
-        "structure_scale": 0.5,
-        "name": "cora_gnn_linear_noise_pred_single_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_gnn_linear_noise_pred_single_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -200,8 +200,8 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "mha",
-        "structure_scale": 0.0,
-        "name": "cora_gnn_mha_noise_pred_single_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_gnn_mha_noise_pred_single_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -212,8 +212,8 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "mha",
-        "structure_scale": 0.5,
-        "name": "cora_gnn_mha_noise_pred_single_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_gnn_mha_noise_pred_single_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -224,8 +224,8 @@
         "gnn_only": false,
         "diffusion_type": "x0",
         "denoiser_type": "gat",
-        "structure_scale": 0.0,
-        "name": "cora_diff_gat_x0_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_diff_gat_x0_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -236,8 +236,8 @@
         "gnn_only": false,
         "diffusion_type": "x0",
         "denoiser_type": "gat",
-        "structure_scale": 0.5,
-        "name": "cora_diff_gat_x0_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_diff_gat_x0_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -248,8 +248,8 @@
         "gnn_only": false,
         "diffusion_type": "x0",
         "denoiser_type": "linear",
-        "structure_scale": 0.0,
-        "name": "cora_diff_linear_x0_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_diff_linear_x0_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -260,8 +260,8 @@
         "gnn_only": false,
         "diffusion_type": "x0",
         "denoiser_type": "linear",
-        "structure_scale": 0.5,
-        "name": "cora_diff_linear_x0_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_diff_linear_x0_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -272,8 +272,8 @@
         "gnn_only": false,
         "diffusion_type": "x0",
         "denoiser_type": "mha",
-        "structure_scale": 0.0,
-        "name": "cora_diff_mha_x0_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_diff_mha_x0_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -284,8 +284,8 @@
         "gnn_only": false,
         "diffusion_type": "x0",
         "denoiser_type": "mha",
-        "structure_scale": 0.5,
-        "name": "cora_diff_mha_x0_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_diff_mha_x0_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -296,8 +296,8 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred",
         "denoiser_type": "gat",
-        "structure_scale": 0.0,
-        "name": "cora_diff_gat_noise_pred_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_diff_gat_noise_pred_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -308,8 +308,8 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred",
         "denoiser_type": "gat",
-        "structure_scale": 0.5,
-        "name": "cora_diff_gat_noise_pred_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_diff_gat_noise_pred_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -320,8 +320,8 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred",
         "denoiser_type": "linear",
-        "structure_scale": 0.0,
-        "name": "cora_diff_linear_noise_pred_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_diff_linear_noise_pred_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -332,8 +332,8 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred",
         "denoiser_type": "linear",
-        "structure_scale": 0.5,
-        "name": "cora_diff_linear_noise_pred_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_diff_linear_noise_pred_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -344,8 +344,8 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred",
         "denoiser_type": "mha",
-        "structure_scale": 0.0,
-        "name": "cora_diff_mha_noise_pred_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_diff_mha_noise_pred_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -356,8 +356,8 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred",
         "denoiser_type": "mha",
-        "structure_scale": 0.5,
-        "name": "cora_diff_mha_noise_pred_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_diff_mha_noise_pred_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -368,8 +368,8 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "gat",
-        "structure_scale": 0.0,
-        "name": "cora_diff_gat_noise_pred_single_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_diff_gat_noise_pred_single_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -380,8 +380,8 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "gat",
-        "structure_scale": 0.5,
-        "name": "cora_diff_gat_noise_pred_single_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_diff_gat_noise_pred_single_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -392,8 +392,8 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "linear",
-        "structure_scale": 0.0,
-        "name": "cora_diff_linear_noise_pred_single_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_diff_linear_noise_pred_single_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -404,8 +404,8 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "linear",
-        "structure_scale": 0.5,
-        "name": "cora_diff_linear_noise_pred_single_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_diff_linear_noise_pred_single_rec_10_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -416,8 +416,8 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "mha",
-        "structure_scale": 0.0,
-        "name": "cora_diff_mha_noise_pred_single_no_edge_no_spatial"
+        "reconstruction_scale": 0.5,
+        "name": "cora_diff_mha_noise_pred_single_rec_05_no_edge_no_spatial"
     },
     {
         "remove_attn_bias": false,
@@ -428,7 +428,7 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "mha",
-        "structure_scale": 0.5,
-        "name": "cora_diff_mha_noise_pred_single_struc_05_no_edge_no_spatial"
+        "reconstruction_scale": 1.0,
+        "name": "cora_diff_mha_noise_pred_single_rec_10_no_edge_no_spatial"
     }
 ]
