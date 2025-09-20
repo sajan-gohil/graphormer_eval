@@ -33,11 +33,11 @@ main_params = {
     "dataset_name": ["cora"],
     "edge_type": ["single_hop"],
     "enable_spatial_encoder": [False],
-    "enable_diffusion": [True], #, False
-    "remove_attn_bias": [False], # True, 
+    "enable_diffusion": [True, False], #, False
+    "remove_attn_bias": [True], # True, 
 }
 diffusion_params = {
-    "reconstruction_scale": [0.5, 1.0],
+    # "reconstruction_scale": [0.0, 0.5, 1.0],
     # "structure_scale": [1.0],
     # "aug_loss_scale": [0.0, 0.5, 1.0],
     "denoiser_type": ["gat", "linear", "mha"],
