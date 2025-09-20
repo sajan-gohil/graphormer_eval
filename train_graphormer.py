@@ -400,6 +400,8 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
             # f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\n")
             f.write(f"epoch_{epoch},{micro_f1},{macro_f1}\n")
+        wandb.log({"test/micro_f1": micro_f1, "test/macro_f1": macro_f1}, step=step)
+
     if step >= MAX_STEPS:
         print("Reached max training steps.")
         break
