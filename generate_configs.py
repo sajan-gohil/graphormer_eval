@@ -29,12 +29,47 @@
 # parser.add_argument("--freeze_pretrained_encoder", type=str, default=None, help="Freeze the pretrained encoder and set weights from given path")
 
 
+param_tree = {
+    "dataset_name": ["cora"], # "cora", "citeseer", "pubmed"
+    "remove_attn_bias": {
+        True: {},
+        False: {
+            "edge_type": ["multi_hop", "single_hop"],
+            "enable_spatial_encoder": [True, False],
+        },
+    },
+    "enable_diffusion": {
+        True: {
+            "denoiser_type": ["gat", "linear", "mha"],
+            "gnn_only": {
+                True: {},
+                False: {
+                    "diffusion_type": ["x0", "noise_pred", "noise_pred_single"],  # "delta",
+                    "reconstruction_scale": [0.0, 0.5, 1.0],
+                    "structure_scale": [0.0, 0.5, 1.0],
+                    "detached_denoiser": [True, False],
+                    # "diffusion_steps": [50, 100],
+                    # "num_denoiser_layers": [2, 3, 4],
+                    "optimize_only_diffuser": [True, False],
+                    "augment_edges": {
+                        True: {"aug_loss_scale": [0.0, 0.5, 1.0],},
+                        False: {}
+                    }
+                }
+            }
+        },
+        False: {}
+    }
+}
+
+
 main_params = {
     "dataset_name": ["cora"],
     "edge_type": ["single_hop"],
     "enable_spatial_encoder": [False],
     "enable_diffusion": [True, False], #, False
-    "remove_attn_bias": [True], # True, 
+    "remove_attn_bias": [False], # True, 
+    "optimize_only_diffuser": [True], # True,
 }
 diffusion_params = {
     # "reconstruction_scale": [0.0, 0.5, 1.0],
@@ -109,6 +144,16 @@ for config in configs:
         if not config.get("enable_spatial_encoder", True):
             name += "no_spatial_"
     config["name"] = name.strip("_").replace(".", "")
+    if "no_edge_no_spatial" in config["name"]:
+        config["pretrained_weights"] = "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
+    elif "no_edge" in config["name"]:
+        config["pretrained_weights"] = "experiments/cora_base_no_edge_2025-09-21_11-27-18/training_checkpoints/best_model_1648.pt"
+    elif "no_spatial" in config["name"]:
+        config["pretrained_weights"] = "experiments/cora_base_no_spatial_2025-09-21_18-18-35/training_checkpoints/best_model_1131.pt"
+    elif "no_bias" in config["name"]:
+        pass
+    else:
+        config["pretrained_weights"] = "experiments/cora_base_2025-09-21_19-00-31/training_checkpoints/best_model_1131.pt"
 
 
 # Save configs to file

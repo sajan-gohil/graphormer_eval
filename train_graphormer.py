@@ -98,7 +98,7 @@ os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
 
 # --- wandb init ---
 wandb.init(
-    project="graphormer_eval",
+    project="graphormer_eval_2",
     name=args.experiment_dir,
     config=vars(args),
     dir=args.experiment_dir,
@@ -187,6 +187,11 @@ if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model
 optimizer = Adam(param_list, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
 if args.optimize_only_diffuser:
     assert args.pretrained_weights is not None, "Pretrained weights must be provided to optimize only the diffuser."
+    for param_name, param in model.named_parameters():
+        if "graph_encoder" in param_name or "GraphEncoder" in param_name and "diffusion" not in param_name.lower():
+            param.requires_grad = False
+            param.requires_grad_ = False
+            print(f"Froze parameter: {param_name}")
     optimizer = Adam(model.encoder.diffusion_model.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
 
 # Linear warmup and decay scheduler
