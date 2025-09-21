@@ -185,14 +185,6 @@ GRAD_CLIP_NORM = 5.0
 param_list = [{"params": [i for n,i in model.named_parameters() if "diffusion_model" not in n], "lr":LEARNING_RATE}]
 if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model.parameters(), "lr": 1e-5}]
 optimizer = Adam(param_list, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
-if args.optimize_only_diffuser:
-    assert args.pretrained_weights is not None, "Pretrained weights must be provided to optimize only the diffuser."
-    for param_name, param in model.named_parameters():
-        if "graph_encoder" in param_name or "GraphEncoder" in param_name and "diffusion" not in param_name.lower():
-            param.requires_grad = False
-            param.requires_grad_ = False
-            print(f"Froze parameter: {param_name}")
-    optimizer = Adam(model.encoder.diffusion_model.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
 
 # Linear warmup and decay scheduler
 def lr_lambda(current_step):
@@ -212,6 +204,7 @@ if args.pretrained_weights:
     state_dicts = torch.load(args.pretrained_weights, weights_only=False)
     model.load_state_dict(state_dicts["model"], strict=False)
     model.to("cuda")  # TODO: FIX THIS HACK
+
     optimizer.load_state_dict(state_dicts.get("optimizer", {}))
     # Ensure optimizer states are on the same device as model params
     for state in optimizer.state.values():
@@ -226,6 +219,18 @@ if args.pretrained_weights:
     if "epoch" in state_dicts:
         pre_epoch = state_dicts["epoch"]
     print(f"Loaded pretrained weights from {args.pretrained_weights}")
+
+if args.optimize_only_diffuser:
+    assert args.pretrained_weights is not None, "Pretrained weights must be provided to optimize only the diffuser."
+    for param_name, param in model.named_parameters():
+        if "graph_encoder" in param_name or "GraphEncoder" in param_name and "diffusion" not in param_name.lower():
+            param.requires_grad = False
+            param.requires_grad_ = False
+            print(f"Froze parameter: {param_name}")
+    optimizer = Adam(model.encoder.diffusion_model.parameters(), lr=LEARNING_RATE, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
+    scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+    reduce_lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=5, min_lr=1e-8)
+    pre_epoch = 0
 
 
 if args.freeze_pretrained_encoder:
