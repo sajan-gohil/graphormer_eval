@@ -9,7 +9,7 @@
         "gnn_only": true,
         "diffusion_type": "x0",
         "denoiser_type": "gat",
-        "name": "cora_gnn_gat_x0_no_edge_no_spatial",
+        "name": "cora_gnn_gat_x0_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -22,7 +22,7 @@
         "gnn_only": true,
         "diffusion_type": "x0",
         "denoiser_type": "linear",
-        "name": "cora_gnn_linear_x0_no_edge_no_spatial",
+        "name": "cora_gnn_linear_x0_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -35,7 +35,7 @@
         "gnn_only": true,
         "diffusion_type": "x0",
         "denoiser_type": "mha",
-        "name": "cora_gnn_mha_x0_no_edge_no_spatial",
+        "name": "cora_gnn_mha_x0_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -48,7 +48,7 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred",
         "denoiser_type": "gat",
-        "name": "cora_gnn_gat_noise_pred_no_edge_no_spatial",
+        "name": "cora_gnn_gat_noise_pred_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -61,7 +61,7 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred",
         "denoiser_type": "linear",
-        "name": "cora_gnn_linear_noise_pred_no_edge_no_spatial",
+        "name": "cora_gnn_linear_noise_pred_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -74,7 +74,7 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred",
         "denoiser_type": "mha",
-        "name": "cora_gnn_mha_noise_pred_no_edge_no_spatial",
+        "name": "cora_gnn_mha_noise_pred_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -87,7 +87,7 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "gat",
-        "name": "cora_gnn_gat_noise_pred_single_no_edge_no_spatial",
+        "name": "cora_gnn_gat_noise_pred_single_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -100,7 +100,7 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "linear",
-        "name": "cora_gnn_linear_noise_pred_single_no_edge_no_spatial",
+        "name": "cora_gnn_linear_noise_pred_single_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -113,7 +113,7 @@
         "gnn_only": true,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "mha",
-        "name": "cora_gnn_mha_noise_pred_single_no_edge_no_spatial",
+        "name": "cora_gnn_mha_noise_pred_single_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -126,7 +126,7 @@
         "gnn_only": false,
         "diffusion_type": "x0",
         "denoiser_type": "gat",
-        "name": "cora_diff_gat_x0_no_edge_no_spatial",
+        "name": "cora_diff_gat_x0_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -139,7 +139,7 @@
         "gnn_only": false,
         "diffusion_type": "x0",
         "denoiser_type": "linear",
-        "name": "cora_diff_linear_x0_no_edge_no_spatial",
+        "name": "cora_diff_linear_x0_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -152,7 +152,7 @@
         "gnn_only": false,
         "diffusion_type": "x0",
         "denoiser_type": "mha",
-        "name": "cora_diff_mha_x0_no_edge_no_spatial",
+        "name": "cora_diff_mha_x0_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -165,7 +165,7 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred",
         "denoiser_type": "gat",
-        "name": "cora_diff_gat_noise_pred_no_edge_no_spatial",
+        "name": "cora_diff_gat_noise_pred_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -178,7 +178,7 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred",
         "denoiser_type": "linear",
-        "name": "cora_diff_linear_noise_pred_no_edge_no_spatial",
+        "name": "cora_diff_linear_noise_pred_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -191,7 +191,7 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred",
         "denoiser_type": "mha",
-        "name": "cora_diff_mha_noise_pred_no_edge_no_spatial",
+        "name": "cora_diff_mha_noise_pred_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -204,7 +204,7 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "gat",
-        "name": "cora_diff_gat_noise_pred_single_no_edge_no_spatial",
+        "name": "cora_diff_gat_noise_pred_single_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -217,7 +217,7 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "linear",
-        "name": "cora_diff_linear_noise_pred_single_no_edge_no_spatial",
+        "name": "cora_diff_linear_noise_pred_single_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     },
     {
@@ -230,17 +230,7 @@
         "gnn_only": false,
         "diffusion_type": "noise_pred_single",
         "denoiser_type": "mha",
-        "name": "cora_diff_mha_noise_pred_single_no_edge_no_spatial",
-        "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
-    },
-    {
-        "optimize_only_diffuser": true,
-        "remove_attn_bias": false,
-        "enable_diffusion": false,
-        "enable_spatial_encoder": false,
-        "edge_type": "single_hop",
-        "dataset_name": "cora",
-        "name": "cora_base_no_edge_no_spatial",
+        "name": "cora_diff_mha_noise_pred_single_only_no_edge_no_spatial",
         "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
     }
 ]

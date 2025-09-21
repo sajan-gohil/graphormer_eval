@@ -67,7 +67,7 @@ main_params = {
     "dataset_name": ["cora"],
     "edge_type": ["single_hop"],
     "enable_spatial_encoder": [False],
-    "enable_diffusion": [True, False], #, False
+    "enable_diffusion": [True], #, False
     "remove_attn_bias": [False], # True, 
     "optimize_only_diffuser": [True], # True,
 }
@@ -136,6 +136,8 @@ for config in configs:
     else:
         name += "base_"
     
+    name += "only_" if config.get("optimize_only_diffuser", False) else ""
+
     if config.get("remove_attn_bias", False):
         name += "no_bias_"
     else:
