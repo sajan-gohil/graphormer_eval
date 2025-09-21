@@ -16,6 +16,8 @@
 import logging
 logging.basicConfig(level=logging.INFO)
 import math
+import wandb
+
 from collections.abc import Iterable, Iterator
 from typing import Optional, Union
 import datetime
@@ -133,6 +135,42 @@ def quant_noise(module: nn.Module, p: float, block_size: int):
 
     module.register_forward_pre_hook(_forward_pre_hook)
     return module
+
+
+def compute_attention_snr(attn_weights, labels, node_mask=None):
+    """
+    Compute AttentionSNR: 10*log10(sum(attn_score_same_class)/sum(attn_score_diff_class))
+    attn_weights: [batch, num_nodes, num_nodes] or [num_nodes, num_nodes]
+    labels: [batch, num_nodes] or [num_nodes]
+    node_mask: optional mask for valid nodes
+    """
+    import torch
+    if attn_weights is None or labels is None:
+        return float('nan')
+    if attn_weights.dim() == 4:
+        # [num_heads, batch, num_nodes, num_nodes] -> mean over heads
+        attn_weights = attn_weights.mean(dim=0)
+    if attn_weights.dim() == 3:
+        # [batch, num_nodes, num_nodes]
+        batch_size = attn_weights.shape[0]
+        snrs = []
+        for i in range(batch_size):
+            snrs.append(compute_attention_snr(attn_weights[i], labels[i], node_mask[i] if node_mask is not None else None))
+        return float(torch.tensor(snrs).mean().item())
+    # [num_nodes, num_nodes]
+    num_nodes = attn_weights.shape[0]
+    if node_mask is not None:
+        valid = node_mask.bool()
+        attn_weights = attn_weights[valid][:, valid]
+        labels = labels[valid]
+    same = (labels.unsqueeze(0) == labels.unsqueeze(1))
+    diff = ~same
+    attn_same = attn_weights[same].sum().item()
+    attn_diff = attn_weights[diff].sum().item() + 1e-8
+    if attn_same == 0 and attn_diff == 0:
+        return float('nan')
+    snr = 10 * math.log10(attn_same / attn_diff) if attn_diff > 0 else float('inf')
+    return snr
 
 
 class LayerDropModuleList(nn.ModuleList):
@@ -713,9 +751,9 @@ class GraphormerGraphEncoder(nn.Module):
         if not last_state_only:
             inner_states.append(input_nodes)
 
-        for layer in self.layers:
+        for layer_idx, layer in enumerate(self.layers):
             # logging.info(f"Processing layer:, {layer}, FOR INPUT:, {tuple(input_nodes.shape)}")
-            input_nodes, _ = layer(
+            input_nodes, attn = layer(
                 input_nodes,
                 self_attn_padding_mask=padding_mask,
                 self_attn_mask=attn_mask,
@@ -730,9 +768,9 @@ class GraphormerGraphEncoder(nn.Module):
             inner_states = [input_nodes]
 
         if self.traceable:
-            return torch.stack(inner_states), graph_rep
+            return torch.stack(inner_states), graph_rep, attn  # last attn weight
         else:
-            return inner_states, graph_rep
+            return inner_states, graph_rep, attn  # last attn weight
 
 
 class GraphormerDecoderHead(nn.Module):
@@ -878,13 +916,32 @@ class GraphormerModel(GraphormerPreTrainedModel):
 
         if self.config.freeze_pretrained_encoder:
             with torch.no_grad():
-                inner_states, graph_rep = self.graph_encoder(
+                inner_states, graph_rep, attn_weight = self.graph_encoder(
                     input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index
                 )
         else:
-            inner_states, graph_rep = self.graph_encoder(
+            inner_states, graph_rep, attn_weight = self.graph_encoder(
                 input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index
             )
+
+        # --- AttentionSNR logging: before diffusion ---
+        # Use last attn_weight (after softmax), and input_nodes before diffusion
+        labels = kwargs.get('labels', None)
+        node_mask = kwargs.get('node_mask', None)
+        if attn_weight is not None and labels is not None:
+            snr_attn = compute_attention_snr(attn_weight, labels, node_mask)
+            wandb.log({"AttentionSNR/attn_weight_before_diffusion": snr_attn})
+        # Compute SNR from normalized dot product + softmax of input_nodes (before diffusion)
+        # input_nodes: [batch, num_nodes+1, hidden_dim], remove graph token
+        input_nodes_ = inner_states[-1].transpose(0, 1)[:, 1:, :]
+        if labels is not None:
+            # Compute dot product attention
+            normed = input_nodes_ / (input_nodes_.norm(dim=-1, keepdim=True) + 1e-8)
+            attn_sim = torch.matmul(normed, normed.transpose(1, 2))
+            attn_sim = torch.softmax(attn_sim, dim=-1)
+            snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
+            wandb.log({"AttentionSNR/dotprod_softmax_before_diffusion": snr_sim})
+
         # last inner state, then revert Batch and Graph len
         input_nodes = inner_states[-1].transpose(0, 1)
 
@@ -902,6 +959,16 @@ class GraphormerModel(GraphormerPreTrainedModel):
                 aug_original_edges=kwargs.get("aug_original_edges", None)
             )
             input_nodes = torch.cat([graph_token, node_emb], dim=1)
+
+            # --- AttentionSNR logging: after diffusion ---
+            labels = kwargs.get('labels', None)
+            node_mask = kwargs.get('node_mask', None)
+            if labels is not None:
+                normed = node_emb / (node_emb.norm(dim=-1, keepdim=True) + 1e-8)
+                attn_sim = torch.matmul(normed, normed.transpose(1, 2))
+                attn_sim = torch.softmax(attn_sim, dim=-1)
+                snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
+                wandb.log({"AttentionSNR/dotprod_softmax_after_diffusion": snr_sim})
         # --- End diffusion integration ---
 
         # project masked tokens only
