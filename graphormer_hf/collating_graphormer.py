@@ -99,10 +99,13 @@ def k_hop_subgraph(
 
 CACHED = None
 # @lru_cache(maxsize=512)
-def preprocess_item(item, config, keep_features=True):
+def preprocess_item(item, config, keep_features=True, split="train"):
     global CACHED
-    if not config.augment_edges and not config.create_subgraph and config.dataset_name == "cora" and CACHED is not None:
-       return CACHED
+    if not (config.augment_edges and split == "train") and (
+            not config.create_subgraph) and (config.dataset_name
+                                             != "pcqm4mv2") and CACHED is not None:
+        return CACHED
+
     requires_backends(preprocess_item, ["cython"])
 
     if keep_features and "edge_attr" in item.keys():  # edge_attr
@@ -153,7 +156,7 @@ def preprocess_item(item, config, keep_features=True):
     if "labels" not in item:
         item["labels"] = item["y"]
 
-    if not config.augment_edges and config.dataset_name == "cora":
+    if not (config.augment_edges and split=="train") and config.dataset_name == "cora":
         CACHED = item
     return item
 
@@ -208,7 +211,7 @@ class GraphormerDataCollator:
         return subgraphs
 
     def __call__(self, features: list[dict]) -> dict[str, Any]:
-        if not self.config.augment_edges and not self.config.create_subgraph and self.cache:
+        if (not (self.config.augment_edges and self.split == "train")) and not self.config.create_subgraph and self.cache:
             return self.cache
 
         if self.config.create_subgraph:
@@ -216,7 +219,7 @@ class GraphormerDataCollator:
             features = self.sample_subgraph(features)
 
         if self.on_the_fly_processing:
-            features = [preprocess_item(i, config=self.config) for i in features]
+            features = [preprocess_item(i, config=self.config, split=self.split) for i in features]
 
         if not isinstance(features[0], Mapping):
             features = [vars(f) for f in features]

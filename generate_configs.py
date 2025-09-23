@@ -39,33 +39,33 @@ param_tree = {
         },
     },
     "enable_diffusion": {
-        # True: {
-        #     "denoiser_type": ["gat", "mha"], # "linear",
-        #     "gnn_only": {
-        #         True: {
-        #             "diffusion_type": ["x0"]
-        #         },
-        #         False: {
-        #             "diffusion_type": ["x0", "noise_pred", "noise_pred_single"],  # "delta",
-        #             # "reconstruction_scale": [0.0, 1.0],
-        #             # "structure_scale": [0.0, 1.0],
-        #             # "diffusion_steps": [50, 100],
-        #             # "num_denoiser_layers": [2, 3, 4],
-        #             "optimize_only_diffuser": {
-        #                 True: {
-        #                     "pretrained_weights": "placeholder"
-        #                 },
-        #                 False: {
-        #                     # "detached_denoiser": [True, False],
-        #                 }
-        #             },
-        #             # "augment_edges": {
-        #             #     True: {"aug_loss_scale": [0.0, 0.5, 1.0],},
-        #             #     False: {}
-        #             # }
-        #         }
-        #     }
-        # },
+        True: {
+            "denoiser_type": ["gat", "linear", "mha"], # "linear",
+            "gnn_only": {
+                True: {
+                    "diffusion_type": ["x0"]
+                },
+                False: {
+                    "diffusion_type": ["x0", "noise_pred", "noise_pred_single"],  # "delta",
+                    # "reconstruction_scale": [0.0, 1.0],
+                    # "structure_scale": [0.0, 1.0],
+                    # "diffusion_steps": [50, 100],
+                    # "num_denoiser_layers": [2, 3, 4],
+                    "optimize_only_diffuser": {
+                        # True: {
+                        #     "pretrained_weights": "placeholder"
+                        # },
+                        False: {
+                            # "detached_denoiser": [True, False],
+                        }
+                    },
+                    # "augment_edges": {
+                    #     True: {"aug_loss_scale": [0.0, 0.5, 1.0],},
+                    #     False: {}
+                    # }
+                }
+            }
+        },
         False: {}
     }
 }
