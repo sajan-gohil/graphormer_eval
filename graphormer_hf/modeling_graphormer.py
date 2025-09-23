@@ -907,6 +907,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
         masked_tokens: None = None,
         return_dict: Optional[bool] = None,
         edge_index: Optional[torch.LongTensor] = None,
+        step: Optional[int] = None,
 #        **unused,
          **kwargs
     ) -> Union[tuple[torch.LongTensor], BaseModelOutputWithNoAttention]:
@@ -938,7 +939,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
             attn_sim = torch.matmul(normed, normed.transpose(1, 2))
             attn_sim = torch.softmax(attn_sim, dim=-1)
             snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
-            wandb.log({"AttentionSNR/dotprod_softmax_before_diffusion": snr_sim})
+            wandb.log({"AttentionSNR/dotprod_softmax_before_diffusion": snr_sim}, step=step)
 
         # last inner state, then revert Batch and Graph len
         input_nodes = inner_states[-1].transpose(0, 1)
@@ -966,7 +967,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
                 attn_sim = torch.matmul(normed, normed.transpose(1, 2))
                 attn_sim = torch.softmax(attn_sim, dim=-1)
                 snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
-                wandb.log({"AttentionSNR/dotprod_softmax_after_diffusion": snr_sim})
+                wandb.log({"AttentionSNR/dotprod_softmax_after_diffusion": snr_sim}, step=step)
         # --- End diffusion integration ---
 
         # project masked tokens only
@@ -1028,6 +1029,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         labels: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
         edge_index: Optional[torch.LongTensor] = None,
+        step: Optional[int] = None,
          **kwargs
 #        **unused,
     ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
@@ -1042,7 +1044,8 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             spatial_pos,
             attn_edge_type,
             return_dict=True,
-            edge_index=edge_index
+            edge_index=edge_index,
+            step=step
         )
         if self.config.optimize_diffuser:
             encoder_outputs, attention_matching_loss = encoder_outputs

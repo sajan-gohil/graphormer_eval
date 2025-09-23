@@ -281,7 +281,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
             assert node_mask is not None
         if node_mask is not None:
             node_mask = node_mask.to(device)
-        outputs = model(**batch, node_mask=node_mask)
+        outputs = model(**batch, node_mask=node_mask, step=step)
         # loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
         loss = outputs.loss
         if loss.item() < prev_loss:
