@@ -349,9 +349,6 @@ class GraphLatentDiffusion(nn.Module):
             plt.clf()
 
     def forward(self, node_embeddings, edge_index_list, aug_added_edges=None, aug_removed_edges=None, aug_original_edges=None):
-        # print("NODE EMBEDDINGS SHAPE = ", node_embeddings.shape)  # B, N, D
-        # if self.config.augment_edges:  # Temporary, wont work for val/test set
-        #     assert len(aug_added_edges) > 0, "PASSED AUGMENTED VALUES DONT EXIST"
         B = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps, (B,), device=node_embeddings.device)
 
@@ -377,30 +374,33 @@ class GraphLatentDiffusion(nn.Module):
             denoised_embeddings = self.denoiser(noisy_embeddings, t_emb, edge_index_list)
         
         if self.config.diffusion_type == "x0":
-            if self.config.reconstruction_scale:
+            if self.config.reconstruction_scale > 0 and not self.config.gnn_only:
                 reconstruction_loss = MSELoss()(node_embeddings, denoised_embeddings)
 
         elif self.config.diffusion_type == "delta":
             denoised_embeddings = node_embeddings + denoised_embeddings
-            if self.config.reconstruction_scale:
+            if self.config.reconstruction_scale > 0 and not self.config.gnn_only:
                 reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
 
         elif self.config.diffusion_type == "noise_pred_single":
+            if self.config.gnn_only:
+                raise Exception("2 STEP NOISE PRED NOT APPLICABLE FOR GNN ONLY MODE")
             sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
             sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)  # Remove more noise than added
             denoised_embeddings = (noisy_embeddings - sqrt_one_minus_alpha*denoised_embeddings)/sqrt_alpha
-            if self.config.reconstruction_scale:
+            if self.config.reconstruction_scale > 0 and not self.config.gnn_only:
                 reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
 
         elif self.config.diffusion_type == "noise_pred":
-            if self.config.reconstruction_scale:
+            if self.config.gnn_only:
+                raise Exception("2 STEP NOISE PRED NOT APPLICABLE FOR GNN ONLY MODE")
+            if self.config.reconstruction_scale > 0 and not self.config.gnn_only:
                 reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
             sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
             sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)  # Remove more noise than added
             denoised_embeddings = (noisy_embeddings - sqrt_one_minus_alpha*denoised_embeddings)/sqrt_alpha
-           
             t_2 = torch.ones((B,), dtype=torch.long, device=node_embeddings.device)
-            t_emb_2 = self.timestep_embeddings(t_2).unsqueeze(1).expand(-1, node_embeddings.size(1), -1)
+            t_emb_2 = self.timestep_embeddings(t_2)  # .unsqueeze(1).expand(-1, node_embeddings.size(1), -1)
             # last_noise_pred = self.denoiser(torch.cat([denoised_embeddings, t_emb_2], dim=-1), edge_index_list)
             last_noise_pred = self.denoiser(denoised_embeddings, t_emb_2, edge_index_list)
             

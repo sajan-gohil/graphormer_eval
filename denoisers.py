@@ -75,8 +75,8 @@ class DenoiserModel(nn.Module):
             # print("=-=-=-=-", x_batch.shape, self.t_proj[i](time_embedding_batch).unsqueeze(1).shape)
             if time_embedding_batch is not None:
                 t_emb = self.t_proj[i](time_embedding_batch)
-                if len(x_batch.shape) == 3:
-                    t_emb = t_emb.unsqueeze(1)
+                if len(t_emb.shape) <= 1:
+                    t_emb = t_emb.unsqueeze(0)
                 x_batch += t_emb
             x_batch = self.layers[i](x_batch) if self.layer_type != "gat" else self.layers[i](
                 x_batch, edge_index_list)
