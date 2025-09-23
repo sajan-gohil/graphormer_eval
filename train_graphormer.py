@@ -202,10 +202,19 @@ pre_epoch = 0
 # Load pretrained weights if specified
 if args.pretrained_weights:
     state_dicts = torch.load(args.pretrained_weights, weights_only=False)
-    model.load_state_dict(state_dicts["model"], strict=False)
+    #model.load_state_dict(state_dicts["model"], strict=False)
+    model_state_dict = model.state_dict()
+    pretrained_dict = {k:v for k, v in  state_dicts["model"].items() if k in model_state_dict and v.size() == model_state_dict[k].size()}
+    for k,v in pretrained_dict.items():
+        print("loading:", k)
+    model_state_dict.update(pretrained_dict)
+    model.load_state_dict(model_state_dict)
     model.to("cuda")  # TODO: FIX THIS HACK
 
-    optimizer.load_state_dict(state_dicts.get("optimizer", {}))
+    try:
+        optimizer.load_state_dict(state_dicts.get("optimizer", {}))
+    except:
+        print("==========================\nLOADING OPTIMIZER PRETRAINED FAILED\n######################################")
     # Ensure optimizer states are on the same device as model params
     for state in optimizer.state.values():
         for k, v in state.items():
