@@ -137,16 +137,15 @@ def quant_noise(module: nn.Module, p: float, block_size: int):
     return module
 
 
-def compute_attention_snr(attn_weights, labels, node_mask=None):
+def compute_attention_snr(attn_weights, labels, node_mask):
     """
     Compute AttentionSNR: 10*log10(sum(attn_score_same_class)/sum(attn_score_diff_class))
     attn_weights: [batch, num_nodes, num_nodes] or [num_nodes, num_nodes]
     labels: [batch, num_nodes] or [num_nodes]
     node_mask: optional mask for valid nodes
     """
-    import torch
-    if attn_weights is None or labels is None:
-        return float('nan')
+    # if attn_weights is None or labels is None:
+    #    return float('nan')
     if attn_weights.dim() == 4:
         # [num_heads, batch, num_nodes, num_nodes] -> mean over heads
         attn_weights = attn_weights.mean(dim=0)
@@ -169,6 +168,7 @@ def compute_attention_snr(attn_weights, labels, node_mask=None):
     attn_diff = attn_weights[diff].sum().item() + 1e-8
     if attn_same == 0 and attn_diff == 0:
         return float('nan')
+    # print("SNR VALS = ", (attn_same/attn_diff), attn_same, attn_diff)
     snr = 10 * math.log10(attn_same / attn_diff) if attn_diff > 0 else float('inf')
     return snr
 
@@ -514,7 +514,6 @@ class GraphormerMultiheadAttention(nn.Module):
             attn_weights += attn_bias.view(bsz * self.num_heads, tgt_len, src_len)
 
         if attn_mask is not None:
-            print("ATTN MASK EXISTS: ", attn_mask)
             attn_mask = attn_mask.unsqueeze(0)
             attn_weights += attn_mask
 
@@ -557,7 +556,6 @@ class GraphormerMultiheadAttention(nn.Module):
             if not need_head_weights:
                 # average attention weights over heads
                 attn_weights = attn_weights.mean(dim=0)
-
         return attn, attn_weights
 
     def apply_sparse_mask(self, attn_weights: torch.Tensor, tgt_len: int, src_len: int, bsz: int) -> torch.Tensor:
@@ -628,7 +626,7 @@ class GraphormerGraphEncoderLayer(nn.Module):
             value=input_nodes,
             attn_bias=self_attn_bias,
             key_padding_mask=self_attn_padding_mask,
-            need_weights=False,
+            # need_weights=False,
             attn_mask=self_attn_mask,
         )
         input_nodes = self.dropout_module(input_nodes)
@@ -929,8 +927,8 @@ class GraphormerModel(GraphormerPreTrainedModel):
         labels = kwargs.get('labels', None)
         node_mask = kwargs.get('node_mask', None)
         if attn_weight is not None and labels is not None:
-            snr_attn = compute_attention_snr(attn_weight, labels, node_mask)
-            wandb.log({"AttentionSNR/attn_weight_before_diffusion": snr_attn})
+            snr_attn = compute_attention_snr(attn_weight[:, 1:, 1:], labels, node_mask)
+            wandb.log({"AttentionSNR/attn_weight_before_diffusion": snr_attn}, step=step)
         # Compute SNR from normalized dot product + softmax of input_nodes (before diffusion)
         # input_nodes: [batch, num_nodes+1, hidden_dim], remove graph token
         input_nodes_ = inner_states[-1].transpose(0, 1)[:, 1:, :]
@@ -1116,7 +1114,8 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
         **kwargs
     ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+        if len(node_mask.shape) == 1:
+            node_mask = node_mask.unsqueeze(0)#.repeat(input_nodes.shape[0])  # add batch dimension
         encoder_outputs = self.encoder(
             input_nodes,
             input_edges,
@@ -1127,6 +1126,8 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
             attn_edge_type,
             return_dict=True,
             edge_index=edge_index,
+            labels=labels,
+            node_mask=node_mask,
             **kwargs
         )
         if self.config.optimize_diffuser:
@@ -1136,7 +1137,7 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
         # outputs: [batch, num_nodes+1, hidden_dim] (first token is graph token)
         node_outputs = outputs[:, 1:, :]  # remove graph token
         logits = self.classifier(node_outputs)  # [batch, num_nodes, num_classes]
-
+        
         loss = None
         if labels is not None:
             # labels: [batch, num_nodes] or [batch, num_nodes, num_classes]
