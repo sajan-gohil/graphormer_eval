@@ -907,7 +907,8 @@ class GraphormerModel(GraphormerPreTrainedModel):
         masked_tokens: None = None,
         return_dict: Optional[bool] = None,
         edge_index: Optional[torch.LongTensor] = None,
-        step: Optional[int] = None,
+        log_step: Optional[int] = None,
+        log_group: Optional[int] = None,
 #        **unused,
          **kwargs
     ) -> Union[tuple[torch.LongTensor], BaseModelOutputWithNoAttention]:
@@ -929,7 +930,9 @@ class GraphormerModel(GraphormerPreTrainedModel):
         node_mask = kwargs.get('node_mask', None)
         if attn_weight is not None and labels is not None:
             snr_attn = compute_attention_snr(attn_weight[:, 1:, 1:], labels, node_mask)
-            wandb.log({"AttentionSNR/attn_weight_before_diffusion": snr_attn}, step=step)
+            if log_group and log_step:
+                wandb.log({f"ASNR_{log_group}/attn_weight_before_diffusion": snr_attn},
+                          step=log_step)
         # Compute SNR from normalized dot product + softmax of input_nodes (before diffusion)
         # input_nodes: [batch, num_nodes+1, hidden_dim], remove graph token
         input_nodes_ = inner_states[-1].transpose(0, 1)[:, 1:, :]
@@ -939,7 +942,9 @@ class GraphormerModel(GraphormerPreTrainedModel):
             attn_sim = torch.matmul(normed, normed.transpose(1, 2))
             attn_sim = torch.softmax(attn_sim, dim=-1)
             snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
-            wandb.log({"AttentionSNR/dotprod_softmax_before_diffusion": snr_sim}, step=step)
+            if log_group and log_step:
+                wandb.log({f"ASNR_{log_group}/dotprod_softmax_before_diffusion": snr_sim},
+                          step=log_step)
 
         # last inner state, then revert Batch and Graph len
         input_nodes = inner_states[-1].transpose(0, 1)
@@ -967,7 +972,9 @@ class GraphormerModel(GraphormerPreTrainedModel):
                 attn_sim = torch.matmul(normed, normed.transpose(1, 2))
                 attn_sim = torch.softmax(attn_sim, dim=-1)
                 snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
-                wandb.log({"AttentionSNR/dotprod_softmax_after_diffusion": snr_sim}, step=step)
+                if log_group and log_step:
+                    wandb.log({f"ASNR_{log_group}/dotprod_softmax_after_diffusion": snr_sim},
+                              step=log_step)
         # --- End diffusion integration ---
 
         # project masked tokens only
@@ -1029,9 +1036,10 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         labels: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
         edge_index: Optional[torch.LongTensor] = None,
-        step: Optional[int] = None,
-         **kwargs
-#        **unused,
+        log_step: Optional[int] = None,
+        log_group: Optional[int] = None,
+        **kwargs
+#       **unused,
     ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -1045,7 +1053,8 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             attn_edge_type,
             return_dict=True,
             edge_index=edge_index,
-            step=step
+            log_step=log_step,
+            log_group=log_group
         )
         if self.config.optimize_diffuser:
             encoder_outputs, attention_matching_loss = encoder_outputs

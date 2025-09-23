@@ -252,7 +252,9 @@ else:
 
 # 4. Training loop
 evaluator = PCQM4MEvaluator()
-step = 0
+train_step = 0
+val_step = 0
+test_step = 0
 MAX_EPOCHS = 3000
 best_valid_mae = float('inf') if args.dataset_name in ["pcqm4mv2"] else float("-inf")
 best_f1 = -float("inf")
@@ -281,7 +283,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
             assert node_mask is not None
         if node_mask is not None:
             node_mask = node_mask.to(device)
-        outputs = model(**batch, node_mask=node_mask, step=step)
+        outputs = model(**batch, node_mask=node_mask, log_step=train_step, log_group="train")
         # loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
         loss = outputs.loss
         if loss.item() < prev_loss:
@@ -296,7 +298,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         # --- wandb log gradients ---
         for name, param in model.named_parameters():
             if param.grad is not None:
-                wandb.log({f"gradients/{name}": wandb.Histogram(param.grad.detach().cpu().numpy())}, step=step)
+                wandb.log({f"gradients/{name}": wandb.Histogram(param.grad.detach().cpu().numpy())}, step=train_step)
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), temp_grad_clip)
         optimizer.step()
@@ -305,12 +307,12 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         reduce_lr_scheduler.step(loss.item())
 
         # --- wandb log training loss ---
-        wandb.log({"train/loss": loss.item()}, step=step)
+        wandb.log({"train/loss": loss.item()}, step=train_step)
 
-        step += 1
         pbar.set_postfix({"loss": loss.item(), "lr": scheduler.get_last_lr()[0]})
 
-        if step >= MAX_STEPS:
+        train_step += 1
+        if train_step >= MAX_STEPS:
             break
 
     # 5. Validation loop
@@ -329,13 +331,14 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
             else:
                 node_mask = torch.ones(labels.shape, dtype=torch.int32)
             labels = batch["labels"]
-            outputs = model(**batch, node_mask=node_mask)
+            outputs = model(**batch, node_mask=node_mask, log_step=val_step, log_group="val")
             # y_pred.append(outputs[1].view(-1).cpu())
             if config.num_classes > 1:
                 y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
             else:
                 y_pred.append(outputs[1].view(-1).cpu())
             y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
+            val_step += 1
 
     y_pred = torch.cat(y_pred, dim=0)
     y_true = torch.cat(y_true, dim=0)
@@ -345,14 +348,14 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     if args.dataset_name in ["pcqm4mv2"]:
         valid_mae = evaluator.eval(input_dict)["mae"]
         valid_score = str(valid_mae)
-        wandb.log({"val/mae": valid_mae}, step=step)
+        wandb.log({"val/mae": valid_mae}, step=val_step)
     else:
         valid_score = f'{f1_score(y_true, y_pred, average="micro")},{f1_score(y_true, y_pred, average="macro")}'
         valid_mae = f1_score(y_true, y_pred, average="micro")
         wandb.log({
             "val/micro_f1": f1_score(y_true, y_pred, average="micro"),
             "val/macro_f1": f1_score(y_true, y_pred, average="macro")
-        }, step=step)
+        }, step=val_step)
     with open(f"{args.experiment_dir}/val_metric.csv", "a") as f:
         f.write(f"epoch_{epoch},{valid_score}\n")
 
@@ -366,7 +369,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
                 "scheduler": scheduler.state_dict(),
                 "reduce_lr_scheduler": reduce_lr_scheduler.state_dict(),
                 "epoch": epoch,
-                "step": step},
+                "step": train_step},
             f"{args.experiment_dir}/training_checkpoints/best_model_{epoch}.pt"
         )
         print("Best model updated.")
@@ -376,7 +379,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
                 "scheduler": scheduler.state_dict(),
                 "reduce_lr_scheduler": reduce_lr_scheduler.state_dict(),
                 "epoch": epoch,
-                "step": step},
+                "step": train_step},
             f"{args.experiment_dir}/training_checkpoints/latest_model.pt"
         )
 
@@ -395,12 +398,13 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
                 if node_mask is not None:
                     node_mask = node_mask.to(device)
                 labels = batch["labels"]
-                outputs = model(**batch, node_mask=node_mask)
+                outputs = model(**batch, node_mask=node_mask, log_step=test_step, log_group="test")
                 if config.num_classes > 1:
                     y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
                 else:
                     y_pred.append(outputs[1].view(-1).cpu())
                 y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
+                test_step += 1
 
         y_pred = torch.cat(y_pred, dim=0)
         y_true = torch.cat(y_true, dim=0)
@@ -410,9 +414,9 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
             # f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\n")
             f.write(f"epoch_{epoch},{micro_f1},{macro_f1}\n")
-        wandb.log({"test/micro_f1": micro_f1, "test/macro_f1": macro_f1}, step=step)
+        wandb.log({"test/micro_f1": micro_f1, "test/macro_f1": macro_f1}, step=test_step)
 
-    if step >= MAX_STEPS:
+    if train_step >= MAX_STEPS:
         print("Reached max training steps.")
         break
 
@@ -450,6 +454,6 @@ if args.dataset_name not in ["pcqm4mv2"]:
     y_true = torch.cat(y_true, dim=0)
     micro_f1 = f1_score(y_true, y_pred, average="micro")
     macro_f1 = f1_score(y_true, y_pred, average="macro")
-    print(f"Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}")
+    print(f"BEST Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}")
     with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
         f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\n")
