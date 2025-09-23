@@ -98,8 +98,8 @@ os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
 
 # --- wandb init ---
 wandb.init(
-    project="graphormer_eval_2",
-    name=args.experiment_dir,
+    project=f"{args.dataset_name}_38bd281",  # Commit hash of last major change
+    name="/".join(args.experiment_dir.split("/")[1:]),
     config=vars(args),
     dir=args.experiment_dir,
     # mode="online" if args.onscreen_logs else "offline"
