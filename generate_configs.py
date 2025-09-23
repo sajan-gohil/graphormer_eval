@@ -52,12 +52,12 @@ param_tree = {
                     # "diffusion_steps": [50, 100],
                     # "num_denoiser_layers": [2, 3, 4],
                     "optimize_only_diffuser": {
-                        # True: {
-                        #     "pretrained_weights": "placeholder"
-                        # },
-                        False: {
-                            # "detached_denoiser": [True, False],
-                        }
+                        True: {
+                            "pretrained_weights": "placeholder"
+                        },
+                        # False: {
+                        #     # "detached_denoiser": [True, False],
+                        # }
                     },
                     # "augment_edges": {
                     #     True: {"aug_loss_scale": [0.0, 0.5, 1.0],},
@@ -151,15 +151,18 @@ for config in configs:
     config["name"] = name.strip("_").replace(".", "")
     if config.get("optimize_only_diffuser", False):
         if "no_edge_no_spatial" in config["name"]:
-            config["pretrained_weights"] = "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
+            config["pretrained_weights"] = "experiments/cora_base_no_edge_no_spatial_2025-09-23_17-52-42/training_checkpoints/best_model_1542.pt"
         elif "no_edge" in config["name"]:
-            config["pretrained_weights"] = "experiments/cora_base_no_edge_2025-09-21_11-27-18/training_checkpoints/best_model_1648.pt"
+            config["pretrained_weights"] = ""
+            raise Exception("NO VALID MODEL")
         elif "no_spatial" in config["name"]:
-            config["pretrained_weights"] = "experiments/cora_base_no_spatial_2025-09-21_18-18-35/training_checkpoints/best_model_1131.pt"
+            config["pretrained_weights"] = ""
+            raise Exception("NO VALID MODEL")
         elif "no_bias" in config["name"]:
             raise Exception("NO VALID MODEL")
             pass
         else:
+            raise Exception("NO VALID MODEL")
             config["pretrained_weights"] = "experiments/cora_base_2025-09-21_19-00-31/training_checkpoints/best_model_1131.pt"
 
 
