@@ -32,10 +32,10 @@
 param_tree = {
     "dataset_name": ["cora"], # "cora", "citeseer", "pubmed"
     "remove_attn_bias": {
-        True: {},
+        # True: {},
         False: {
-            "edge_type": ["single_hop", "multi_hop"],
-            "enable_spatial_encoder": [False, True],
+            "edge_type": ["single_hop"],
+            "enable_spatial_encoder": [False],
         },
     },
     "enable_diffusion": {

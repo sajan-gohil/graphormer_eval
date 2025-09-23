@@ -1,40 +1,10 @@
 [
     {
         "dataset_name": "cora",
-        "remove_attn_bias": true,
-        "enable_diffusion": false,
-        "name": "cora_base_no_bias"
-    },
-    {
-        "dataset_name": "cora",
         "remove_attn_bias": false,
         "enable_diffusion": false,
         "edge_type": "single_hop",
         "enable_spatial_encoder": false,
         "name": "cora_base_no_edge_no_spatial"
-    },
-    {
-        "dataset_name": "cora",
-        "remove_attn_bias": false,
-        "enable_diffusion": false,
-        "edge_type": "single_hop",
-        "enable_spatial_encoder": true,
-        "name": "cora_base_no_edge"
-    },
-    {
-        "dataset_name": "cora",
-        "remove_attn_bias": false,
-        "enable_diffusion": false,
-        "edge_type": "multi_hop",
-        "enable_spatial_encoder": false,
-        "name": "cora_base_no_spatial"
-    },
-    {
-        "dataset_name": "cora",
-        "remove_attn_bias": false,
-        "enable_diffusion": false,
-        "edge_type": "multi_hop",
-        "enable_spatial_encoder": true,
-        "name": "cora_base"
     }
 ]
