@@ -34,88 +34,91 @@ param_tree = {
     "remove_attn_bias": {
         True: {},
         False: {
-            "edge_type": ["multi_hop", "single_hop"],
-            "enable_spatial_encoder": [True, False],
+            "edge_type": ["single_hop", "multi_hop"],
+            "enable_spatial_encoder": [False, True],
         },
     },
     "enable_diffusion": {
-        True: {
-            "denoiser_type": ["gat", "linear", "mha"],
-            "gnn_only": {
-                True: {},
-                False: {
-                    "diffusion_type": ["x0", "noise_pred", "noise_pred_single"],  # "delta",
-                    "reconstruction_scale": [0.0, 0.5, 1.0],
-                    "structure_scale": [0.0, 0.5, 1.0],
-                    "detached_denoiser": [True, False],
-                    # "diffusion_steps": [50, 100],
-                    # "num_denoiser_layers": [2, 3, 4],
-                    "optimize_only_diffuser": [True, False],
-                    "augment_edges": {
-                        True: {"aug_loss_scale": [0.0, 0.5, 1.0],},
-                        False: {}
-                    }
-                }
-            }
-        },
+        # True: {
+        #     "denoiser_type": ["gat", "mha"], # "linear",
+        #     "gnn_only": {
+        #         True: {
+        #             "diffusion_type": ["x0"]
+        #         },
+        #         False: {
+        #             "diffusion_type": ["x0", "noise_pred", "noise_pred_single"],  # "delta",
+        #             # "reconstruction_scale": [0.0, 1.0],
+        #             # "structure_scale": [0.0, 1.0],
+        #             # "diffusion_steps": [50, 100],
+        #             # "num_denoiser_layers": [2, 3, 4],
+        #             "optimize_only_diffuser": {
+        #                 True: {
+        #                     "pretrained_weights": "placeholder"
+        #                 },
+        #                 False: {
+        #                     # "detached_denoiser": [True, False],
+        #                 }
+        #             },
+        #             # "augment_edges": {
+        #             #     True: {"aug_loss_scale": [0.0, 0.5, 1.0],},
+        #             #     False: {}
+        #             # }
+        #         }
+        #     }
+        # },
         False: {}
     }
 }
 
 
-main_params = {
-    "dataset_name": ["cora"],
-    "edge_type": ["single_hop"],
-    "enable_spatial_encoder": [False],
-    "enable_diffusion": [True], #, False
-    "remove_attn_bias": [False], # True, 
-    "optimize_only_diffuser": [True], # True,
-}
-diffusion_params = {
-    # "reconstruction_scale": [0.0, 0.5, 1.0],
-    # "structure_scale": [1.0],
-    # "aug_loss_scale": [0.0, 0.5, 1.0],
-    "denoiser_type": ["gat", "linear", "mha"],
-    "diffusion_type": ["x0", "noise_pred", "noise_pred_single"],  # "delta",
-    # "detached_denoiser": [True, False],
-    # "diffusion_steps": [10, 50, 100],
-    # "num_denoiser_layers": [2, 3, 4],
-    # "optimize_only_diffuser": [True, False],
-    # "augment_edges": [True, False],
-    "gnn_only": [True, False],
-}
-# # 0 0
-# # 0.5 0
-# 1 0
-# # 0 0.5
-# 0.5 0.5
-# 1 0.5
-# # 0 1
-# 0.5 1
-# 1 1
-configs = []
+from copy import deepcopy
 
-# Create all configs
-def select_param(cur_dict, remaining_params, param_val_dict):
-    print(cur_dict)
-    cur_dict = cur_dict.copy()
-    if len(remaining_params) == 0:
-        configs.append(cur_dict.copy())
-        return cur_dict
-    cur_param = remaining_params.pop()
-    for val in param_val_dict[cur_param]:
-        cur_dict.update({cur_param:val})
-        select_param(cur_dict, remaining_params[:], param_val_dict)
+def expand_tree(tree, prefix=None):
+    """
+    Recursively expand parameter tree into fully specified configs.
+    Each config includes all top-level params that apply.
+    """
+    if prefix is None:
+        prefix = {}
 
-select_param(dict(), list(main_params.keys()), main_params)
-all_configs = configs.copy()
-print(f"Generated {len(all_configs)} base configurations")
-configs = []
-for base_config in all_configs:
-    if base_config["enable_diffusion"]:
-        select_param(base_config.copy(), list(diffusion_params.keys()), diffusion_params)
-    else:
-        configs.append(base_config)
+    # If nothing left to expand, this is a complete config
+    if not tree:
+        return [prefix]
+
+    # Grab the first key to expand
+    key, values = next(iter(tree.items()))
+    rest = {k: v for k, v in tree.items() if k != key}
+    configs = []
+
+    if isinstance(values, list):
+        for v in values:
+            new_prefix = deepcopy(prefix)
+            new_prefix[key] = v
+            configs.extend(expand_tree(rest, new_prefix))
+
+    elif isinstance(values, dict):
+        for choice, subtree in values.items():
+            new_prefix = deepcopy(prefix)
+            new_prefix[key] = choice
+            # Merge subtree with the rest so we don’t lose other top-levels
+            merged = deepcopy(rest)
+            merged.update(subtree)
+            configs.extend(expand_tree(merged, new_prefix))
+
+    else:  # direct assignment
+        new_prefix = deepcopy(prefix)
+        new_prefix[key] = values
+        configs.extend(expand_tree(rest, new_prefix))
+
+    return configs
+
+
+# Generate all configs
+configs = expand_tree(param_tree)
+
+
+print(configs)
+########################################
 
 # Add name. "cora_"+ diff if diffusion, gnn of gnn_only else base + <denoiser_type> + <diffusion type> + ("no_edge" if single_hop + no_spatial if no spatial_enoder) or no_bias if remove_attn_bias + "rec_<rec_scale>_struc_<struc_scale>"
 for config in configs:
@@ -146,16 +149,18 @@ for config in configs:
         if not config.get("enable_spatial_encoder", True):
             name += "no_spatial_"
     config["name"] = name.strip("_").replace(".", "")
-    if "no_edge_no_spatial" in config["name"]:
-        config["pretrained_weights"] = "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
-    elif "no_edge" in config["name"]:
-        config["pretrained_weights"] = "experiments/cora_base_no_edge_2025-09-21_11-27-18/training_checkpoints/best_model_1648.pt"
-    elif "no_spatial" in config["name"]:
-        config["pretrained_weights"] = "experiments/cora_base_no_spatial_2025-09-21_18-18-35/training_checkpoints/best_model_1131.pt"
-    elif "no_bias" in config["name"]:
-        pass
-    else:
-        config["pretrained_weights"] = "experiments/cora_base_2025-09-21_19-00-31/training_checkpoints/best_model_1131.pt"
+    if config.get("optimize_only_diffuser", False):
+        if "no_edge_no_spatial" in config["name"]:
+            config["pretrained_weights"] = "experiments/cora_base_no_edge_no_spatial_2025-09-21_10-57-26/training_checkpoints/best_model_1542.pt"
+        elif "no_edge" in config["name"]:
+            config["pretrained_weights"] = "experiments/cora_base_no_edge_2025-09-21_11-27-18/training_checkpoints/best_model_1648.pt"
+        elif "no_spatial" in config["name"]:
+            config["pretrained_weights"] = "experiments/cora_base_no_spatial_2025-09-21_18-18-35/training_checkpoints/best_model_1131.pt"
+        elif "no_bias" in config["name"]:
+            raise Exception("NO VALID MODEL")
+            pass
+        else:
+            config["pretrained_weights"] = "experiments/cora_base_2025-09-21_19-00-31/training_checkpoints/best_model_1131.pt"
 
 
 # Save configs to file
