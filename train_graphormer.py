@@ -174,7 +174,7 @@ if getattr(args, "tensor_parallel", False):
         print("Auto device map not inferred.")
 
 # 3. Optimizer and Scheduler
-LEARNING_RATE = 2e-5
+LEARNING_RATE = 2e-6
 WEIGHT_DECAY = 0.0
 WARMUP_STEPS = 2 # 60000
 MAX_STEPS = 1000000
@@ -264,7 +264,7 @@ evaluator = PCQM4MEvaluator()
 train_step = 0
 val_step = 0
 test_step = 0
-MAX_EPOCHS = 5000
+MAX_EPOCHS = 15000
 best_valid_mae = float('inf') if args.dataset_name in ["pcqm4mv2"] else float("-inf")
 best_f1 = -float("inf")
 prev_loss = float('-inf')
@@ -436,7 +436,7 @@ print(f"Best Validation MAE: {best_valid_mae:.6f}")
 if args.dataset_name not in ["pcqm4mv2"]:
     # Load best model checkpoint
     best_ckpt = sorted(os.listdir(f"{args.experiment_dir}/training_checkpoints"), key=lambda x: os.path.getmtime(os.path.join(args.experiment_dir, "training_checkpoints", x)))
-    best_ckpt = [i for i in best_ckpt] if "latest" not in i][-1]
+    best_ckpt = [i for i in best_ckpt if "latest" not in i][-1]
     state_dicts = torch.load(os.path.join(args.experiment_dir, "training_checkpoints", best_ckpt), map_location=device)
     model.load_state_dict(state_dicts["model"], strict=False)
     model.eval()
