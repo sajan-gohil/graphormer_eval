@@ -87,7 +87,7 @@ parser.add_argument("--gnn_only", action="store_true", help="Instead of diffusio
 parser.add_argument("--remove_attn_bias", action="store_true", help="Remove attention bias module altogether")
 parser.add_argument("--enable_layerwise_diffusion", action="store_true", help="Perform diffusion after each attention step")
 parser.add_argument("--freeze_pretrained_encoder", type=str, default=None, help="Freeze the pretrained encoder and set weights from given path")
-
+parser.add_argument("--freeze_pretrained_diffusion", type=str, default=None, help="Freeze everything till diffusion model and set weights from given path")
 
 args = parser.parse_args()
 
@@ -174,7 +174,7 @@ if getattr(args, "tensor_parallel", False):
         print("Auto device map not inferred.")
 
 # 3. Optimizer and Scheduler
-LEARNING_RATE = 2e-6
+LEARNING_RATE = 2e-5
 WEIGHT_DECAY = 0.0
 WARMUP_STEPS = 2 # 60000
 MAX_STEPS = 1000000
@@ -251,6 +251,15 @@ if args.freeze_pretrained_encoder:
             param.requires_grad = False
             print(f"Froze parameter: {name}")
 
+if args.freeze_pretrained_diffusion:
+    print(f"Freezing pretrained encoder and diffusion weights from {args.freeze_pretrained_encoder}")
+    state_dicts = torch.load(args.freeze_pretrained_encoder, weights_only=False)
+    model.load_state_dict(state_dicts["model"], strict=False)
+    for name, param in model.named_parameters():
+        if "graph_encoder" in name or "GraphEncoder" in name or "diffusion" in name.lower() or "denoiser" in name.lower():
+            param.requires_grad = False
+            print(f"Froze parameter: {name}")   
+
 # Only move to device if not tensor parallel (dispatch_model handles device placement)
 if not (getattr(args, "tensor_parallel", False) and infer_auto_device_map is not None and dispatch_model is not None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -264,7 +273,7 @@ evaluator = PCQM4MEvaluator()
 train_step = 0
 val_step = 0
 test_step = 0
-MAX_EPOCHS = 15000
+MAX_EPOCHS = 3000
 best_valid_mae = float('inf') if args.dataset_name in ["pcqm4mv2"] else float("-inf")
 best_f1 = -float("inf")
 prev_loss = float('-inf')
