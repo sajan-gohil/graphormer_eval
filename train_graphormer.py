@@ -98,7 +98,7 @@ os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
 
 # --- wandb init ---
 wandb.init(
-    project=f"{args.dataset_name}_38bd281" + "_temp" if args.onscreen_logs else "",  # Commit hash of last major change
+    project=f"{args.dataset_name}_38bd281" + "_temp" if args.onscreen_logs else f"{args.dataset_name}_38bd281",  # Commit hash of last major change
     name="/".join(args.experiment_dir.split("/")[1:]),
     config=vars(args),
     dir=args.experiment_dir,
@@ -264,7 +264,7 @@ evaluator = PCQM4MEvaluator()
 train_step = 0
 val_step = 0
 test_step = 0
-MAX_EPOCHS = 3000
+MAX_EPOCHS = 5000
 best_valid_mae = float('inf') if args.dataset_name in ["pcqm4mv2"] else float("-inf")
 best_f1 = -float("inf")
 prev_loss = float('-inf')
@@ -407,7 +407,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
                 if node_mask is not None:
                     node_mask = node_mask.to(device)
                 labels = batch["labels"]
-                outputs = model(**batch, node_mask=node_mask, log_step=test_step, log_group="test")
+                outputs = model(**batch, node_mask=node_mask, log_step=train_step, log_group="test")
                 if config.num_classes > 1:
                     y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
                 else:
@@ -435,7 +435,8 @@ print(f"Best Validation MAE: {best_valid_mae:.6f}")
 # Load best model and get test set results
 if args.dataset_name not in ["pcqm4mv2"]:
     # Load best model checkpoint
-    best_ckpt = sorted(os.listdir(f"{args.experiment_dir}/training_checkpoints"), key=lambda x: os.path.getmtime(os.path.join(args.experiment_dir, "training_checkpoints", x)))[-1]
+    best_ckpt = sorted(os.listdir(f"{args.experiment_dir}/training_checkpoints"), key=lambda x: os.path.getmtime(os.path.join(args.experiment_dir, "training_checkpoints", x)))
+    best_ckpt = [i for i in best_ckpt] if "latest" not in i][-1]
     state_dicts = torch.load(os.path.join(args.experiment_dir, "training_checkpoints", best_ckpt), map_location=device)
     model.load_state_dict(state_dicts["model"], strict=False)
     model.eval()

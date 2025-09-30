@@ -188,16 +188,17 @@ class GraphLatentDiffusion(nn.Module):
         mse = MSELoss()
 
         for step in reversed(range(self.num_denoising_steps)):
+            print("Stepping =========", step)
             x_t = x_t.detach()
             t_step = torch.tensor([step], device=node_embeddings.device).repeat(B)
             t_emb = self.timestep_embeddings(t_step)#.unsqueeze(1)#.expand(-1, x_t.size(1), -1)
 
-            noisy_with_t = torch.cat([x_t, t_emb], dim=-1)
+            # noisy_with_t = torch.cat([x_t, t_emb], dim=-1)
             # noise_pred = self.denoiser(noisy_with_t, edge_index_list)
             noise_pred = self.denoiser(x_t, t_emb, edge_index_list)
 
             loss = mse(true_noise, noise_pred)
-            losses.append(loss)
+            # losses.append(loss)
             # if self.config.optimize_diffuser:
                 # print("TRYING ========")
 
@@ -216,11 +217,12 @@ class GraphLatentDiffusion(nn.Module):
             else:
                 x_t = x0_pred.detach()
 
-        total_loss = torch.stack(losses).mean()
-        self.diffusion_optimizer.zero_grad()
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.denoiser.parameters(), 5.0)  # optional
-        self.diffusion_optimizer.step()
+            total_loss = loss #torch.stack(losses).mean()
+            self.diffusion_optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.denoiser.parameters(), 5.0)  # optional
+            self.diffusion_optimizer.step()
+            self.diffusion_optimizer.zero_grad()
 
         return x_t  # final denoised embeddings after training
 
@@ -232,7 +234,7 @@ class GraphLatentDiffusion(nn.Module):
         t = torch.tensor([self.num_denoising_steps - 1], device=node_embeddings.device).repeat(B)
         noisy_x, _ = self.add_noise(node_embeddings.detach(), t)
 
-        x_t = noisy_x.clone()
+        x_t = noisy_x.detach().clone()
 
         for step in reversed(range(self.num_denoising_steps)):
             t_step = torch.tensor([step], device=node_embeddings.device).repeat(B)
@@ -249,6 +251,9 @@ class GraphLatentDiffusion(nn.Module):
                       torch.sqrt(1 - alpha_prev).unsqueeze(0).unsqueeze(-1) * noise_pred
             else:
                 x_t = x0_pred
+            del t_step
+            del t_emb
+            
 
         return x_t
 
@@ -413,8 +418,9 @@ class GraphLatentDiffusion(nn.Module):
         
         elif self.config.diffusion_type == "ddim":
             _ = self.optimize_diffusion(node_embeddings, edge_index_list)
-            denoised_embeddings = self.sample_diffusion(node_embeddings, edge_index_list)
-            denoised_embeddings = 0.5 * denoised_embeddings + 0.5 * node_embeddings
+            with torch.no_grad():
+                denoised_embeddings = self.sample_diffusion(node_embeddings.detach().clone(), edge_index_list)
+            denoised_embeddings = 1 * denoised_embeddings + 0.0 * node_embeddings
             reconstruction_loss = 0
             
         self.log_embedding_distribution(node_embeddings, denoised_embeddings)
