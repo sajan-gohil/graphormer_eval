@@ -156,7 +156,7 @@ def preprocess_item(item, config, keep_features=True, split="train"):
     if "labels" not in item:
         item["labels"] = item["y"]
 
-    if not (config.augment_edges and split=="train") and config.dataset_name == "cora":
+    if not (config.augment_edges and split=="train") and config.dataset_name not in ["pcqm4mv2"]:
         CACHED = item
     return item
 
