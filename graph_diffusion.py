@@ -72,9 +72,6 @@ class GraphLatentDiffusion(nn.Module):
         noisy_x = sqrt_alpha * x + sqrt_one_minus_alpha * noise
         return noisy_x, noise
 
-    def add_structured_noise(self, x, t, edge_index_list):
-        pass
-
     def predict_x0_from_noise(self, noisy_x, noise_pred, t):
         sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
         sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
@@ -103,14 +100,16 @@ class GraphLatentDiffusion(nn.Module):
             noise_pred = self.denoiser(x_t, t_emb, edge_index_list)
 
             loss = mse(true_noise, noise_pred)
-            # losses.append(loss)
+            losses.append(loss)
             # if self.config.optimize_diffuser:
                 # print("TRYING ========")
 
             # NOT ideal to update denoiser mid single denoising process
-            # self.diffusion_optimizer.zero_grad()
-            # loss.backward(retain_graph=False)
-            # self.diffusion_optimizer.step()
+            # If we don't, then we have to accumulate activations across all steps
+            self.diffusion_optimizer.zero_grad()
+            loss.backward(retain_graph=False)
+            torch.nn.utils.clip_grad_norm_(self.denoiser.parameters(), 5.0)  # optional
+            self.diffusion_optimizer.step()
                 # print("====optimized")
 
             # Update x_t -> x_{t-1} (DDIM-like deterministic step)
@@ -122,12 +121,12 @@ class GraphLatentDiffusion(nn.Module):
             else:
                 x_t = x0_pred.detach()
 
-            total_loss = loss #torch.stack(losses).mean()
-            self.diffusion_optimizer.zero_grad()
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.denoiser.parameters(), 5.0)  # optional
-            self.diffusion_optimizer.step()
-            self.diffusion_optimizer.zero_grad()
+        # total_loss = torch.stack(losses).mean()
+        # self.diffusion_optimizer.zero_grad()
+        # total_loss.backward()
+        # torch.nn.utils.clip_grad_norm_(self.denoiser.parameters(), 5.0)  # optional
+        # self.diffusion_optimizer.step()
+        self.diffusion_optimizer.zero_grad()
 
         return x_t  # final denoised embeddings after training
 
