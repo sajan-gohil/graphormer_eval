@@ -260,6 +260,8 @@ class GraphLatentDiffusion(nn.Module):
     def forward(self, node_embeddings, edge_index_list, aug_added_edges=None, aug_removed_edges=None, aug_original_edges=None):
         B = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps, (B,), device=node_embeddings.device)
+        if self.config.current_split != "train":
+            t = torch.ones_like(t)*(self.num_denoising_steps//2)
 
         t_emb = self.timestep_embeddings(t)#.unsqueeze(1)#.expand(-1, node_embeddings.size(1), -1)
 
@@ -281,7 +283,7 @@ class GraphLatentDiffusion(nn.Module):
         reconstruction_loss = 0
         if self.config.diffusion_type != "ddim":
             # J-invariant, from https://arxiv.org/pdf/1901.11365
-            if self.config.mask_random_input_prob > 0:
+            if self.config.mask_random_input_prob > 0 and self.config.current_split == "train":
                 B, N, D = noisy_embeddings.shape
                 mask = (torch.rand(B, N, device=noisy_embeddings.device) < self.config.mask_random_input_prob).to(torch.float32)
                 noisy_embeddings = noisy_embeddings * (1 - mask.unsqueeze(-1))   # Keep ones that should not be masked
@@ -333,7 +335,8 @@ class GraphLatentDiffusion(nn.Module):
             # denoised_embeddings = (0.1*node_embeddings) + (0.9*denoised_embeddings)
         
         elif self.config.diffusion_type == "ddim":
-            _ = self.optimize_diffusion(node_embeddings, edge_index_list)
+            if self.config.current_split == "train":
+                _ = self.optimize_diffusion(node_embeddings, edge_index_list)
             with torch.no_grad():
                 denoised_embeddings = self.sample_diffusion(node_embeddings.detach().clone(), edge_index_list)
             denoised_embeddings = 1 * denoised_embeddings + 0.0 * node_embeddings

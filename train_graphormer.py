@@ -322,8 +322,10 @@ prev_loss = float('-inf')
 for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     print("EPOCH: ", epoch)
     model.train()
+    config.current_epoch = epoch
+    config.current_step = train_step
+    config.current_split = "train"
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{MAX_EPOCHS}")
-
     for batch in pbar:
         for k in batch:
             try:
@@ -381,6 +383,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
 
     # 5. Validation loop
     model.eval()
+    config.current_split = "val"
     y_pred, y_true = [], []
     with torch.no_grad():
         for batch in valid_loader:
@@ -450,6 +453,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     # Test set results
     # Load best model and get test set results
     if args.dataset_name not in ["pcqm4mv2"] and epoch % 25 == 0:
+        config.current_split = "test"
         y_pred, y_true = [], []
         with torch.no_grad():
             for batch in test_loader:
