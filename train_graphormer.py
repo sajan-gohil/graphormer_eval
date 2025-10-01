@@ -160,7 +160,7 @@ else:
 if torch.cuda.is_available():
     print(f"[GPU] Memory allocated after model creation: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
     print(f"[GPU] Max memory allocated: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
-    wandb.log({"gpu/model_creation_memory_MB": torch.cuda.memory_allocated() / 1024**2})
+    wandb.log({"gpu/model_creation_memory_MB": torch.cuda.memory_allocated() / 1024**2}, step=config.current_step)
 
 
 # Tensor parallelism: split model across 2 GPUs if requested
@@ -288,7 +288,7 @@ def log_param_count(module, name):
     """Helper for logging parameter counts"""
     count = sum(p.numel() for p in module.parameters() if p.requires_grad)
     print(f"Number of trainable parameters in {name}: {count}")
-    wandb.log({f"params/{name}": count})
+    wandb.log({f"params/{name}": count}, step=config.current_step)
 
 log_param_count(model, "model_total")
 if hasattr(model, "encoder"):
@@ -306,7 +306,7 @@ if hasattr(model, "classifier"):
 for idx, group in enumerate(param_list):
     param_count = sum(p.numel() for p in group["params"] if p.requires_grad)
     print(f"Optimizer param group {idx} trainable params: {param_count}")
-    wandb.log({f"params/optimizer_group_{idx}": param_count})
+    wandb.log({f"params/optimizer_group_{idx}": param_count}, step=config.current_step)
 
 
 # 4. Training loop
@@ -323,7 +323,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     print("EPOCH: ", epoch)
     model.train()
     config.current_epoch = epoch
-    config.current_step = train_step
+    config.current_step = epoch
     config.current_split = "train"
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{MAX_EPOCHS}")
     for batch in pbar:

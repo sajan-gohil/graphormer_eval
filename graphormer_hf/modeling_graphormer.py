@@ -932,7 +932,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
             snr_attn = compute_attention_snr(attn_weight[:, 1:, 1:], labels, node_mask)
             if log_group and log_step:
                 wandb.log({f"ASNR_{log_group}/attn_weight_before_diffusion": snr_attn},
-                          step=log_step)
+                          step=self.config.current_step)
         # Compute SNR from normalized dot product + softmax of input_nodes (before diffusion)
         # input_nodes: [batch, num_nodes+1, hidden_dim], remove graph token
         input_nodes_ = inner_states[-1].transpose(0, 1)[:, 1:, :]
@@ -943,8 +943,9 @@ class GraphormerModel(GraphormerPreTrainedModel):
             attn_sim = torch.softmax(attn_sim, dim=-1)
             snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
             if log_group and log_step:
+                print(f"Logging ASNR_{log_group}/dotprod_softmax_before_diffusion: {snr_sim}, current_step={self.config.current_step}")
                 wandb.log({f"ASNR_{log_group}/dotprod_softmax_before_diffusion": snr_sim},
-                          step=log_step)
+                          step=self.config.current_step)
 
         # last inner state, then revert Batch and Graph len
         input_nodes = inner_states[-1].transpose(0, 1)
@@ -974,7 +975,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
                 snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
                 if log_group and log_step:
                     wandb.log({f"ASNR_{log_group}/dotprod_softmax_after_diffusion": snr_sim},
-                              step=log_step)
+                              step=self.config.current_step)
         # --- End diffusion integration ---
 
         # project masked tokens only

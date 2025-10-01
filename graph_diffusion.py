@@ -295,7 +295,8 @@ class GraphLatentDiffusion(nn.Module):
 
             # --- Log GPU memory and denoiser output size ---
             if torch.cuda.is_available():
-                wandb.log({"gpu/denoiser_memory_MB": torch.cuda.memory_allocated() / 1024**2})
+                wandb.log({"gpu/denoiser_memory_MB": torch.cuda.memory_allocated() / 1024**2},
+                          step=self.config.current_step)
             # print(f"Denoiser output shape: {tuple(denoised_embeddings.shape)}, dtype: {denoised_embeddings.dtype}, size: {denoised_embeddings.element_size() * denoised_embeddings.nelement() / 1024**2:.2f} MB")
         
         if self.config.diffusion_type == "x0":
@@ -351,7 +352,8 @@ class GraphLatentDiffusion(nn.Module):
             # --- Log GPU memory and final output size ---
             if torch.cuda.is_available():
                 # print(f"[GPU] After diffusion output: {torch.cuda.memory_allocated() / 1024**2:.2f} MB (max: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB)")
-                wandb.log({"gpu/diffusion_output_memory_MB": torch.cuda.memory_allocated() / 1024**2})
+                wandb.log({"gpu/diffusion_output_memory_MB": torch.cuda.memory_allocated() / 1024**2},
+                          step=self.config.current_step)
             # print(f"Diffusion output shape: {tuple(denoised_embeddings.shape)}, dtype: {denoised_embeddings.dtype}, size: {denoised_embeddings.element_size() * denoised_embeddings.nelement() / 1024**2:.2f} MB")
         self.log_embedding_distribution(node_embeddings, denoised_embeddings)
 
