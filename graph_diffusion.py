@@ -288,6 +288,8 @@ class GraphLatentDiffusion(nn.Module):
                 mask = (torch.rand(B, N, device=noisy_embeddings.device) < self.config.mask_random_input_prob).to(torch.float32)
                 noisy_embeddings = noisy_embeddings * (1 - mask.unsqueeze(-1))   # Keep ones that should not be masked
                 # noisy_embeddings += torch.randn_like(noisy_embeddings) * mask.unsqueeze(-1)  # Replace masked with noise
+            else:
+                mask = torch.ones_like(noisy_embeddings[:,:,0], device=noisy_embeddings.device)  # No masking, all ones
 
             denoised_embeddings = self.denoiser(noisy_embeddings, t_emb, edge_index_list)
 
@@ -298,12 +300,15 @@ class GraphLatentDiffusion(nn.Module):
         
         if self.config.diffusion_type == "x0":
             if self.config.reconstruction_scale > 0 and not self.config.gnn_only:
-                reconstruction_loss = MSELoss()(node_embeddings, denoised_embeddings)
+                # Calculate loss only for generated masked parts, i.e. ones that were hidden are now generated, loss for them
+                reconstruction_loss = MSELoss()(node_embeddings*mask.unsqueeze(-1), denoised_embeddings*mask.unsqueeze(-1))
+                
+            denoised_embeddings = denoised_embeddings
 
         elif self.config.diffusion_type == "delta":
             denoised_embeddings = node_embeddings + denoised_embeddings
             if self.config.reconstruction_scale > 0 and not self.config.gnn_only:
-                reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
+                reconstruction_loss = MSELoss()(true_noise*mask.unsqueeze(-1), denoised_embeddings*mask.unsqueeze(-1))
 
         elif self.config.diffusion_type == "noise_pred_single":
             if self.config.gnn_only:
@@ -312,13 +317,14 @@ class GraphLatentDiffusion(nn.Module):
             sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)  # Remove more noise than added
             denoised_embeddings = (noisy_embeddings - sqrt_one_minus_alpha*denoised_embeddings)/sqrt_alpha
             if self.config.reconstruction_scale > 0 and not self.config.gnn_only:
-                reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
+                reconstruction_loss = MSELoss()(true_noise*mask.unsqueeze(-1), denoised_embeddings*mask.unsqueeze(-1))
 
         elif self.config.diffusion_type == "noise_pred":
             if self.config.gnn_only:
                 raise Exception("2 STEP NOISE PRED NOT APPLICABLE FOR GNN ONLY MODE")
             if self.config.reconstruction_scale > 0 and not self.config.gnn_only:
-                reconstruction_loss = MSELoss()(true_noise, denoised_embeddings)
+                reconstruction_loss = MSELoss()(true_noise*mask.unsqueeze(-1), denoised_embeddings*mask.unsqueeze(-1))
+
             sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
             sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)  # Remove more noise than added
             denoised_embeddings = (noisy_embeddings - sqrt_one_minus_alpha*denoised_embeddings)/sqrt_alpha
