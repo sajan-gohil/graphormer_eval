@@ -91,7 +91,6 @@ parser.add_argument("--freeze_pretrained_diffusion", type=str, default=None, hel
 
 args = parser.parse_args()
 
-
 args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
 os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
             exist_ok=True)
@@ -156,6 +155,7 @@ else:
     #   model = torch.compile(model, fullgraph=False, dynamic=True)
     #print("Model compiled successfully.")
 
+
 # Tensor parallelism: split model across 2 GPUs if requested
 if getattr(args, "tensor_parallel", False):
     assert torch.cuda.device_count() >= 2, "Tensor parallelism requires at least 2 GPUs."
@@ -185,6 +185,7 @@ GRAD_CLIP_NORM = 5.0
 param_list = [{"params": [i for n,i in model.named_parameters() if "diffusion_model" not in n], "lr":LEARNING_RATE}]
 if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model.parameters(), "lr": 1e-5}]
 optimizer = Adam(param_list, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
+
 
 # Linear warmup and decay scheduler
 def lr_lambda(current_step):
@@ -241,6 +242,13 @@ if args.optimize_only_diffuser:
     reduce_lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=5, min_lr=1e-8)
     pre_epoch = 0
 
+    # Log parameter counts after freezing
+    log_param_count(model, "model_total_post_freeze")
+    if hasattr(model, "encoder"):
+        log_param_count(model.encoder, "encoder_post_freeze")
+        if hasattr(model.encoder, "diffusion_model"):
+            log_param_count(model.encoder.diffusion_model, "diffusion_model_post_freeze")
+
 
 if args.freeze_pretrained_encoder:
     print(f"Freezing pretrained encoder weights from {args.freeze_pretrained_encoder}")
@@ -267,6 +275,32 @@ if not (getattr(args, "tensor_parallel", False) and infer_auto_device_map is not
 else:
     device = torch.device("cuda:0")
     model.to(device)
+
+
+def log_param_count(module, name):
+    """Helper for logging parameter counts"""
+    count = sum(p.numel() for p in module.parameters() if p.requires_grad)
+    print(f"Number of trainable parameters in {name}: {count}")
+    wandb.log({f"params/{name}": count})
+
+log_param_count(model, "model_total")
+if hasattr(model, "encoder"):
+    log_param_count(model.encoder, "encoder")
+    if hasattr(model.encoder, "graph_encoder"):
+        log_param_count(model.encoder.graph_encoder, "graph_encoder")
+    if hasattr(model.encoder, "diffusion_model"):
+        log_param_count(model.encoder.diffusion_model, "diffusion_model")
+        if hasattr(model.encoder.diffusion_model, "denoiser"):
+            log_param_count(model.encoder.diffusion_model.denoiser, "denoiser")
+if hasattr(model, "classifier"):
+    log_param_count(model.classifier, "classifier")
+
+# Log optimizer parameter groups
+for idx, group in enumerate(param_list):
+    param_count = sum(p.numel() for p in group["params"] if p.requires_grad)
+    print(f"Optimizer param group {idx} trainable params: {param_count}")
+    wandb.log({f"params/optimizer_group_{idx}": param_count})
+
 
 # 4. Training loop
 evaluator = PCQM4MEvaluator()
@@ -416,7 +450,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
                 if node_mask is not None:
                     node_mask = node_mask.to(device)
                 labels = batch["labels"]
-                outputs = model(**batch, node_mask=node_mask, log_step=train_step, log_group="test")
+                outputs = model(**batch, node_mask=node_mask, log_step=test_step, log_group="test")
                 if config.num_classes > 1:
                     y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
                 else:
@@ -444,8 +478,7 @@ print(f"Best Validation MAE: {best_valid_mae:.6f}")
 # Load best model and get test set results
 if args.dataset_name not in ["pcqm4mv2"]:
     # Load best model checkpoint
-    best_ckpt = sorted(os.listdir(f"{args.experiment_dir}/training_checkpoints"), key=lambda x: os.path.getmtime(os.path.join(args.experiment_dir, "training_checkpoints", x)))
-    best_ckpt = [i for i in best_ckpt if "latest" not in i][-1]
+    best_ckpt = sorted(os.listdir(f"{args.experiment_dir}/training_checkpoints"), key=lambda x: os.path.getmtime(os.path.join(args.experiment_dir, "training_checkpoints", x)))[-1]
     state_dicts = torch.load(os.path.join(args.experiment_dir, "training_checkpoints", best_ckpt), map_location=device)
     model.load_state_dict(state_dicts["model"], strict=False)
     model.eval()
