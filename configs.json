@@ -8,74 +8,9 @@
         "denoiser_type": "gat",
         "gnn_only": false,
         "diffusion_type": "x0",
-        "optimize_only_diffuser": true,
-        "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-23_17-52-42/training_checkpoints/best_model_1542.pt",
-        "name": "cora_diff_gat_x0_only_no_edge_no_spatial"
-    },
-    {
-        "dataset_name": "cora",
-        "remove_attn_bias": false,
-        "enable_diffusion": true,
-        "edge_type": "single_hop",
-        "enable_spatial_encoder": false,
-        "denoiser_type": "gat",
-        "gnn_only": false,
-        "diffusion_type": "noise_pred",
-        "optimize_only_diffuser": true,
-        "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-23_17-52-42/training_checkpoints/best_model_1542.pt",
-        "name": "cora_diff_gat_noise_pred_only_no_edge_no_spatial"
-    },
-    {
-        "dataset_name": "cora",
-        "remove_attn_bias": false,
-        "enable_diffusion": true,
-        "edge_type": "single_hop",
-        "enable_spatial_encoder": false,
-        "denoiser_type": "gat",
-        "gnn_only": false,
-        "diffusion_type": "noise_pred_single",
-        "optimize_only_diffuser": true,
-        "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-23_17-52-42/training_checkpoints/best_model_1542.pt",
-        "name": "cora_diff_gat_noise_pred_single_only_no_edge_no_spatial"
-    },
-    {
-        "dataset_name": "cora",
-        "remove_attn_bias": false,
-        "enable_diffusion": true,
-        "edge_type": "single_hop",
-        "enable_spatial_encoder": false,
-        "denoiser_type": "linear",
-        "gnn_only": false,
-        "diffusion_type": "x0",
-        "optimize_only_diffuser": true,
-        "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-23_17-52-42/training_checkpoints/best_model_1542.pt",
-        "name": "cora_diff_linear_x0_only_no_edge_no_spatial"
-    },
-    {
-        "dataset_name": "cora",
-        "remove_attn_bias": false,
-        "enable_diffusion": true,
-        "edge_type": "single_hop",
-        "enable_spatial_encoder": false,
-        "denoiser_type": "linear",
-        "gnn_only": false,
-        "diffusion_type": "noise_pred",
-        "optimize_only_diffuser": true,
-        "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-23_17-52-42/training_checkpoints/best_model_1542.pt",
-        "name": "cora_diff_linear_noise_pred_only_no_edge_no_spatial"
-    },
-    {
-        "dataset_name": "cora",
-        "remove_attn_bias": false,
-        "enable_diffusion": true,
-        "edge_type": "single_hop",
-        "enable_spatial_encoder": false,
-        "denoiser_type": "linear",
-        "gnn_only": false,
-        "diffusion_type": "noise_pred_single",
-        "optimize_only_diffuser": true,
-        "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-23_17-52-42/training_checkpoints/best_model_1542.pt",
-        "name": "cora_diff_linear_noise_pred_single_only_no_edge_no_spatial"
+        "mask_random_input_prob": 0.2,
+        "reconstruction_scale": 1,
+        "name": "cora_diff_jinv_gat_x0_no_edge_no_spatial"
     },
     {
         "dataset_name": "cora",
@@ -86,9 +21,35 @@
         "denoiser_type": "mha",
         "gnn_only": false,
         "diffusion_type": "x0",
-        "optimize_only_diffuser": true,
-        "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-23_17-52-42/training_checkpoints/best_model_1542.pt",
-        "name": "cora_diff_mha_x0_only_no_edge_no_spatial"
+        "mask_random_input_prob": 0.2,
+        "reconstruction_scale": 1,
+        "name": "cora_diff_jinv_mha_x0_no_edge_no_spatial"
+    },
+    {
+        "dataset_name": "cora",
+        "remove_attn_bias": false,
+        "enable_diffusion": true,
+        "edge_type": "single_hop",
+        "enable_spatial_encoder": false,
+        "denoiser_type": "linear",
+        "gnn_only": false,
+        "diffusion_type": "x0",
+        "mask_random_input_prob": 0.2,
+        "reconstruction_scale": 1,
+        "name": "cora_diff_jinv_linear_x0_no_edge_no_spatial"
+    },
+    {
+        "dataset_name": "cora",
+        "remove_attn_bias": false,
+        "enable_diffusion": true,
+        "edge_type": "single_hop",
+        "enable_spatial_encoder": false,
+        "denoiser_type": "gat",
+        "gnn_only": true,
+        "diffusion_type": "x0",
+        "mask_random_input_prob": 0.2,
+        "reconstruction_scale": 1,
+        "name": "cora_diff_jinv_gat_x0_only_no_edge_no_spatial"
     },
     {
         "dataset_name": "cora",
@@ -97,11 +58,11 @@
         "edge_type": "single_hop",
         "enable_spatial_encoder": false,
         "denoiser_type": "mha",
-        "gnn_only": false,
-        "diffusion_type": "noise_pred",
-        "optimize_only_diffuser": true,
-        "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-23_17-52-42/training_checkpoints/best_model_1542.pt",
-        "name": "cora_diff_mha_noise_pred_only_no_edge_no_spatial"
+        "gnn_only": true,
+        "diffusion_type": "x0",
+        "mask_random_input_prob": 0.2,
+        "reconstruction_scale": 1,
+        "name": "cora_diff_jinv_mha_x0_only_no_edge_no_spatial"
     },
     {
         "dataset_name": "cora",
@@ -109,11 +70,11 @@
         "enable_diffusion": true,
         "edge_type": "single_hop",
         "enable_spatial_encoder": false,
-        "denoiser_type": "mha",
-        "gnn_only": false,
-        "diffusion_type": "noise_pred_single",
-        "optimize_only_diffuser": true,
-        "pretrained_weights": "experiments/cora_base_no_edge_no_spatial_2025-09-23_17-52-42/training_checkpoints/best_model_1542.pt",
-        "name": "cora_diff_mha_noise_pred_single_only_no_edge_no_spatial"
+        "denoiser_type": "linear",
+        "gnn_only": true,
+        "diffusion_type": "x0",
+        "mask_random_input_prob": 0.2,
+        "reconstruction_scale": 1,
+        "name": "cora_diff_jinv_linear_x0_only_no_edge_no_spatial"
     }
 ]

@@ -30,7 +30,7 @@
 
 
 param_tree = {
-    "dataset_name": ["cora"], # "cora", "citeseer", "pubmed"
+    "dataset_name": ["cora"],  # "cora", "citeseer", "pubmed"
     "remove_attn_bias": {
         # True: {},
         False: {
@@ -40,14 +40,21 @@ param_tree = {
     },
     "enable_diffusion": {
         True: {
-            "denoiser_type": ["gat", "linear", "mha"], # "linear",
+            "denoiser_type": ["gat", "linear", "mha"],  # "linear",
             "gnn_only": {
                 True: {
                     "diffusion_type": ["x0"]
                 },
                 False: {
-                    "diffusion_type": ["x0", "noise_pred", "noise_pred_single"],  # "delta",
-                    # "reconstruction_scale": [0.0, 1.0],
+                    "diffusion_type":
+                    ["x0", "noise_pred", "noise_pred_single"],  # "delta",
+                    "reconstruction_scale": {
+                        0: {},
+                        1: {
+                            "mask_random_input_prob": 0,
+                            "mask_random_input_prob": 0.2
+                        }
+                    },
                     # "structure_scale": [0.0, 1.0],
                     # "diffusion_steps": [50, 100],
                     # "num_denoiser_layers": [2, 3, 4],
@@ -129,6 +136,8 @@ for config in configs:
             name += "gnn_"
         else:
             name += "diff_"
+        if config.get("mask_random_input_prob", 0) > 0:
+            name += "jinv_"
         if config["denoiser_type"] is not None:
             name += config["denoiser_type"] + "_"
         if config.get("diffusion_type", None) is not None:
