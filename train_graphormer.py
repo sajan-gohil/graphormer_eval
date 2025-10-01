@@ -88,6 +88,7 @@ parser.add_argument("--remove_attn_bias", action="store_true", help="Remove atte
 parser.add_argument("--enable_layerwise_diffusion", action="store_true", help="Perform diffusion after each attention step")
 parser.add_argument("--freeze_pretrained_encoder", type=str, default=None, help="Freeze the pretrained encoder and set weights from given path")
 parser.add_argument("--freeze_pretrained_diffusion", type=str, default=None, help="Freeze everything till diffusion model and set weights from given path")
+parser.add_argument("--mask_random_input_prob", type=float, default=0.0, help="Randomly mask this fraction of input node features during diffusion training")
 
 args = parser.parse_args()
 

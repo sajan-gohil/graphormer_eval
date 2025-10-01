@@ -265,6 +265,7 @@ class GraphLatentDiffusion(nn.Module):
 
         if self.config.detached_denoiser:
             noisy_embeddings, true_noise = self.add_noise(node_embeddings.detach().clone(), t)
+
         elif self.config.gnn_only:
             noisy_embeddings = node_embeddings
             true_noise = torch.zeros_like(node_embeddings)
@@ -278,13 +279,18 @@ class GraphLatentDiffusion(nn.Module):
         #    noisy_embeddings_with_t = noisy_embeddings
        
         reconstruction_loss = 0
-        if not self.config.diffusion_type == "ddim":
-            # denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index_list)
+        if self.config.diffusion_type != "ddim":
+            # J-invariant, from https://arxiv.org/pdf/1901.11365
+            if self.config.mask_random_input_prob > 0:
+                B, N, D = noisy_embeddings.shape
+                mask = (torch.rand(B, N, device=noisy_embeddings.device) < self.config.mask_random_input_prob).to(torch.float32)
+                noisy_embeddings = noisy_embeddings * (1 - mask.unsqueeze(-1))   # Keep ones that should not be masked
+                # noisy_embeddings += torch.randn_like(noisy_embeddings) * mask.unsqueeze(-1)  # Replace masked with noise
+
             denoised_embeddings = self.denoiser(noisy_embeddings, t_emb, edge_index_list)
 
             # --- Log GPU memory and denoiser output size ---
             if torch.cuda.is_available():
-                # print(f"[GPU] After denoiser: {torch.cuda.memory_allocated() / 1024**2:.2f} MB (max: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB)")
                 wandb.log({"gpu/denoiser_memory_MB": torch.cuda.memory_allocated() / 1024**2})
             # print(f"Denoiser output shape: {tuple(denoised_embeddings.shape)}, dtype: {denoised_embeddings.dtype}, size: {denoised_embeddings.element_size() * denoised_embeddings.nelement() / 1024**2:.2f} MB")
         
