@@ -9,7 +9,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, L1Loss
 from torch_geometric.nn import GATv2Conv
 from torch_geometric.data import Data, Batch
 import datetime
-
+import wandb
 
 class DenoiserModel(nn.Module):
     def __init__(self, in_channels, timestep_size, num_layers=3, heads=4, layer_type="gat", config=None):
@@ -101,6 +101,12 @@ class DenoiserModel(nn.Module):
                 x_batch = F.silu(self.norms[i](x_batch))
         if self.layer_type == "gat":
             x_batch = torch.stack(x_batch.split(batch.batch.bincount().tolist(), dim=0), dim=0)
+
+            # --- Log GPU memory and denoiser output size ---
+            if torch.cuda.is_available():
+                print(f"[GPU] After DenoiserModel: {torch.cuda.memory_allocated() / 1024**2:.2f} MB (max: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB)")
+                wandb.log({"gpu/denoiser_model_memory_MB": torch.cuda.memory_allocated() / 1024**2})
+            # print(f"DenoiserModel output shape: {tuple(x_batch.shape)}, dtype: {x_batch.dtype}, size: {x_batch.element_size() * x_batch.nelement() / 1024**2:.2f} MB")
         return x_batch
 
 if __name__ == "__main__":

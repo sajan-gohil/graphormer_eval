@@ -9,6 +9,7 @@ from torch_geometric.nn import GATv2Conv
 from torch_geometric.data import Data, Batch
 import datetime
 from denoisers import DenoiserModel
+import wandb
 
 
 def cosine_beta_schedule(timesteps, s=0.02):
@@ -377,6 +378,12 @@ class GraphLatentDiffusion(nn.Module):
         if not self.config.diffusion_type == "ddim":
             # denoised_embeddings = self.denoiser(noisy_embeddings_with_t, edge_index_list)
             denoised_embeddings = self.denoiser(noisy_embeddings, t_emb, edge_index_list)
+
+            # --- Log GPU memory and denoiser output size ---
+            if torch.cuda.is_available():
+                # print(f"[GPU] After denoiser: {torch.cuda.memory_allocated() / 1024**2:.2f} MB (max: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB)")
+                wandb.log({"gpu/denoiser_memory_MB": torch.cuda.memory_allocated() / 1024**2})
+            # print(f"Denoiser output shape: {tuple(denoised_embeddings.shape)}, dtype: {denoised_embeddings.dtype}, size: {denoised_embeddings.element_size() * denoised_embeddings.nelement() / 1024**2:.2f} MB")
         
         if self.config.diffusion_type == "x0":
             if self.config.reconstruction_scale > 0 and not self.config.gnn_only:
@@ -423,6 +430,11 @@ class GraphLatentDiffusion(nn.Module):
             denoised_embeddings = 1 * denoised_embeddings + 0.0 * node_embeddings
             reconstruction_loss = 0
             
+            # --- Log GPU memory and final output size ---
+            if torch.cuda.is_available():
+                # print(f"[GPU] After diffusion output: {torch.cuda.memory_allocated() / 1024**2:.2f} MB (max: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB)")
+                wandb.log({"gpu/diffusion_output_memory_MB": torch.cuda.memory_allocated() / 1024**2})
+            # print(f"Diffusion output shape: {tuple(denoised_embeddings.shape)}, dtype: {denoised_embeddings.dtype}, size: {denoised_embeddings.element_size() * denoised_embeddings.nelement() / 1024**2:.2f} MB")
         self.log_embedding_distribution(node_embeddings, denoised_embeddings)
 
         # Attention improvement loss

@@ -155,6 +155,12 @@ else:
     #   model = torch.compile(model, fullgraph=False, dynamic=True)
     #print("Model compiled successfully.")
 
+# --- Log GPU memory after model creation ---
+if torch.cuda.is_available():
+    print(f"[GPU] Memory allocated after model creation: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+    print(f"[GPU] Max memory allocated: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
+    wandb.log({"gpu/model_creation_memory_MB": torch.cuda.memory_allocated() / 1024**2})
+
 
 # Tensor parallelism: split model across 2 GPUs if requested
 if getattr(args, "tensor_parallel", False):
@@ -341,6 +347,11 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         if loss.item() < prev_loss:
             temp_grad_clip = GRAD_CLIP_NORM
             prev_loss = loss.item()
+
+            # Log GPU memory and tensor sizes after forward pass
+            if torch.cuda.is_available():
+                wandb.log({"gpu/forward_memory_MB": torch.cuda.memory_allocated() / 1024**2}, step=train_step)
+
         else:
             temp_grad_clip = GRAD_CLIP_NORM  # //2
         optimizer.zero_grad()
