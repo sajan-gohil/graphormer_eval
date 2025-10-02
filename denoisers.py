@@ -106,7 +106,8 @@ class DenoiserModel(nn.Module):
             # --- Log GPU memory and denoiser output size ---
             if torch.cuda.is_available():
                 print(f"[GPU] After DenoiserModel: {torch.cuda.memory_allocated() / 1024**2:.2f} MB (max: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB)")
-                wandb.log({"gpu/denoiser_model_memory_MB": torch.cuda.memory_allocated() / 1024**2})
+                wandb.log({"gpu/denoiser_model_memory_MB": torch.cuda.memory_allocated() / 1024**2,
+                           "step": self.config.current_step})
             # print(f"DenoiserModel output shape: {tuple(x_batch.shape)}, dtype: {x_batch.dtype}, size: {x_batch.element_size() * x_batch.nelement() / 1024**2:.2f} MB")
         return x_batch
 
