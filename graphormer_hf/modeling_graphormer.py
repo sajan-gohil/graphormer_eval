@@ -969,7 +969,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
             labels = kwargs.get('labels', None)
             node_mask = kwargs.get('node_mask', None)
             if labels is not None:
-                normed = node_emb / (node_emb.norm(dim=-1, keepdim=True) + 1e-8)
+                normed = node_emb / (torch.sqrt(node_emb.shape[-1]) + 1e-8)
                 attn_sim = torch.matmul(normed, normed.transpose(1, 2))
                 attn_sim = torch.softmax(attn_sim, dim=-1)
                 snr_sim = compute_attention_snr(attn_sim, labels, node_mask)

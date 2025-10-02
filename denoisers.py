@@ -98,7 +98,9 @@ class DenoiserModel(nn.Module):
                 if idx < len(down_res):
                     # print("Adding down res:", idx, down_res[idx].shape)
                     x_batch += down_res[idx]
-                x_batch = F.silu(self.norms[i](x_batch))
+                x_batch = self.norms[i](x_batch)
+                if i != len(self.layers)-1:  # linear activation in last layer
+                    x_batch = F.silu(x_batch)
 
         if self.layer_type == "gat":
             x_batch = torch.stack(x_batch.split(batch.batch.bincount().tolist(), dim=0), dim=0)
