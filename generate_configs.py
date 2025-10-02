@@ -29,6 +29,7 @@
 
 
 param_tree = {
+    "learning_rate": [1e-5],
     "dataset_name": ["cora"],  # "cora", "citeseer", "pubmed"
     "remove_attn_bias": {
         # True: {},
@@ -46,17 +47,17 @@ param_tree = {
                 },
                 False: {
                     "diffusion_type":
-                    ["x0", "noise_pred", "noise_pred_single"],  # "delta",
+                    ["x0", "noise_pred"],  # "delta", "noise_pred_single"
                     "reconstruction_scale": {
                         0: {},
                         1: {
                             "mask_random_input_prob": 0,
-                            "mask_random_input_prob": 0.2
+                            "mask_random_input_prob": 0.3
                         }
                     },
                     "structure_scale": [0.0, 1.0],
-                    "diffusion_steps": [2, 50],
-                    # "num_denoiser_layers": [2, 3, 4],
+                    # "diffusion_steps": [5, 50],
+                    # "num_denoiser_layers": [2, 3],
                     "optimize_only_diffuser": {
                         True: {
                             "pretrained_weights": "placeholder"
@@ -142,8 +143,10 @@ for config in configs:
         if config.get("diffusion_type", None) is not None:
             name += config["diffusion_type"] + "_"
         # name += "no_rec_"
-        name += f"rec_{config.get('reconstruction_scale', 0.0)}_" if config.get("reconstruction_scale", 0.0) > 0 else ""
-        name += f"struc_{config.get('structure_scale', 0.0)}_" if config.get("structure_scale", 0.0) > 0 else ""
+        name += f"rec_{config.get('reconstruction_scale', 0)}_" if config.get("reconstruction_scale", 0.0) > 0 else ""
+        name += f"struc_{config.get('structure_scale', 0)}_" if config.get("structure_scale", 0.0) > 0 else ""
+        name += f"dstep_{config.get('diffusion_steps', 50)}_" if config.get("diffusion_steps", 50) != 50 else ""
+        
     else:
         name += "base_"
     
@@ -159,7 +162,7 @@ for config in configs:
     config["name"] = name.strip("_").replace(".", "")
     if config.get("optimize_only_diffuser", False):
         if "no_edge_no_spatial" in config["name"]:
-            config["pretrained_weights"] = "experiments/cora_base_no_edge_no_spatial_2025-09-23_17-52-42/training_checkpoints/best_model_1542.pt"
+            config["pretrained_weights"] = "experiments/cora_base_no_edge_no_spatial_2025-10-02_11-58-45/training_checkpoints/best_model_5967.pt"
         elif "no_edge" in config["name"]:
             config["pretrained_weights"] = ""
             raise Exception("NO VALID MODEL")
@@ -168,10 +171,8 @@ for config in configs:
             raise Exception("NO VALID MODEL")
         elif "no_bias" in config["name"]:
             raise Exception("NO VALID MODEL")
-            pass
         else:
             raise Exception("NO VALID MODEL")
-            config["pretrained_weights"] = "experiments/cora_base_2025-09-21_19-00-31/training_checkpoints/best_model_1131.pt"
 
 
 # Save configs to file

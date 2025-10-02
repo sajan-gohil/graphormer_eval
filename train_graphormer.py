@@ -77,7 +77,6 @@ parser.add_argument("--num_workers", type=int, default=0, help="Number of worker
 parser.add_argument("--dataset_name", type=str, default="cora", help="Name of the dataset to use")
 parser.add_argument("--create_subgraph", action="store_true", help="Create subgraphs from given large graph")
 parser.add_argument("--num_denoiser_layers", type=int, default=3, help="Number of layers in the denoiser: n down, n-1 up + 1 final projection")
-parser.add_argument("--use_linear_denoiser", action="store_true", help="[Deprecated with denoisers.py] Use linear layers in the denoiser")
 parser.add_argument("--denoiser_type", type=str, default="gat", help="Denoiser layer type. Accepted: gat, linear, mha")
 
 parser.add_argument("--optimize_only_diffuser", action="store_true", help="Optimize only the diffuser model")
@@ -100,7 +99,7 @@ os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
 
 # --- wandb init ---
 wandb.init(
-    project=f"{args.dataset_name}_774560" + "_temp" if args.onscreen_logs else f"{args.dataset_name}_774560",  # Commit hash of last major change
+    project=f"{args.dataset_name}_011eec" + "_temp" if args.onscreen_logs else f"{args.dataset_name}_774560",  # Commit hash of last major change
     name="/".join(args.experiment_dir.split("/")[1:]),
     config=vars(args),
     dir=args.experiment_dir,
