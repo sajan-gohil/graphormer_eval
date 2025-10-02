@@ -98,7 +98,7 @@ os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
 
 # --- wandb init ---
 wandb.init(
-    project=f"{args.dataset_name}_38bd281" + "_temp" if args.onscreen_logs else f"{args.dataset_name}_38bd281",  # Commit hash of last major change
+    project=f"{args.dataset_name}_774560" + "_temp" if args.onscreen_logs else f"{args.dataset_name}_774560",  # Commit hash of last major change
     name="/".join(args.experiment_dir.split("/")[1:]),
     config=vars(args),
     dir=args.experiment_dir,
@@ -160,7 +160,7 @@ else:
 if torch.cuda.is_available():
     print(f"[GPU] Memory allocated after model creation: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
     print(f"[GPU] Max memory allocated: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
-    wandb.log({"gpu/model_creation_memory_MB": torch.cuda.memory_allocated() / 1024**2}, step=config.current_step)
+    wandb.log({"gpu/model_creation_memory_MB": torch.cuda.memory_allocated() / 1024**2}, step=0)
 
 
 # Tensor parallelism: split model across 2 GPUs if requested
@@ -181,9 +181,9 @@ if getattr(args, "tensor_parallel", False):
         print("Auto device map not inferred.")
 
 # 3. Optimizer and Scheduler
-LEARNING_RATE = 2e-5
+LEARNING_RATE = 1e-5
 WEIGHT_DECAY = 0.0
-WARMUP_STEPS = 2 # 60000
+WARMUP_STEPS = 100 # 60000
 MAX_STEPS = 1000000
 ADAM_EPS = 1e-8
 BETA1, BETA2 = 0.9, 0.999
@@ -286,9 +286,11 @@ else:
 
 def log_param_count(module, name):
     """Helper for logging parameter counts"""
+    if not module:
+        return
     count = sum(p.numel() for p in module.parameters() if p.requires_grad)
     print(f"Number of trainable parameters in {name}: {count}")
-    wandb.log({f"params/{name}": count}, step=config.current_step)
+    # wandb.log({f"params/{name}": count}, step=0)
 
 log_param_count(model, "model_total")
 if hasattr(model, "encoder"):
@@ -306,7 +308,7 @@ if hasattr(model, "classifier"):
 for idx, group in enumerate(param_list):
     param_count = sum(p.numel() for p in group["params"] if p.requires_grad)
     print(f"Optimizer param group {idx} trainable params: {param_count}")
-    wandb.log({f"params/optimizer_group_{idx}": param_count}, step=config.current_step)
+    # wandb.log({f"params/optimizer_group_{idx}": param_count}, step=0)
 
 
 # 4. Training loop
@@ -314,7 +316,7 @@ evaluator = PCQM4MEvaluator()
 train_step = 0
 val_step = 0
 test_step = 0
-MAX_EPOCHS = 3000
+MAX_EPOCHS = 5000
 best_valid_mae = float('inf') if args.dataset_name in ["pcqm4mv2"] else float("-inf")
 best_f1 = -float("inf")
 prev_loss = float('-inf')
@@ -352,8 +354,8 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
             prev_loss = loss.item()
 
             # Log GPU memory and tensor sizes after forward pass
-            if torch.cuda.is_available():
-                wandb.log({"gpu/forward_memory_MB": torch.cuda.memory_allocated() / 1024**2}, step=config.current_step)
+            # if torch.cuda.is_available():
+            #    wandb.log({"gpu/forward_memory_MB": torch.cuda.memory_allocated() / 1024**2}, step=config.current_step)
 
         else:
             temp_grad_clip = GRAD_CLIP_NORM  # //2
@@ -362,9 +364,9 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         loss.backward()
 
         # --- wandb log gradients ---
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                wandb.log({f"gradients/{name}": wandb.Histogram(param.grad.detach().cpu().numpy())}, step=config.current_step)
+        #for name, param in model.named_parameters():
+        #    if param.grad is not None:
+        #        wandb.log({f"gradients/{name}": wandb.Histogram(param.grad.detach().cpu().numpy())}, step=config.current_step)
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), temp_grad_clip)
         optimizer.step()

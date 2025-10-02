@@ -223,7 +223,7 @@ class GraphormerGraphNodeFeature(nn.Module):
         self.num_atoms = config.num_atoms
 
         self.atom_encoder = nn.Embedding(config.num_atoms + 1, config.hidden_size, padding_idx=config.pad_token_id)
-        self.feature_encoder = nn.LazyLinear(config.hidden_size)
+        self.feature_encoder = nn.Linear(1433, config.hidden_size)
         self.in_degree_encoder = nn.Embedding(
             config.num_in_degree, config.hidden_size, padding_idx=config.pad_token_id
         )
@@ -943,7 +943,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
             attn_sim = torch.softmax(attn_sim, dim=-1)
             snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
             if log_group and log_step:
-                print(f"Logging ASNR_{log_group}/dotprod_softmax_before_diffusion: {snr_sim}, current_step={self.config.current_step}")
+            #    print(f"Logging ASNR_{log_group}/dotprod_softmax_before_diffusion: {snr_sim}, current_step={self.config.current_step}")
                 wandb.log({f"ASNR_{log_group}/dotprod_softmax_before_diffusion": snr_sim},
                           step=self.config.current_step)
 

@@ -287,7 +287,7 @@ class GraphLatentDiffusion(nn.Module):
                 B, N, D = noisy_embeddings.shape
                 mask = (torch.rand(B, N, device=noisy_embeddings.device) < self.config.mask_random_input_prob).to(torch.float32)
                 noisy_embeddings = noisy_embeddings * (1 - mask.unsqueeze(-1))   # Keep ones that should not be masked
-                # noisy_embeddings += torch.randn_like(noisy_embeddings) * mask.unsqueeze(-1)  # Replace masked with noise
+                noisy_embeddings += torch.randn_like(noisy_embeddings) * mask.unsqueeze(-1)  # Replace masked with noise
             else:
                 mask = torch.ones_like(noisy_embeddings[:,:,0], device=noisy_embeddings.device)  # No masking, all ones
 

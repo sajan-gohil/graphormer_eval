@@ -49,7 +49,7 @@
         "diffusion_type": "x0",
         "mask_random_input_prob": 0.2,
         "reconstruction_scale": 1,
-        "name": "cora_diff_jinv_gat_x0_only_no_edge_no_spatial"
+        "name": "cora_gnn_jinv_gat_x0_no_edge_no_spatial"
     },
     {
         "dataset_name": "cora",
@@ -62,7 +62,7 @@
         "diffusion_type": "x0",
         "mask_random_input_prob": 0.2,
         "reconstruction_scale": 1,
-        "name": "cora_diff_jinv_mha_x0_only_no_edge_no_spatial"
+        "name": "cora_gnn_jinv_mha_x0_no_edge_no_spatial"
     },
     {
         "dataset_name": "cora",
@@ -75,6 +75,28 @@
         "diffusion_type": "x0",
         "mask_random_input_prob": 0.2,
         "reconstruction_scale": 1,
-        "name": "cora_diff_jinv_linear_x0_only_no_edge_no_spatial"
+        "name": "cora_gnn_jinv_linear_x0_no_edge_no_spatial"
+    },
+    {
+	"dataset_name": "cora",
+	"remove_attn_bias": false,
+        "enable_diffusion": true,
+        "edge_type": "single_hop",
+        "enable_spatial_encoder": false,
+        "denoiser_type": "gat",
+        "gnn_only": false,
+        "diffusion_type": "x0",
+        "name": "cora_diff_gat_x0_no_edge_no_spatial"
+    },
+    {
+	"dataset_name": "cora",
+	"remove_attn_bias": false,
+        "enable_diffusion": true,
+        "edge_type": "single_hop",
+        "enable_spatial_encoder": false,
+        "denoiser_type": "gat",
+        "gnn_only": true,
+        "diffusion_type": "x0",
+        "name": "cora_gnn_gat_x0_no_edge_no_spatial"
     }
 ]
