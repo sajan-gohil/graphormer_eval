@@ -61,7 +61,6 @@ parser = argparse.ArgumentParser(
 parser.add_argument("--edge_type", type=str, default="multi_hop", help="Type of edge encoding (multi_hop, single_hop, etc.)")
 parser.add_argument("--enable_spatial_encoder", action="store_true", help="Enable spatial encoder")
 parser.add_argument("--enable_diffusion", action="store_true", help="Enable diffusion")
-parser.add_argument("--optimize_diffuser", action="store_true", help="Optimize diffuser  # NOT USED. DEPRECATED")
 parser.add_argument("--tensor_parallel", action="store_true", help="Enable tensor parallelism on 2 GPUs (requires >=2 GPUs)")
 parser.add_argument("--experiment_dir", type=str, default="./experiments", help="Directory to save experiment results")
 parser.add_argument("--name", type=str, default="graphormer_experiment", help="Name of the experiment")
@@ -89,6 +88,9 @@ parser.add_argument("--enable_layerwise_diffusion", action="store_true", help="P
 parser.add_argument("--freeze_pretrained_encoder", type=str, default=None, help="Freeze the pretrained encoder and set weights from given path")
 parser.add_argument("--freeze_pretrained_diffusion", type=str, default=None, help="Freeze everything till diffusion model and set weights from given path")
 parser.add_argument("--mask_random_input_prob", type=float, default=0.0, help="Randomly mask this fraction of input node features during diffusion training")
+
+parser.add_argument("--learning_rate", type=float, default=2e-5, help="global learning_rate")
+
 
 args = parser.parse_args()
 
@@ -181,10 +183,10 @@ if getattr(args, "tensor_parallel", False):
         print("Auto device map not inferred.")
 
 # 3. Optimizer and Scheduler
-LEARNING_RATE = 1e-5
+LEARNING_RATE = args.learning_rate
 WEIGHT_DECAY = 0.0
 WARMUP_STEPS = 100 # 60000
-MAX_STEPS = 1000000
+MAX_STEPS = 100000000
 ADAM_EPS = 1e-8
 BETA1, BETA2 = 0.9, 0.999
 GRAD_CLIP_NORM = 5.0
@@ -316,7 +318,7 @@ evaluator = PCQM4MEvaluator()
 train_step = 0
 val_step = 0
 test_step = 0
-MAX_EPOCHS = 5000
+MAX_EPOCHS = 7500
 best_valid_mae = float('inf') if args.dataset_name in ["pcqm4mv2"] else float("-inf")
 best_f1 = -float("inf")
 prev_loss = float('-inf')

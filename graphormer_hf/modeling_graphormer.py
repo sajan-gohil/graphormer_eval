@@ -987,7 +987,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
 
         if not return_dict:
             return tuple(x for x in [input_nodes, inner_states] if x is not None)
-        if self.config.optimize_diffuser:
+        if self.config.enable_diffusion:
             return BaseModelOutputWithNoAttention(
                 last_hidden_state=input_nodes,
                 hidden_states=inner_states), attention_matching_loss
@@ -1054,7 +1054,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             log_step=log_step,
             log_group=log_group
         )
-        if self.config.optimize_diffuser:
+        if self.config.enable_diffusion:
             encoder_outputs, attention_matching_loss = encoder_outputs
         outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
 
@@ -1076,7 +1076,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
                 loss_fct = BCEWithLogitsLoss(reduction="sum")
                 loss = loss_fct(logits[mask], labels[mask])
 
-        if self.config.optimize_diffuser:
+        if self.config.enable_diffusion:
             if np.random.rand() < 0.01:
                 with open(f"{self.config.experiment_dir}/losses.csv", "a") as f:
                     print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)
@@ -1140,7 +1140,7 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
             node_mask=node_mask,
             **kwargs
         )
-        if self.config.optimize_diffuser:
+        if self.config.enable_diffusion:
             encoder_outputs, attention_matching_loss = encoder_outputs
         outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
 
@@ -1167,7 +1167,7 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
                 loss_fct = BCEWithLogitsLoss(reduction="sum")
                 loss = loss_fct(logits[mask], labels[mask])
 
-        if self.config.optimize_diffuser:
+        if self.config.enable_diffusion:
             if np.random.rand() < 0.01:
                 with open(f"{self.config.experiment_dir}/losses_node.csv", "a") as f:
                     print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)

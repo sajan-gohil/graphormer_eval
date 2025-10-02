@@ -1,7 +1,6 @@
 # parser.add_argument("--edge_type", type=str, default="multi_hop", help="Type of edge encoding (multi_hop, single_hop, etc.)")
 # parser.add_argument("--enable_spatial_encoder", action="store_true", help="Enable spatial encoder")
 # parser.add_argument("--enable_diffusion", action="store_true", help="Enable diffusion")
-# parser.add_argument("--optimize_diffuser", action="store_true", help="Optimize diffuser  # NOT USED. DEPRECATED")
 # parser.add_argument("--tensor_parallel", action="store_true", help="Enable tensor parallelism on 2 GPUs (requires >=2 GPUs)")
 # parser.add_argument("--experiment_dir", type=str, default="./experiments", help="Directory to save experiment results")
 # parser.add_argument("--name", type=str, default="graphormer_experiment", help="Name of the experiment")
@@ -55,16 +54,16 @@ param_tree = {
                             "mask_random_input_prob": 0.2
                         }
                     },
-                    # "structure_scale": [0.0, 1.0],
-                    # "diffusion_steps": [50, 100],
+                    "structure_scale": [0.0, 1.0],
+                    "diffusion_steps": [2, 50],
                     # "num_denoiser_layers": [2, 3, 4],
                     "optimize_only_diffuser": {
                         True: {
                             "pretrained_weights": "placeholder"
                         },
-                        # False: {
-                        #     # "detached_denoiser": [True, False],
-                        # }
+                        False: {
+                            # "detached_denoiser": [True, False],
+                        }
                     },
                     # "augment_edges": {
                     #     True: {"aug_loss_scale": [0.0, 0.5, 1.0],},

@@ -83,9 +83,9 @@ class DenoiserModel(nn.Module):
             if self.layer_type != "mha":
                 x_batch = F.silu(self.norms[i](x_batch))
             down_res.append(x_batch)
+
         # print("Down res shapes:", [i.shape for i in down_res])
         down_res = down_res[::-1]
-        # print("Down res shapes:", [i.shape for i in down_res])
         for idx, i in enumerate(list(range(self.num_layers, len(self.layers))), 1): # Start from 1 to skip bottleneck
             if time_embedding_batch is not None:
                 t_emb = self.t_proj[i](time_embedding_batch)
@@ -99,6 +99,7 @@ class DenoiserModel(nn.Module):
                     # print("Adding down res:", idx, down_res[idx].shape)
                     x_batch += down_res[idx]
                 x_batch = F.silu(self.norms[i](x_batch))
+
         if self.layer_type == "gat":
             x_batch = torch.stack(x_batch.split(batch.batch.bincount().tolist(), dim=0), dim=0)
 

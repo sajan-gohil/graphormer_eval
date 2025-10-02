@@ -98,11 +98,8 @@ class GraphLatentDiffusion(nn.Module):
             # noisy_with_t = torch.cat([x_t, t_emb], dim=-1)
             # noise_pred = self.denoiser(noisy_with_t, edge_index_list)
             noise_pred = self.denoiser(x_t, t_emb, edge_index_list)
-
             loss = mse(true_noise, noise_pred)
             losses.append(loss)
-            # if self.config.optimize_diffuser:
-                # print("TRYING ========")
 
             # NOT ideal to update denoiser mid single denoising process
             # If we don't, then we have to accumulate activations across all steps
@@ -287,7 +284,7 @@ class GraphLatentDiffusion(nn.Module):
                 B, N, D = noisy_embeddings.shape
                 mask = (torch.rand(B, N, device=noisy_embeddings.device) < self.config.mask_random_input_prob).to(torch.float32)
                 noisy_embeddings = noisy_embeddings * (1 - mask.unsqueeze(-1))   # Keep ones that should not be masked
-                noisy_embeddings += torch.randn_like(noisy_embeddings) * mask.unsqueeze(-1)  # Replace masked with noise
+                noisy_embeddings += (torch.randn_like(noisy_embeddings) * mask.unsqueeze(-1))  # Replace masked with noise
             else:
                 mask = torch.ones_like(noisy_embeddings[:,:,0], device=noisy_embeddings.device)  # No masking, all ones
 
@@ -303,8 +300,6 @@ class GraphLatentDiffusion(nn.Module):
                 # Calculate loss only for generated masked parts, i.e. ones that were hidden are now generated, loss for them
                 reconstruction_loss = MSELoss()(node_embeddings*mask.unsqueeze(-1), denoised_embeddings*mask.unsqueeze(-1))
                 
-            denoised_embeddings = denoised_embeddings
-
         elif self.config.diffusion_type == "delta":
             denoised_embeddings = node_embeddings + denoised_embeddings
             if self.config.reconstruction_scale > 0 and not self.config.gnn_only:
