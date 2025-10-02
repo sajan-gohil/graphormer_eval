@@ -290,7 +290,7 @@ def log_param_count(module, name):
         return
     count = sum(p.numel() for p in module.parameters() if p.requires_grad)
     print(f"Number of trainable parameters in {name}: {count}")
-    # wandb.log({f"params/{name}": count}, step=0)
+    wandb.log({f"params/{name}": count})
 
 log_param_count(model, "model_total")
 if hasattr(model, "encoder"):
@@ -308,7 +308,7 @@ if hasattr(model, "classifier"):
 for idx, group in enumerate(param_list):
     param_count = sum(p.numel() for p in group["params"] if p.requires_grad)
     print(f"Optimizer param group {idx} trainable params: {param_count}")
-    # wandb.log({f"params/optimizer_group_{idx}": param_count}, step=0)
+    wandb.log({f"params/optimizer_group_{idx}": param_count})
 
 
 # 4. Training loop
@@ -354,8 +354,8 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
             prev_loss = loss.item()
 
             # Log GPU memory and tensor sizes after forward pass
-            # if torch.cuda.is_available():
-            #    wandb.log({"gpu/forward_memory_MB": torch.cuda.memory_allocated() / 1024**2}, step=config.current_step)
+            if torch.cuda.is_available():
+                wandb.log({"gpu/forward_memory_MB": torch.cuda.memory_allocated() / 1024**2})
 
         else:
             temp_grad_clip = GRAD_CLIP_NORM  # //2
@@ -364,9 +364,9 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         loss.backward()
 
         # --- wandb log gradients ---
-        #for name, param in model.named_parameters():
-        #    if param.grad is not None:
-        #        wandb.log({f"gradients/{name}": wandb.Histogram(param.grad.detach().cpu().numpy())}, step=config.current_step)
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                wandb.log({f"gradients/{name}": wandb.Histogram(param.grad.detach().cpu().numpy())})
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), temp_grad_clip)
         optimizer.step()
@@ -375,7 +375,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         reduce_lr_scheduler.step(loss.item())
 
         # --- wandb log training loss ---
-        wandb.log({"train/loss": loss.item()}, step=config.current_step)
+        wandb.log({"train/loss": loss.item()})
 
         pbar.set_postfix({"loss": loss.item(), "lr": scheduler.get_last_lr()[0]})
 
@@ -417,14 +417,14 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     if args.dataset_name in ["pcqm4mv2"]:
         valid_mae = evaluator.eval(input_dict)["mae"]
         valid_score = str(valid_mae)
-        wandb.log({"val/mae": valid_mae}, step=config.current_step)
+        wandb.log({"val/mae": valid_mae})
     else:
         valid_score = f'{f1_score(y_true, y_pred, average="micro")},{f1_score(y_true, y_pred, average="macro")}'
         valid_mae = f1_score(y_true, y_pred, average="micro")
         wandb.log({
             "val/micro_f1": f1_score(y_true, y_pred, average="micro"),
             "val/macro_f1": f1_score(y_true, y_pred, average="macro")
-        }, step=config.current_step)
+        })
     with open(f"{args.experiment_dir}/val_metric.csv", "a") as f:
         f.write(f"epoch_{epoch},{valid_score}\n")
 
@@ -484,7 +484,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
             # f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\n")
             f.write(f"epoch_{epoch},{micro_f1},{macro_f1}\n")
-        wandb.log({"test/micro_f1": micro_f1, "test/macro_f1": macro_f1}, step=config.current_step)
+        wandb.log({"test/micro_f1": micro_f1, "test/macro_f1": macro_f1})
 
     if train_step >= MAX_STEPS:
         print("Reached max training steps.")
