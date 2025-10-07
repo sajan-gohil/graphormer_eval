@@ -98,9 +98,12 @@ os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
             exist_ok=True)
 
 # --- wandb init ---
+wandb_name = f"{args.dataset_name}_011eec"
+if args.onscreen_logs:
+    wandb_name += "_temp"
 wandb.init(
-    project=f"{args.dataset_name}_011eec" + "_temp" if args.onscreen_logs else f"{args.dataset_name}_774560",  # Commit hash of last major change
-    name="/".join(args.experiment_dir.split("/")[1:]),
+    project=wandb_name,  # Commit hash of last major change
+    name="/".join(args.experiment_dir.split("/")[2:]),
     config=vars(args),
     dir=args.experiment_dir,
     # mode="online" if args.onscreen_logs else "offline"
@@ -318,7 +321,7 @@ evaluator = PCQM4MEvaluator()
 train_step = 0
 val_step = 0
 test_step = 0
-MAX_EPOCHS = 7500
+MAX_EPOCHS = 10000
 best_valid_mae = float('inf') if args.dataset_name in ["pcqm4mv2"] else float("-inf")
 best_f1 = -float("inf")
 prev_loss = float('-inf')

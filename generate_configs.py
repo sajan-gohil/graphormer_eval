@@ -40,28 +40,28 @@ param_tree = {
     },
     "enable_diffusion": {
         True: {
-            "denoiser_type": ["gat", "linear", "mha"],  # "linear",
+            "denoiser_type": ["gat"], # "linear", "mha"],  # "linear",
+            "structure_scale": [1.0],
+            "reconstruction_scale": [0, 1],
+            "mask_random_input_prob": [0, 0.2],
+            #     0: {},
+            #     1: {
+            #         "mask_random_input_prob": 0,
+            #         "mask_random_input_prob": 0.3
+            #     }
+            # },
             "gnn_only": {
                 True: {
                     "diffusion_type": ["x0"]
                 },
                 False: {
-                    "diffusion_type":
-                    ["x0", "noise_pred"],  # "delta", "noise_pred_single"
-                    "reconstruction_scale": {
-                        0: {},
-                        1: {
-                            "mask_random_input_prob": 0,
-                            "mask_random_input_prob": 0.3
-                        }
-                    },
-                    "structure_scale": [0.0, 1.0],
+                    "diffusion_type": ["x0", "noise_pred"],  # "delta", "noise_pred_single"
                     # "diffusion_steps": [5, 50],
                     # "num_denoiser_layers": [2, 3],
                     "optimize_only_diffuser": {
-                        True: {
-                            "pretrained_weights": "placeholder"
-                        },
+                        # True: {
+                        #     "pretrained_weights": "placeholder"
+                        # },
                         False: {
                             # "detached_denoiser": [True, False],
                         }
