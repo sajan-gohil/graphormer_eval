@@ -199,6 +199,15 @@ if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model
 optimizer = Adam(param_list, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
 
 
+def log_param_count(module, name):
+    """Helper for logging parameter counts"""
+    if not module:
+        return
+    count = sum(p.numel() for p in module.parameters() if p.requires_grad)
+    print(f"Number of trainable parameters in {name}: {count}")
+    wandb.log({f"params/{name}": count, "step": 0})
+
+
 # Linear warmup and decay scheduler
 def lr_lambda(current_step):
     if current_step < WARMUP_STEPS:
@@ -289,14 +298,6 @@ else:
     model.to(device)
 
 
-def log_param_count(module, name):
-    """Helper for logging parameter counts"""
-    if not module:
-        return
-    count = sum(p.numel() for p in module.parameters() if p.requires_grad)
-    print(f"Number of trainable parameters in {name}: {count}")
-    wandb.log({f"params/{name}": count, "step": 0})
-
 log_param_count(model, "model_total")
 if hasattr(model, "encoder"):
     log_param_count(model.encoder, "encoder")
@@ -325,6 +326,17 @@ MAX_EPOCHS = 10000
 best_valid_mae = float('inf') if args.dataset_name in ["pcqm4mv2"] else float("-inf")
 best_f1 = -float("inf")
 prev_loss = float('-inf')
+
+# Early stopping settings
+# Stop if validation micro/macro F1 does not increase AND validation loss does not decrease
+# for EARLY_STOP_PATIENCE_EPOCHS consecutive epochs, but only after MIN_STEPS epochs have passed.
+EARLY_STOP_PATIENCE_EPOCHS = 500
+MIN_STEPS = 5000
+epochs_since_improvement = 0
+# Track best validation metrics
+best_micro_f1 = -float("inf")
+best_macro_f1 = -float("inf")
+best_val_loss = float('inf')
 
 for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     print("EPOCH: ", epoch)
@@ -421,25 +433,55 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     
 
     input_dict = {"y_true": y_true.numpy(), "y_pred": y_pred.numpy()}
+    # Compute validation metrics
     if args.dataset_name in ["pcqm4mv2"]:
         valid_mae = evaluator.eval(input_dict)["mae"]
         valid_score = str(valid_mae)
         wandb.log({"val/mae": valid_mae, "step": config.current_step})
+        # For regression task we treat lower as better; reuse best_valid_mae
+        improved = valid_mae < best_valid_mae
+        val_loss = valid_mae
     else:
-        valid_score = f'{f1_score(y_true, y_pred, average="micro")},{f1_score(y_true, y_pred, average="macro")}'
-        valid_mae = f1_score(y_true, y_pred, average="micro")
+        micro = f1_score(y_true, y_pred, average="micro")
+        macro = f1_score(y_true, y_pred, average="macro")
+        valid_score = f'{micro},{macro}'
+        valid_mae = micro
         wandb.log({
-            "val/micro_f1": f1_score(y_true, y_pred, average="micro"),
-            "val/macro_f1": f1_score(y_true, y_pred, average="macro"),
+            "val/micro_f1": micro,
+            "val/macro_f1": macro,
             "step": config.current_step
         })
+        # For classification, we consider improvement if either micro or macro f1 increases
+        improved = (micro > best_micro_f1) or (macro > best_macro_f1)
+        val_loss = float(outputs.loss.detach().cpu().item())
+    
     with open(f"{args.experiment_dir}/val_metric.csv", "a") as f:
         f.write(f"epoch_{epoch},{valid_score}\n")
 
     print(f"Validation MAE: {valid_score}")
-    is_better = valid_mae < best_valid_mae if args.dataset_name in ["pcqm4mv2"] else valid_mae >= best_valid_mae
-    if is_better:
-        best_valid_mae = valid_mae
+    # Early stopping bookkeeping
+    # Update best metrics and reset patience counter on improvement
+    if args.dataset_name in ["pcqm4mv2"]:
+        if valid_mae < best_valid_mae:
+            improved = True
+        else:
+            improved = False
+    if improved:
+        epochs_since_improvement = 0
+        # Update best trackers
+        if args.dataset_name in ["pcqm4mv2"]:
+            best_valid_mae = valid_mae
+        else:
+            # update whichever metric improved
+            if micro > best_micro_f1:
+                best_micro_f1 = micro
+            if macro > best_macro_f1:
+                best_macro_f1 = macro
+        # update val loss best
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+
+        # Save best model checkpoint
         torch.save(
             {"model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
@@ -450,6 +492,15 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
             f"{args.experiment_dir}/training_checkpoints/best_model_{epoch}.pt"
         )
         print("Best model updated.")
+    else:
+        epochs_since_improvement += 1
+
+    # If both the validation score did not improve AND validation loss did not decrease
+    # for EARLY_STOP_PATIENCE_EPOCHS, and we've completed at least MIN_STEPS, stop training.
+    no_improve_loss = (val_loss >= best_val_loss)
+    if epochs_since_improvement >= EARLY_STOP_PATIENCE_EPOCHS and train_step >= MIN_STEPS and no_improve_loss:
+        print(f"Early stopping triggered. No improvement for {epochs_since_improvement} epochs and train_step={train_step} >= MIN_STEPS={MIN_STEPS}.")
+        break
     torch.save(
             {"model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
