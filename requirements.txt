@@ -38,3 +38,4 @@ transformers==4.53.0
 cython
 metis
 matplotlib
+wandb

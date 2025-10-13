@@ -218,11 +218,13 @@ class GraphLatentDiffusion(nn.Module):
                                           all_dst):
         with torch.no_grad():
             mask = torch.zeros((flat_node.shape[0], flat_node.shape[0]), dtype=torch.int8)
-            mask[all_src, all_dst] = 1
+            mask[all_src, all_dst] = 1 # ground truth
             # mask_sum = mask.sum()
             mask_shape = mask.shape[0]**2
             node_adj = torch.mm(flat_node, flat_node.T)
             denoised_adj = torch.mm(flat_denoised, flat_denoised.T)
+            # TODO: instead of mean threshold, try comparing both noisy and denoised
+            # Check any easer way, this is hard to explain
             max_node_recovery = 0
             max_denoised_recovery = 0
             for thresh in np.linspace(node_adj.mean() - node_adj.std(),
