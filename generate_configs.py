@@ -29,18 +29,28 @@
 
 
 param_tree = {
-    "learning_rate": [1e-5],
+    "learning_rate": [1e-6, 1e-5],
     "dataset_name": ["cora"],  # "cora", "citeseer", "pubmed"
     "remove_attn_bias": {
         True: {},
-        # False: {
-        #     "edge_type": ["single_hop"],
-        #     "enable_spatial_encoder": [False],
-        # },
+        False: {
+            "edge_type": ["single_hop"],
+            "enable_spatial_encoder": [False],
+        },
     },
     "enable_diffusion": {
         True: {
-            "denoiser_type": ["gat", "linear"], # "linear", "mha"],  # "linear",
+            "denoiser_type": {
+                "gat": {
+                    "num_denoiser_layers": 3
+                },
+                "linear": {
+                    "num_denoiser_layers": 4
+                },
+                # "mha": {
+                #     "num_denoiser_layers": 4
+                # }
+            },  # "linear", "mha"],  # "linear",
             "structure_scale": [0, 1],
             "reconstruction_scale": [0, 1],
             "mask_random_input_prob": [0, 0.3],
@@ -55,7 +65,7 @@ param_tree = {
                     "diffusion_type": ["x0"]
                 },
                 False: {
-                    "diffusion_type": ["x0", "noise_pred", "noise_pred_single"],  # "delta", "noise_pred_single", "x0", 
+                    "diffusion_type": ["x0", "noise_pred", "noise_pred_single"]
                     # "diffusion_steps": [5, 50],
                     # "num_denoiser_layers": [2, 3],
                     # "optimize_only_diffuser": {

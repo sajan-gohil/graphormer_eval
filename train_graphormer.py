@@ -98,7 +98,7 @@ os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
             exist_ok=True)
 
 # --- wandb init ---
-wandb_name = f"{args.dataset_name}_011eec"
+wandb_name = f"{args.dataset_name}_63934"
 if args.onscreen_logs:
     wandb_name += "_temp"
 wandb.init(
@@ -330,8 +330,8 @@ prev_loss = float('-inf')
 # Early stopping settings
 # Stop if validation micro/macro F1 does not increase AND validation loss does not decrease
 # for EARLY_STOP_PATIENCE_EPOCHS consecutive epochs, but only after MIN_STEPS epochs have passed.
-EARLY_STOP_PATIENCE_EPOCHS = 500
-MIN_STEPS = 5000
+EARLY_STOP_PATIENCE_EPOCHS = 1000
+MIN_STEPS = 8000
 epochs_since_improvement = 0
 # Track best validation metrics
 best_micro_f1 = -float("inf")

@@ -21,7 +21,7 @@ class DenoiserModel(nn.Module):
         self.num_layers = num_layers
         # Increase dim only for linear/GNN
         self.num_channels = [
-            self.in_channels * i if layer_type != "mha" else self.in_channels
+            self.in_channels * i  # if layer_type != "mha" else self.in_channels
             for i in range(1, num_layers + 2)
         ]
         self.num_channels += self.num_channels[-2::-1]
