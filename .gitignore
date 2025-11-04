@@ -174,3 +174,7 @@ cython_debug/
 .pypirc
 *.pt
 CoBFormer/
+hyperparam_analysis
+*.png
+pretrained_model
+*.zip
