@@ -444,11 +444,14 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     else:
         micro = f1_score(y_true, y_pred, average="micro")
         macro = f1_score(y_true, y_pred, average="macro")
-        valid_score = f'{micro},{macro}'
+        # classification accuracy
+        accuracy = float((y_pred == y_true).to(torch.float32).mean().item())
+        valid_score = f'{micro},{macro},{accuracy}'
         valid_mae = micro
         wandb.log({
             "val/micro_f1": micro,
             "val/macro_f1": macro,
+            "val/accuracy": accuracy,
             "step": config.current_step
         })
         # For classification, we consider improvement if either micro or macro f1 increases
@@ -548,11 +551,11 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         y_true = torch.cat(y_true, dim=0)
         micro_f1 = f1_score(y_true, y_pred, average="micro")
         macro_f1 = f1_score(y_true, y_pred, average="macro")
-        print(f"Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}")
+        test_accuracy = float((y_pred == y_true).to(torch.float32).mean().item())
+        print(f"Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}, Accuracy: {test_accuracy:.4f}")
         with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
-            # f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\n")
-            f.write(f"epoch_{epoch},{micro_f1},{macro_f1}\n")
-        wandb.log({"test/micro_f1": micro_f1, "test/macro_f1": macro_f1, "step": config.current_step})
+            f.write(f"epoch_{epoch},{micro_f1},{macro_f1},{test_accuracy}\n")
+        wandb.log({"test/micro_f1": micro_f1, "test/macro_f1": macro_f1, "test/accuracy": test_accuracy, "step": config.current_step})
 
     if train_step >= MAX_STEPS:
         print("Reached max training steps.")
@@ -592,6 +595,7 @@ if args.dataset_name not in ["pcqm4mv2"]:
     y_true = torch.cat(y_true, dim=0)
     micro_f1 = f1_score(y_true, y_pred, average="micro")
     macro_f1 = f1_score(y_true, y_pred, average="macro")
-    print(f"BEST Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}")
+    best_test_accuracy = float((y_pred == y_true).to(torch.float32).mean().item())
+    print(f"BEST Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}, Accuracy: {best_test_accuracy:.4f}")
     with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
-        f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\n")
+        f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\naccuracy,{best_test_accuracy}\n")
