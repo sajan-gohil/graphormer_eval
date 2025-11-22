@@ -98,7 +98,7 @@ os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
             exist_ok=True)
 
 # --- wandb init ---
-wandb_name = f"{args.dataset_name}_63934"
+wandb_name = f"{args.dataset_name}_060ce"
 if args.onscreen_logs:
     wandb_name += "_temp"
 wandb.init(
@@ -499,10 +499,14 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         files = os.listdir(os.path.join(args.experiment_dir, "training_checkpoints"))
         files = [i for i in files if i.startswith("best_model_")]
         # Sort by modification time, newest last
-        files_sorted = sorted(files, key=os.path.getmtime)
-        to_remove = files_sorted[:-3] if len(files_sorted) > 3 else []
-        for f in to_remove:
-            os.remove(os.path.join(args.experiment_dir, "training_checkpoints", f))
+        try:
+            files_sorted = sorted(files, key=os.path.getmtime)
+            to_remove = files_sorted[:-1] if len(files_sorted) > 1 else []
+            for f in to_remove:
+                os.remove(os.path.join(args.experiment_dir, "training_checkpoints", f))
+        except Exception as e:
+            print("ERROR:", e)
+            pass
 
     else:
         epochs_since_improvement += 1
