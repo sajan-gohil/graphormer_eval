@@ -214,6 +214,26 @@ class GraphLatentDiffusion(nn.Module):
         counts[counts == 0] = 1  # avoid division by zero
         return (per_graph_loss / counts).mean()
 
+    def attention_same_class_improvement_loss(self, node_embeddings, denoised_embeddings, labels, edge_index_list):
+        # Normalize embeddings
+        node_emb_normed = F.normalize(node_embeddings, p=2, dim=-1)
+        denoised_emb_normed = F.normalize(denoised_embeddings, p=2, dim=-1)
+        # Flatten [B, N, D] -> [sum(N), D]
+        flat_node = node_emb_normed.reshape(-1, node_emb_normed.size(-1))
+        flat_denoised = denoised_emb_normed.reshape(-1, denoised_emb_normed.size(-1))
+        flat_labels = labels.reshape(-1)
+        # Compute attention scores
+        attn_before = torch.matmul(flat_node, flat_node.T)
+        attn_after = torch.matmul(flat_denoised, flat_denoised.T)
+        # Mask for same class
+        same_class_mask = (flat_labels.unsqueeze(0) == flat_labels.unsqueeze(1))
+        # Average attention to same-class nodes
+        avg_attn_before = attn_before[same_class_mask].mean()
+        avg_attn_after = attn_after[same_class_mask].mean()
+        # Loss: encourage after > before
+        loss = F.relu(avg_attn_before - avg_attn_after)
+        return loss
+
     def calculate_structural_associations(self, flat_node, flat_denoised, all_src,
                                           all_dst):
         with torch.no_grad():
@@ -358,7 +378,8 @@ class GraphLatentDiffusion(nn.Module):
         attn_loss = 0
         if self.structure_scale > 0:
             attn_loss = self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index_list)
-
+            attn_loss += self.attention_same_class_improvement_loss(node_embeddings, denoised_embeddings,
+                                                                   self.config.node_labels, edge_index_list)
         # Auxiliary edge attention loss (if augmentation info provided)
         aux_loss = 0
         if aug_added_edges is not None and aug_removed_edges is not None and aug_original_edges is not None:
