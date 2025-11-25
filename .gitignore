@@ -178,3 +178,5 @@ hyperparam_analysis
 *.png
 pretrained_model
 *.zip
+start.sh
+.gitignore

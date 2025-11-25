@@ -32,6 +32,7 @@ except:
 from graphormer_hf.modeling_graphormer import GraphormerForGraphClassification, GraphormerForNodeClassification
 from graphormer_hf.configuration_graphormer import GraphormerConfig
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
+from graph_diffusion import optimize_attention_matrix
 import dataset_utils
 
 import os
@@ -364,6 +365,18 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         if node_mask is not None:
             node_mask = node_mask.to(device)
         outputs = model(**batch, node_mask=node_mask, log_step=config.current_step, log_group="train")
+
+        if epoch == 0:
+            try:
+                with torch.enable_grad():
+                    last_hidden_state = outputs.hidden_states[-1]
+                    optimal_attn = optimize_attention_matrix(last_hidden_state, labels)
+                    save_path = os.path.join(args.experiment_dir, f"optimal_attn_epoch_{epoch}.pt")
+                    torch.save(optimal_attn, save_path)
+                    print(f"Saved optimal attention matrix to {save_path}")
+            except Exception as e:
+                print(f"Failed to optimize attention matrix: {e}")
+
         # loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
         loss = outputs.loss
         if loss.item() < prev_loss:
@@ -407,19 +420,33 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     config.current_split = "val"
     y_pred, y_true = [], []
     with torch.no_grad():
-        for batch in valid_loader:
+        for i, batch in enumerate(valid_loader):
             for k in batch:
                 try:
                     batch[k] = batch[k].to(device)
                 except:
                     batch[k] = [i.to(device) for i in batch[k]]
+            
+            labels = batch["labels"]
             node_mask = getattr(valid_loader.dataset[0], "val_mask", None).view(-1)
             if node_mask is not None:
                 node_mask = node_mask.to(device) & ~torch.isnan(labels.view(-1))
             else:
-                node_mask = torch.ones(labels.shape, dtype=torch.int32)
-            labels = batch["labels"]
-            outputs = model(**batch, node_mask=node_mask, log_step=config.current_step, log_group="val")
+                node_mask = torch.ones(labels.shape, dtype=torch.int32, device=device)
+            
+            outputs = model(**batch, node_mask=node_mask, log_step=config.current_step, log_group="val", output_hidden_states=True)
+            
+            if i == 0:
+                try:
+                    with torch.enable_grad():
+                        last_hidden_state = outputs.hidden_states[-1]
+                        optimal_attn = optimize_attention_matrix(last_hidden_state, labels)
+                        save_path = os.path.join(args.experiment_dir, f"optimal_attn_epoch_{epoch}.pt")
+                        torch.save(optimal_attn, save_path)
+                        print(f"Saved optimal attention matrix to {save_path}")
+                except Exception as e:
+                    print(f"Failed to optimize attention matrix: {e}")
+
             # y_pred.append(outputs[1].view(-1).cpu())
             if config.num_classes > 1:
                 y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())

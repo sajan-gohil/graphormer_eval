@@ -11,6 +11,54 @@ import datetime
 from denoisers import DenoiserModel
 import wandb
 
+def optimize_attention_matrix(node_embeddings, labels, max_iters=1000, lr=0.1, tol=10e-4, verbose=False):
+    """
+    Gradient ascent to optimize attention score matrix after encoder.
+    Objective: maximize average attention between same-class nodes.
+    Stops when change in objective < tol.
+    """
+    device = node_embeddings.device
+    B, N, D = node_embeddings.shape
+    # Flatten batch for simplicity (assume single graph or process one at a time)
+    flat_node = node_embeddings.reshape(-1, D)
+    flat_labels = labels.reshape(-1)
+    
+    # Initialize attention matrix using node embeddings
+    # Normalize embeddings for cosine similarity
+    flat_node_norm = F.normalize(flat_node, p=2, dim=-1)
+    attn_init = torch.matmul(flat_node_norm, flat_node_norm.T)
+    attn_scores = attn_init.detach().clone()
+    attn_scores.requires_grad = True
+
+    optimizer = torch.optim.Adam([attn_scores], lr=lr)
+    prev_obj = None
+    for i in range(max_iters):
+        optimizer.zero_grad()
+        # Symmetrize for undirected attention
+        attn = (attn_scores + attn_scores.t()) / 2
+        # Mask for same class
+        same_class_mask = (flat_labels.unsqueeze(0) == flat_labels.unsqueeze(1))
+        # Objective: maximize average attention for same-class pairs
+        obj = attn[same_class_mask].mean()
+        # Gradient ascent: maximize obj
+        loss = -obj
+        loss.backward()
+        optimizer.step()
+        # Clamp values to [0, 1] for attention scores
+        with torch.no_grad():
+            attn_scores.clamp_(0, 1)
+        # Check for convergence
+        obj_val = obj.item()
+        if prev_obj is not None and abs(obj_val - prev_obj) < tol:
+            if verbose:
+                print(f"Converged at iter {i}, obj={obj_val:.6f}")
+            break
+        prev_obj = obj_val
+        if verbose and i % 50 == 0:
+            print(f"Iter {i}: obj={obj_val:.6f}")
+    # Return final attention matrix
+    return attn_scores.detach()
+
 
 def cosine_beta_schedule(timesteps, s=0.02):
     steps = timesteps + 1
