@@ -32,7 +32,6 @@ except:
 from graphormer_hf.modeling_graphormer import GraphormerForGraphClassification, GraphormerForNodeClassification
 from graphormer_hf.configuration_graphormer import GraphormerConfig
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
-from graph_diffusion import optimize_attention_matrix
 import dataset_utils
 
 import os
@@ -366,17 +365,6 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
             node_mask = node_mask.to(device)
         outputs = model(**batch, node_mask=node_mask, log_step=config.current_step, log_group="train")
 
-        if epoch == 0:
-            try:
-                with torch.enable_grad():
-                    last_hidden_state = outputs.hidden_states[-1]
-                    optimal_attn = optimize_attention_matrix(last_hidden_state[:, 1:, :], labels)
-                    save_path = os.path.join(args.experiment_dir, f"optimal_attn_train_epoch_{epoch}.pt")
-                    torch.save(optimal_attn, save_path)
-                    print(f"Saved optimal attention matrix to {save_path}")
-            except Exception as e:
-                print(f"Failed to optimize attention matrix: {e}")
-
         # loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
         loss = outputs.loss
         if loss.item() < prev_loss:
@@ -435,19 +423,6 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
                 node_mask = torch.ones(labels.shape, dtype=torch.int32, device=device)
             
             outputs = model(**batch, node_mask=node_mask, log_step=config.current_step, log_group="val", output_hidden_states=True)
-            
-            if i == 0:
-                try:
-                    with torch.enable_grad():
-                        last_hidden_state = outputs.hidden_states[-1]
-                        # Remove graph token (first token)
-                        node_embeddings = last_hidden_state[:, 1:, :]
-                        optimal_attn = optimize_attention_matrix(node_embeddings, labels)
-                        save_path = os.path.join(args.experiment_dir, f"optimal_attn_epoch_{epoch}.pt")
-                        torch.save(optimal_attn, save_path)
-                        print(f"Saved optimal attention matrix to {save_path}")
-                except Exception as e:
-                    print(f"Failed to optimize attention matrix: {e}")
 
             # y_pred.append(outputs[1].view(-1).cpu())
             if config.num_classes > 1:
