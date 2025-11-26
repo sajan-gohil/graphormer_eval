@@ -370,8 +370,8 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
             try:
                 with torch.enable_grad():
                     last_hidden_state = outputs.hidden_states[-1]
-                    optimal_attn = optimize_attention_matrix(last_hidden_state, labels)
-                    save_path = os.path.join(args.experiment_dir, f"optimal_attn_epoch_{epoch}.pt")
+                    optimal_attn = optimize_attention_matrix(last_hidden_state[:, 1:, :], labels)
+                    save_path = os.path.join(args.experiment_dir, f"optimal_attn_train_epoch_{epoch}.pt")
                     torch.save(optimal_attn, save_path)
                     print(f"Saved optimal attention matrix to {save_path}")
             except Exception as e:
@@ -440,7 +440,9 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
                 try:
                     with torch.enable_grad():
                         last_hidden_state = outputs.hidden_states[-1]
-                        optimal_attn = optimize_attention_matrix(last_hidden_state, labels)
+                        # Remove graph token (first token)
+                        node_embeddings = last_hidden_state[:, 1:, :]
+                        optimal_attn = optimize_attention_matrix(node_embeddings, labels)
                         save_path = os.path.join(args.experiment_dir, f"optimal_attn_epoch_{epoch}.pt")
                         torch.save(optimal_attn, save_path)
                         print(f"Saved optimal attention matrix to {save_path}")
