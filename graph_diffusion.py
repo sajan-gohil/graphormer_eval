@@ -324,7 +324,7 @@ class GraphLatentDiffusion(nn.Module):
                     timestamp + ".png"))
             plt.clf()
 
-    def forward(self, node_embeddings, edge_index_list, aug_added_edges=None, aug_removed_edges=None, aug_original_edges=None):
+    def forward(self, node_embeddings, edge_index_list, aug_added_edges=None, aug_removed_edges=None, aug_original_edges=None, labels=None):
         B = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps, (B,), device=node_embeddings.device)
         if self.config.current_split != "train":
@@ -426,8 +426,9 @@ class GraphLatentDiffusion(nn.Module):
         attn_loss = 0
         if self.structure_scale > 0:
             attn_loss = self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index_list)
-            attn_loss += self.attention_same_class_improvement_loss(node_embeddings, denoised_embeddings,
-                                                                   self.config.node_labels, edge_index_list)
+            if labels is not None:
+                attn_loss += self.attention_same_class_improvement_loss(node_embeddings, denoised_embeddings,
+                                                                       labels, edge_index_list)
         # Auxiliary edge attention loss (if augmentation info provided)
         aux_loss = 0
         if aug_added_edges is not None and aug_removed_edges is not None and aug_original_edges is not None:

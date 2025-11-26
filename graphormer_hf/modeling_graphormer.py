@@ -961,7 +961,8 @@ class GraphormerModel(GraphormerPreTrainedModel):
                 node_emb, edge_index,
                 aug_added_edges=kwargs.get("aug_added_edges", None),
                 aug_removed_edges=kwargs.get("aug_removed_edges", None),
-                aug_original_edges=kwargs.get("aug_original_edges", None)
+                aug_original_edges=kwargs.get("aug_original_edges", None),
+                labels=labels
             )
             input_nodes = torch.cat([graph_token, node_emb], dim=1)
 
