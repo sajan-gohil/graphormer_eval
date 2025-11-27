@@ -1084,7 +1084,11 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             if np.random.rand() < 0.01:
                 with open(f"{self.config.experiment_dir}/losses.csv", "a") as f:
                     print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)
-            loss = loss + attention_matching_loss
+            
+            if isinstance(loss, torch.Tensor) and isinstance(attention_matching_loss, torch.Tensor):
+                loss = (loss / (loss.detach().abs() + 1e-8)) + (attention_matching_loss / (attention_matching_loss.detach().abs() + 1e-8))
+            else:
+                loss = loss + attention_matching_loss
         if not return_dict:
             return tuple(x for x in [loss, logits, hidden_states] if x is not None)
         return SequenceClassifierOutput(loss=loss, logits=logits, hidden_states=hidden_states, attentions=None)
@@ -1175,7 +1179,11 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
             if np.random.rand() < 0.01:
                 with open(f"{self.config.experiment_dir}/losses_node.csv", "a") as f:
                     print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)
-            loss = loss + attention_matching_loss
+            
+            if isinstance(loss, torch.Tensor) and isinstance(attention_matching_loss, torch.Tensor):
+                loss = (loss / (loss.detach().abs() + 1e-8)) + (attention_matching_loss / (attention_matching_loss.detach().abs() + 1e-8))
+            else:
+                loss = loss + attention_matching_loss
         if not return_dict:
             return tuple(x for x in [loss, logits, hidden_states] if x is not None)
         return SequenceClassifierOutput(loss=loss, logits=logits, hidden_states=hidden_states, attentions=None)
