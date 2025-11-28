@@ -441,7 +441,8 @@ class GraphormerMultiheadAttention(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
         before_softmax: bool = False,
         need_head_weights: bool = False,
-        edge_index_list: list = None
+        edge_index_list: list = None,
+        attn_override: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Args:
@@ -457,6 +458,7 @@ class GraphormerMultiheadAttention(nn.Module):
             need_head_weights (bool, optional): return the attention
                 weights for each head. Implies *need_weights*. Default: return the average attention weights over all
                 heads.
+            attn_override (torch.Tensor, optional): Override attention weights with this tensor.
         """
         if need_head_weights:
             need_weights = True
@@ -525,6 +527,10 @@ class GraphormerMultiheadAttention(nn.Module):
             )
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
+        if attn_override is not None:
+            attn_weights = attn_override
+
+        self.last_attn_logits = attn_weights
 
         if before_softmax:
             return attn_weights, v
@@ -611,6 +617,7 @@ class GraphormerGraphEncoderLayer(nn.Module):
         self_attn_bias: Optional[torch.Tensor] = None,
         self_attn_mask: Optional[torch.Tensor] = None,
         self_attn_padding_mask: Optional[torch.Tensor] = None,
+        attn_override: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         nn.LayerNorm is applied either before or after the self-attention/ffn modules similar to the original
@@ -628,6 +635,7 @@ class GraphormerGraphEncoderLayer(nn.Module):
             key_padding_mask=self_attn_padding_mask,
             # need_weights=False,
             attn_mask=self_attn_mask,
+            attn_override=attn_override,
         )
         input_nodes = self.dropout_module(input_nodes)
         input_nodes = residual + input_nodes
@@ -712,6 +720,7 @@ class GraphormerGraphEncoder(nn.Module):
         token_embeddings: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
         edge_index: Optional[torch.LongTensor] = None,
+        attn_override: Optional[dict] = None,
     ) -> tuple[Union[torch.Tensor, list[torch.LongTensor]], torch.Tensor]:
         # compute padding mask. This is needed for multi-head attention
         data_x = input_nodes
@@ -751,11 +760,16 @@ class GraphormerGraphEncoder(nn.Module):
 
         for layer_idx, layer in enumerate(self.layers):
             # logging.info(f"Processing layer:, {layer}, FOR INPUT:, {tuple(input_nodes.shape)}")
+            override = None
+            if attn_override is not None and layer_idx in attn_override:
+                override = attn_override[layer_idx]
+
             input_nodes, attn = layer(
                 input_nodes,
                 self_attn_padding_mask=padding_mask,
                 self_attn_mask=attn_mask,
                 self_attn_bias=attn_bias,
+                attn_override=override,
             )
             if not last_state_only:
                 inner_states.append(input_nodes)
@@ -909,6 +923,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
         edge_index: Optional[torch.LongTensor] = None,
         log_step: Optional[int] = None,
         log_group: Optional[int] = None,
+        attn_override: Optional[dict] = None,
 #        **unused,
          **kwargs
     ) -> Union[tuple[torch.LongTensor], BaseModelOutputWithNoAttention]:
@@ -917,11 +932,11 @@ class GraphormerModel(GraphormerPreTrainedModel):
         if self.config.freeze_pretrained_encoder:
             with torch.no_grad():
                 inner_states, graph_rep, attn_weight = self.graph_encoder(
-                    input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index
+                    input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index, attn_override=attn_override
                 )
         else:
             inner_states, graph_rep, attn_weight = self.graph_encoder(
-                input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index
+                input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index, attn_override=attn_override
             )
 
         # --- AttentionSNR logging: before diffusion ---
@@ -1040,6 +1055,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         edge_index: Optional[torch.LongTensor] = None,
         log_step: Optional[int] = None,
         log_group: Optional[int] = None,
+        attn_override: Optional[dict] = None,
         **kwargs
 #       **unused,
     ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
@@ -1056,7 +1072,8 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             return_dict=True,
             edge_index=edge_index,
             log_step=log_step,
-            log_group=log_group
+            log_group=log_group,
+            attn_override=attn_override,
         )
         if self.config.enable_diffusion:
             encoder_outputs, attention_matching_loss = encoder_outputs
@@ -1129,6 +1146,7 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
         return_dict: Optional[bool] = None,
         edge_index: Optional[torch.LongTensor] = None,
         node_mask: Optional[torch.BoolTensor] = None,
+        attn_override: Optional[dict] = None,
         **kwargs
     ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
@@ -1146,6 +1164,7 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
             edge_index=edge_index,
             labels=labels,
             node_mask=node_mask,
+            attn_override=attn_override,
             **kwargs
         )
         if self.config.enable_diffusion:
@@ -1181,7 +1200,7 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
                     print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)
             
             if isinstance(loss, torch.Tensor) and isinstance(attention_matching_loss, torch.Tensor):
-                loss = (loss / (loss.detach().abs() + 1e-8)) + (attention_matching_loss / (attention_matching_loss.detach().abs() + 1e-8))
+                loss = loss + (attention_matching_loss * self.config.structure_scale)
             else:
                 loss = loss + attention_matching_loss
         if not return_dict:

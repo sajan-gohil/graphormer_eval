@@ -500,16 +500,14 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         )
         print("Best model updated.")
         # Prune older best checkpoints, keep only the last 1
-        try:
-            files = os.listdir(os.path.join(args.experiment_dir, "training_checkpoints"))
-            files = [i for i in files if i.startswith("best_model_")]
-            # Sort by modification time, newest last
-            files_sorted = sorted(files, key=os.path.getmtime)
-            to_remove = files_sorted[:-1] if len(files_sorted) > 1 else []
-            for f in to_remove:
-                os.remove(os.path.join(args.experiment_dir, "training_checkpoints", f))
-        except:
-            pass
+        files = os.listdir(os.path.join(args.experiment_dir, "training_checkpoints"))
+        files = [os.path.join(args.experiment_dir, "training_checkpoints", i) for i in files if i.startswith("best_model_")]
+        # Sort by modification time, newest last
+        files_sorted = sorted(files, key=os.path.getmtime)
+        to_remove = files_sorted[:-1] if len(files_sorted) > 1 else []
+        for f in to_remove:
+            os.remove(f)
+
 
     else:
         epochs_since_improvement += 1

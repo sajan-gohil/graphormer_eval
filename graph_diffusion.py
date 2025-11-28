@@ -387,13 +387,13 @@ class GraphLatentDiffusion(nn.Module):
             aux_loss = self.aux_edge_attention_loss(denoised_embeddings, aug_added_edges, aug_removed_edges, aug_original_edges)
         total_loss = 0
         if isinstance(attn_loss, torch.Tensor) and self.structure_scale > 0:
-            total_loss = total_loss + (attn_loss / (attn_loss.detach().abs() + 1e-8)) * self.structure_scale
+            total_loss = total_loss + (attn_loss * self.structure_scale)
         
         if isinstance(reconstruction_loss, torch.Tensor) and self.reconstruction_scale > 0:
-            total_loss = total_loss + (reconstruction_loss / (reconstruction_loss.detach().abs() + 1e-8)) * self.reconstruction_scale
+            total_loss = total_loss + (reconstruction_loss * self.reconstruction_scale)
 
         if isinstance(aux_loss, torch.Tensor) and aux_loss != 0:
-            total_loss = total_loss + (aux_loss / (aux_loss.detach().abs() + 1e-8)) * self.config.aug_loss_scale
+            total_loss = total_loss + (aux_loss * self.config.aug_loss_scale)
             
         if isinstance(total_loss, int) and total_loss == 0:
              total_loss = torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
