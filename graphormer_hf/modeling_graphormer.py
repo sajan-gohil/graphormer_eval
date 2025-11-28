@@ -907,7 +907,42 @@ class GraphormerModel(GraphormerPreTrainedModel):
 
     def reset_output_layer_parameters(self):
         self.lm_output_learned_bias = nn.Parameter(torch.zeros(1))
+    
+    def add_dummy_nodes(self, input_nodes, pad_size=100):
+        # input_nodes: [batch, num_nodes, feature_dim]
+        # input_edges: [batch, num_nodes, num_nodes, edge_feature_dim]
+        batch_size, num_nodes, feature_dim = input_nodes.size()
+        # add nodes as mean of randomly selected existing nodes
+        node_indices = torch.randint(1, num_nodes, (pad_size,), device=input_nodes.device)
+        node_padding = input_nodes[:, node_indices, :].mean(dim=1, keepdim=True).repeat(1, pad_size, 1)
+        input_nodes = torch.cat([input_nodes, node_padding], dim=1)
 
+        return input_nodes
+
+    def calc_dummy_node_loss(self, input_nodes, attn_weight, num_original_nodes):
+        batch_size, num_nodes, feature_dim = input_nodes.size()
+        start_idx = num_original_nodes + 1
+        if start_idx >= num_nodes:
+            return 0.0
+            
+        # attn_weight: [batch, num_heads, num_nodes, num_nodes]
+        # Rows corresponding to dummy nodes
+        dummy_rows = attn_weight[:, :, start_idx:, :]
+        # Cols corresponding to dummy nodes
+        dummy_cols = attn_weight[:, :, :, start_idx:]
+        dummy_overlap = attn_weight[:, :, start_idx:, start_idx:]
+        
+        # Sum of absolute values
+        loss = dummy_rows.abs().sum() + dummy_cols.abs().sum() - 2*dummy_overlap.abs().sum()
+        
+        # Normalize
+        num_dummy = num_nodes - start_idx
+        loss = loss / (batch_size * attn_weight.size(1))
+        loss = loss / (num_dummy * 2)
+        loss = loss / num_nodes
+        
+        return loss 
+        
     def forward(
         self,
         input_nodes: torch.LongTensor,
@@ -935,9 +970,20 @@ class GraphormerModel(GraphormerPreTrainedModel):
                     input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index, attn_override=attn_override
                 )
         else:
+            # add dummy nodes here
+            if self.config.node_augmentation and self.training:
+                input_nodes = self.add_dummy_nodes(input_nodes, pad_size=self.config.aug_num_dummy_nodes)
+                num_original_nodes = input_nodes.size(1)
             inner_states, graph_rep, attn_weight = self.graph_encoder(
                 input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index, attn_override=attn_override
             )
+            # Calculate loss based on attention weights for dummy nodes
+            dummy_node_loss = torch.tensor(0.0, device=input_nodes.device)
+            if self.config.node_augmentation and self.training:
+                dummy_node_loss = self.calc_dummy_node_loss(
+                    input_nodes, attn_weight, num_original_nodes=num_original_nodes
+                )
+                
 
         # --- AttentionSNR logging: before diffusion ---
         # Use last attn_weight (after softmax), and input_nodes before diffusion
@@ -1009,106 +1055,13 @@ class GraphormerModel(GraphormerPreTrainedModel):
         if self.config.enable_diffusion:
             return BaseModelOutputWithNoAttention(
                 last_hidden_state=input_nodes,
-                hidden_states=inner_states), attention_matching_loss
-        return BaseModelOutputWithNoAttention(last_hidden_state=input_nodes, hidden_states=inner_states)
+                hidden_states=inner_states), attention_matching_loss, dummy_node_loss
+        return BaseModelOutputWithNoAttention(last_hidden_state=input_nodes, hidden_states=inner_states), dummy_node_loss
 
     def max_nodes(self):
         """Maximum output length supported by the encoder."""
         return self.max_nodes
 
-
-class GraphormerForGraphClassification(GraphormerPreTrainedModel):
-    """
-    This model can be used for graph-level classification or regression tasks.
-
-    It can be trained on
-    - regression (by setting config.num_classes to 1); there should be one float-type label per graph
-    - one task classification (by setting config.num_classes to the number of classes); there should be one integer
-      label per graph
-    - binary multi-task classification (by setting config.num_classes to the number of labels); there should be a list
-      of integer labels for each graph.
-    """
-
-    def __init__(self, config: GraphormerConfig):
-        super().__init__(config)
-        self.config = config
-        self.encoder = GraphormerModel(config)
-        self.embedding_dim = config.embedding_dim
-        self.num_classes = config.num_classes
-        self.classifier = GraphormerDecoderHead(self.embedding_dim, self.num_classes)
-        self.is_encoder_decoder = True
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def forward(
-        self,
-        input_nodes: torch.LongTensor,
-        input_edges: torch.LongTensor,
-        attn_bias: torch.Tensor,  # Zeros by default
-        in_degree: torch.LongTensor,
-        out_degree: torch.LongTensor,
-        spatial_pos: torch.LongTensor,
-        attn_edge_type: torch.LongTensor,
-        labels: Optional[torch.LongTensor] = None,
-        return_dict: Optional[bool] = None,
-        edge_index: Optional[torch.LongTensor] = None,
-        log_step: Optional[int] = None,
-        log_group: Optional[int] = None,
-        attn_override: Optional[dict] = None,
-        **kwargs
-#       **unused,
-    ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        encoder_outputs = self.encoder(
-            input_nodes,
-            input_edges,
-            attn_bias,
-            in_degree,
-            out_degree,
-            spatial_pos,
-            attn_edge_type,
-            return_dict=True,
-            edge_index=edge_index,
-            log_step=log_step,
-            log_group=log_group,
-            attn_override=attn_override,
-        )
-        if self.config.enable_diffusion:
-            encoder_outputs, attention_matching_loss = encoder_outputs
-        outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
-
-        head_outputs = self.classifier(outputs)
-        logits = head_outputs[:, 0, :].contiguous()  # Graph/CLS token
-
-        loss = None
-        if labels is not None:
-            mask = ~torch.isnan(labels)
-
-            if self.num_classes == 1:  # regression
-                # loss_fct = MSELoss()
-                loss_fct = L1Loss()
-                loss = loss_fct(logits[mask].squeeze(), labels[mask].squeeze().float())
-            elif self.num_classes > 1 and len(labels.shape) == 1:  # One task classification
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits[mask].view(-1, self.num_classes), labels[mask].view(-1))
-            else:  # Binary multi-task classification
-                loss_fct = BCEWithLogitsLoss(reduction="sum")
-                loss = loss_fct(logits[mask], labels[mask])
-
-        if self.config.enable_diffusion:
-            if np.random.rand() < 0.01:
-                with open(f"{self.config.experiment_dir}/losses.csv", "a") as f:
-                    print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)
-            
-            if isinstance(loss, torch.Tensor) and isinstance(attention_matching_loss, torch.Tensor):
-                loss = (loss / (loss.detach().abs() + 1e-8)) + (attention_matching_loss / (attention_matching_loss.detach().abs() + 1e-8))
-            else:
-                loss = loss + attention_matching_loss
-        if not return_dict:
-            return tuple(x for x in [loss, logits, hidden_states] if x is not None)
-        return SequenceClassifierOutput(loss=loss, logits=logits, hidden_states=hidden_states, attentions=None)
 
 
 class GraphormerForNodeClassification(GraphormerPreTrainedModel):
@@ -1129,7 +1082,9 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
         self.num_classes = config.num_classes
         self.classifier = GraphormerDecoderHead(self.embedding_dim, self.num_classes)
         self.is_encoder_decoder = True
-
+        self.learnt_loss_scale = torch.nn.Parameter(torch.tensor(1.0), requires_grad=True)
+        self.learnt_attention_matching_scale = torch.nn.Parameter(torch.tensor(1.0), requires_grad=True)
+        self.learnt_dummy_node_scale = torch.nn.Parameter(torch.tensor(1.0), requires_grad=True)
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1168,7 +1123,9 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
             **kwargs
         )
         if self.config.enable_diffusion:
-            encoder_outputs, attention_matching_loss = encoder_outputs
+            encoder_outputs, attention_matching_loss, dummy_node_loss = encoder_outputs
+        else:
+            encoder_outputs, dummy_node_loss = encoder_outputs
         outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
 
         # outputs: [batch, num_nodes+1, hidden_dim] (first token is graph token)
@@ -1193,6 +1150,9 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
             else:  # binary multi-task classification
                 loss_fct = BCEWithLogitsLoss(reduction="sum")
                 loss = loss_fct(logits[mask], labels[mask])
+            loss = loss * self.learnt_loss_scale
+        
+        loss += dummy_node_loss * self.learnt_dummy_node_scale
 
         if self.config.enable_diffusion:
             if np.random.rand() < 0.01:
@@ -1200,7 +1160,7 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
                     print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)
             
             if isinstance(loss, torch.Tensor) and isinstance(attention_matching_loss, torch.Tensor):
-                loss = loss + (attention_matching_loss * self.config.structure_scale)
+                loss = loss + (attention_matching_loss * self.config.structure_scale * self.learnt_attention_matching_scale)
             else:
                 loss = loss + attention_matching_loss
         if not return_dict:
