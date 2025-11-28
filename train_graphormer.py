@@ -195,7 +195,8 @@ BETA1, BETA2 = 0.9, 0.999
 GRAD_CLIP_NORM = 5.0
 
 param_list = [{"params": [i for n,i in model.named_parameters() if "diffusion_model" not in n], "lr":LEARNING_RATE}]
-if args.enable_diffusion:param_list += [{"params": model.encoder.diffusion_model.parameters(), "lr": 1e-5}]
+if args.enable_diffusion and not args.freeze_pretrained_diffusion:
+    param_list += [{"params": model.encoder.diffusion_model.parameters(), "lr": 1e-5}]
 optimizer = Adam(param_list, betas=(BETA1, BETA2), eps=ADAM_EPS, weight_decay=WEIGHT_DECAY)
 
 
@@ -281,12 +282,12 @@ if args.freeze_pretrained_encoder:
             print(f"Froze parameter: {name}")
 
 if args.freeze_pretrained_diffusion:
-    print(f"Freezing pretrained encoder and diffusion weights from {args.freeze_pretrained_encoder}")
-    state_dicts = torch.load(args.freeze_pretrained_encoder, weights_only=False)
+    print(f"Freezing pretrained diffusion weights from {args.freeze_pretrained_diffusion}")
+    state_dicts = torch.load(args.freeze_pretrained_diffusion, weights_only=False)
     model.load_state_dict(state_dicts["model"], strict=False)
     for name, param in model.named_parameters():
-        if "graph_encoder" in name or "GraphEncoder" in name or "diffusion" in name.lower() or "denoiser" in name.lower():
-            param.requires_grad = False
+        if "diffusion" in name.lower() or "denoiser" in name.lower():
+            param.requires_grad = True  # Allows gradient but does not update weights
             print(f"Froze parameter: {name}")   
 
 # Only move to device if not tensor parallel (dispatch_model handles device placement)
