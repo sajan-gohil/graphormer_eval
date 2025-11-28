@@ -6,6 +6,8 @@ import json
 import argparse
 import datetime
 import numpy as np
+import wandb
+from sklearn.metrics import f1_score
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from graphormer_hf.modeling_graphormer import GraphormerForGraphClassification, GraphormerForNodeClassification
@@ -48,6 +50,13 @@ def main():
     args = parser.parse_args()
     
     os.makedirs(args.experiment_dir, exist_ok=True)
+
+    wandb.init(
+        project=f"attention_refinement_{args.dataset_name}",
+        name=f"layer_{args.layer_index}_lr_{args.learning_rate}",
+        config=vars(args),
+        dir=args.experiment_dir,
+    )
 
     dataset_classes = {
         "cora": 7,
@@ -98,61 +107,164 @@ def main():
     
     print(f"Refining attention for layer {layer_idx}")
 
-    # Process one batch
-    for batch in train_loader:
-        # Move batch to device
-        for k, v in batch.items():
-            if isinstance(v, torch.Tensor):
-                batch[k] = v.to(device)
-        
-        print(f"\n--- Starting Refinement (Max Steps: {args.steps}, Tolerance: {args.tolerance}) ---")
-        
-        # Get initial logits
-        with torch.no_grad():
-            _ = model(**batch)
-            target_layer = model.encoder.graph_encoder.layers[layer_idx]
-            current_attn_logits = target_layer.self_attn.last_attn_logits.detach().clone()
-            current_attn_logits.requires_grad = True
+    print(f"Refining attention for layer {layer_idx}")
 
-        prev_loss = float('inf')
-        initial_loss_val = None
+    def get_node_mask(loader, split_name, device, labels):
+        if split_name == "train":
+            node_mask = getattr(loader.dataset[0], "train_mask", None)
+        elif split_name == "val":
+            node_mask = getattr(loader.dataset[0], "val_mask", None)
+        elif split_name == "test":
+            node_mask = getattr(loader.dataset[0], "test_mask", None)
+        else:
+            node_mask = None
+            
+        if node_mask is not None:
+            if len(node_mask.shape) == 1:
+                 node_mask = node_mask.view(-1)
+            node_mask = node_mask.to(device)
+            # Ensure mask matches labels shape if needed, or handle NaNs
+            if labels is not None:
+                 # Flatten labels to match mask if mask is flat
+                 flat_labels = labels.view(-1)
+                 if node_mask.shape[0] == flat_labels.shape[0]:
+                     node_mask = node_mask & ~torch.isnan(flat_labels)
+        return node_mask
+
+    def compute_metrics(logits, labels, mask, num_classes):
+        if logits is None or labels is None:
+            return {}
         
-        for step in range(args.steps):
-            # Forward pass with override
-            attn_override = {layer_idx: current_attn_logits}
+        # Apply mask
+        if mask is not None:
+            # Ensure mask is boolean
+            mask = mask.bool()
+            # Flatten logits and labels if they are batched but mask is global or if we just want to treat all nodes same
+            # Logits: [B, N, C] -> [B*N, C]
+            # Labels: [B, N] -> [B*N]
+            # Mask: [N] or [B, N] -> [B*N]
             
-            outputs = model(**batch, attn_override=attn_override)
-            loss = outputs.loss
-            current_loss = loss.item()
-            
-            if initial_loss_val is None:
-                initial_loss_val = current_loss
-            
-            diff = abs(current_loss - prev_loss)
-            print(f"Step {step}: Loss = {current_loss:.6f}, Diff = {diff:.6f}")
-            
-            if diff < args.tolerance:
-                print(f"Converged at step {step}.")
-                break
-            
-            prev_loss = current_loss
-            
-            # Backward
-            model.zero_grad()
-            if current_attn_logits.grad is not None:
-                current_attn_logits.grad.zero_()
-            
-            loss.backward()
-            
-            # Update attention scores
-            with torch.no_grad():
-                current_attn_logits -= args.learning_rate * current_attn_logits.grad
+            if len(logits.shape) == 3:
+                B, N, C = logits.shape
+                flat_logits = logits.view(-1, C)
+                flat_labels = labels.view(-1)
+                if len(mask.shape) == 1 and mask.shape[0] == N:
+                     # Broadcast mask? Or assume B=1?
+                     # If B=1, mask [N] is fine.
+                     if B == 1:
+                         flat_mask = mask
+                     else:
+                         flat_mask = mask.repeat(B)
+                else:
+                     flat_mask = mask.view(-1)
+            else:
+                flat_logits = logits
+                flat_labels = labels
+                flat_mask = mask.view(-1)
                 
-        print(f"Final Loss: {prev_loss}")
-        if initial_loss_val is not None:
-            print(f"Total Loss Improvement: {initial_loss_val - prev_loss}")
+            valid_logits = flat_logits[flat_mask]
+            valid_labels = flat_labels[flat_mask]
+        else:
+            valid_logits = logits
+            valid_labels = labels
+
+        if valid_labels.numel() == 0:
+            return {"acc": 0.0, "micro_f1": 0.0, "macro_f1": 0.0}
+
+        if num_classes > 1:
+            preds = torch.argmax(valid_logits, dim=-1)
+        else:
+            preds = valid_logits
             
-        break # Only process one batch for demonstration
+        preds = preds.cpu().numpy()
+        targets = valid_labels.cpu().numpy()
+        
+        acc = (preds == targets).mean()
+        micro = f1_score(targets, preds, average="micro")
+        macro = f1_score(targets, preds, average="macro")
+        
+        return {"acc": acc, "micro_f1": micro, "macro_f1": macro}
+
+    # Process one batch from each split
+    for split_name, loader in [("train", train_loader), ("val", valid_loader), ("test", test_loader)]:
+        print(f"\n=== Processing {split_name} set ===")
+        for batch in loader:
+            # Move batch to device
+            for k, v in batch.items():
+                if isinstance(v, torch.Tensor):
+                    batch[k] = v.to(device)
+            
+            labels = batch.get("labels", None)
+            node_mask = get_node_mask(loader, split_name, device, labels)
+            
+            print(f"\n--- Starting Refinement for {split_name} (Max Steps: {args.steps}, Tolerance: {args.tolerance}) ---")
+            
+            # Get initial logits
+            with torch.no_grad():
+                _ = model(**batch, node_mask=node_mask)
+                target_layer = model.encoder.graph_encoder.layers[layer_idx]
+                current_attn_logits = target_layer.self_attn.last_attn_logits.detach().clone()
+                current_attn_logits.requires_grad = True
+
+            prev_loss = float('inf')
+            initial_loss_val = None
+            initial_metrics = None
+            
+            for step in range(args.steps):
+                # Forward pass with override
+                attn_override = {layer_idx: current_attn_logits}
+                
+                outputs = model(**batch, node_mask=node_mask, attn_override=attn_override)
+                loss = outputs.loss
+                current_loss = loss.item()
+                
+                # Compute metrics
+                metrics = compute_metrics(outputs.logits, labels, node_mask, config.num_classes)
+                
+                if initial_loss_val is None:
+                    initial_loss_val = current_loss
+                    initial_metrics = metrics
+                
+                diff = abs(current_loss - prev_loss)
+                print(f"Step {step}: Loss = {current_loss:.6f}, Diff = {diff:.6f}, Acc = {metrics['acc']:.4f}, MicroF1 = {metrics['micro_f1']:.4f}")
+                
+                wandb.log({
+                    f"{split_name}/step": step,
+                    f"{split_name}/loss": current_loss,
+                    f"{split_name}/loss_diff": diff,
+                    f"{split_name}/improvement": initial_loss_val - current_loss,
+                    f"{split_name}/acc": metrics['acc'],
+                    f"{split_name}/micro_f1": metrics['micro_f1'],
+                    f"{split_name}/macro_f1": metrics['macro_f1']
+                })
+
+                if diff < args.tolerance:
+                    print(f"Converged at step {step}.")
+                    break
+                
+                prev_loss = current_loss
+                
+                # Backward
+                model.zero_grad()
+                if current_attn_logits.grad is not None:
+                    current_attn_logits.grad.zero_()
+                
+                loss.backward()
+                
+                # Update attention scores
+                with torch.no_grad():
+                    current_attn_logits -= args.learning_rate * current_attn_logits.grad
+                    
+            print(f"Final Loss ({split_name}): {prev_loss}")
+            if initial_loss_val is not None:
+                improvement = initial_loss_val - prev_loss
+                print(f"Total Loss Improvement ({split_name}): {improvement}")
+                wandb.summary[f"{split_name}_final_loss"] = prev_loss
+                wandb.summary[f"{split_name}_total_improvement"] = improvement
+                wandb.summary[f"{split_name}_final_acc"] = metrics['acc']
+                wandb.summary[f"{split_name}_final_micro_f1"] = metrics['micro_f1']
+                
+            break # Only process one batch per split
 
 if __name__ == "__main__":
     main()
