@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """PyTorch Graphormer model."""
-
+import logging
+logging.basicConfig(level=logging.INFO)
 import math
+import wandb
+
 from collections.abc import Iterable, Iterator
 from typing import Optional, Union
 import datetime
@@ -134,6 +137,42 @@ def quant_noise(module: nn.Module, p: float, block_size: int):
     return module
 
 
+def compute_attention_snr(attn_weights, labels, node_mask):
+    """
+    Compute AttentionSNR: 10*log10(sum(attn_score_same_class)/sum(attn_score_diff_class))
+    attn_weights: [batch, num_nodes, num_nodes] or [num_nodes, num_nodes]
+    labels: [batch, num_nodes] or [num_nodes]
+    node_mask: optional mask for valid nodes
+    """
+    # if attn_weights is None or labels is None:
+    #    return float('nan')
+    if attn_weights.dim() == 4:
+        # [num_heads, batch, num_nodes, num_nodes] -> mean over heads
+        attn_weights = attn_weights.mean(dim=0)
+    if attn_weights.dim() == 3:
+        # [batch, num_nodes, num_nodes]
+        batch_size = attn_weights.shape[0]
+        snrs = []
+        for i in range(batch_size):
+            snrs.append(compute_attention_snr(attn_weights[i], labels[i], node_mask[i] if node_mask is not None else None))
+        return float(torch.tensor(snrs).mean().item())
+    # [num_nodes, num_nodes]
+    num_nodes = attn_weights.shape[0]
+    if node_mask is not None:
+        valid = node_mask.bool()
+        attn_weights = attn_weights[valid][:, valid]
+        labels = labels[valid]
+    same = (labels.unsqueeze(0) == labels.unsqueeze(1))
+    diff = ~same
+    attn_same = attn_weights[same].sum().item()
+    attn_diff = attn_weights[diff].sum().item() + 1e-8
+    if attn_same == 0 and attn_diff == 0:
+        return float('nan')
+    # print("SNR VALS = ", (attn_same/attn_diff), attn_same, attn_diff)
+    snr = 10 * math.log10(attn_same / attn_diff) if attn_diff > 0 else float('inf')
+    return snr
+
+
 class LayerDropModuleList(nn.ModuleList):
     """
     From:
@@ -179,10 +218,12 @@ class GraphormerGraphNodeFeature(nn.Module):
 
     def __init__(self, config: GraphormerConfig):
         super().__init__()
+        self.config = config
         self.num_heads = config.num_attention_heads
         self.num_atoms = config.num_atoms
 
         self.atom_encoder = nn.Embedding(config.num_atoms + 1, config.hidden_size, padding_idx=config.pad_token_id)
+        self.feature_encoder = nn.Linear(1433, config.hidden_size)
         self.in_degree_encoder = nn.Embedding(
             config.num_in_degree, config.hidden_size, padding_idx=config.pad_token_id
         )
@@ -199,12 +240,20 @@ class GraphormerGraphNodeFeature(nn.Module):
         out_degree: torch.LongTensor,
     ) -> torch.Tensor:
         n_graph, n_node = input_nodes.size()[:2]
-
-        node_feature = (  # node feature + graph token
-            self.atom_encoder(input_nodes).sum(dim=-2)  # [n_graph, n_node, n_hidden]
-            + self.in_degree_encoder(in_degree)
-            + self.out_degree_encoder(out_degree)
-        )
+        # print("Input nodes:", input_nodes.shape)
+        if self.config.dataset_name not in ["pcqm4mv2"]:
+            node_feature = (
+               self.feature_encoder(input_nodes.to(dtype=torch.float32))  # nn.functional.relu(self.feature_encoder(input_nodes.to(dtype=torch.float32))))
+               + self.in_degree_encoder(in_degree)
+               + self.out_degree_encoder(out_degree)
+            )
+            # print("Processed")
+        else:
+            node_feature = (  # node feature + graph token
+                self.atom_encoder(input_nodes).sum(dim=-2)  # [n_graph, n_node, n_hidden]
+                + self.in_degree_encoder(in_degree)
+                + self.out_degree_encoder(out_degree)
+            )
 
         graph_token_feature = self.graph_token.weight.unsqueeze(0).repeat(n_graph, 1, 1)
 
@@ -312,6 +361,7 @@ class GraphormerMultiheadAttention(nn.Module):
 
     def __init__(self, config: GraphormerConfig):
         super().__init__()
+        self.config = config
         self.embedding_dim = config.embedding_dim
         self.kdim = config.kdim if config.kdim is not None else config.embedding_dim
         self.vdim = config.vdim if config.vdim is not None else config.embedding_dim
@@ -354,6 +404,8 @@ class GraphormerMultiheadAttention(nn.Module):
         )
 
         self.onnx_trace = False
+        if self.config.enable_layerwise_diffusion:
+            self.diffusion_model = GraphLatentDiffusion(self.kdim, config.embedding_dim, config.diffusion_steps, config=self.config)
 
     def reset_parameters(self):
         if self.qkv_same_dim:
@@ -371,6 +423,13 @@ class GraphormerMultiheadAttention(nn.Module):
         if self.out_proj.bias is not None:
             nn.init.constant_(self.out_proj.bias, 0.0)
 
+    def remove_attention_noise(self, attn_weights, q, k, v, batch_size, target_len, source_len, edge_index_list):
+        # attn_weights = [bsz * self.num_heads, tgt_len, src_len]
+        attn_weights_float = torch.nn.functional.softmax(attn_weights, dim=-1)
+        attn_weights = attn_weights_float.type_as(attn_weights)
+        
+
+
     def forward(
         self,
         query: torch.LongTensor,
@@ -382,6 +441,7 @@ class GraphormerMultiheadAttention(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
         before_softmax: bool = False,
         need_head_weights: bool = False,
+        edge_index_list: list = None
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Args:
@@ -445,12 +505,12 @@ class GraphormerMultiheadAttention(nn.Module):
                     "The shape of the generated padding mask for the key does not match expected dimensions."
                 )
         attn_weights = torch.bmm(q, k.transpose(1, 2))
-        attn_weights = self.apply_sparse_mask(attn_weights, tgt_len, src_len, bsz)
+        # attn_weights = self.apply_sparse_mask(attn_weights, tgt_len, src_len, bsz)  # Returns same thing
 
         if list(attn_weights.size()) != [bsz * self.num_heads, tgt_len, src_len]:
             raise AssertionError("The attention weights generated do not match the expected dimensions.")
 
-        if attn_bias is not None:
+        if attn_bias is not None:  # centrality, edge, etc embeddings
             attn_weights += attn_bias.view(bsz * self.num_heads, tgt_len, src_len)
 
         if attn_mask is not None:
@@ -465,12 +525,21 @@ class GraphormerMultiheadAttention(nn.Module):
             )
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
+
         if before_softmax:
             return attn_weights, v
+
+        # --- Diffusion part ----
+        if self.config.enable_layerwise_diffusion:
+            attn_weights = self.remove_attention_noise(
+                attn_weights, q, k, v, batch_size=bsz,
+                target_len=tgt_len, source_len=src_len, edge_index_list=edge_index_list)
+        # --- Diffusion part ----
 
         attn_weights_float = torch.nn.functional.softmax(attn_weights, dim=-1)
         attn_weights = attn_weights_float.type_as(attn_weights)
         attn_probs = self.attention_dropout_module(attn_weights)
+
 
         if v is None:
             raise AssertionError("No value generated")
@@ -487,7 +556,6 @@ class GraphormerMultiheadAttention(nn.Module):
             if not need_head_weights:
                 # average attention weights over heads
                 attn_weights = attn_weights.mean(dim=0)
-
         return attn, attn_weights
 
     def apply_sparse_mask(self, attn_weights: torch.Tensor, tgt_len: int, src_len: int, bsz: int) -> torch.Tensor:
@@ -558,7 +626,7 @@ class GraphormerGraphEncoderLayer(nn.Module):
             value=input_nodes,
             attn_bias=self_attn_bias,
             key_padding_mask=self_attn_padding_mask,
-            need_weights=False,
+            # need_weights=False,
             attn_mask=self_attn_mask,
         )
         input_nodes = self.dropout_module(input_nodes)
@@ -584,6 +652,7 @@ class GraphormerGraphEncoder(nn.Module):
     def __init__(self, config: GraphormerConfig):
         super().__init__()
 
+        self.config = config
         self.dropout_module = torch.nn.Dropout(p=config.dropout, inplace=False)
         self.layerdrop = config.layerdrop
         self.embedding_dim = config.embedding_dim
@@ -591,7 +660,8 @@ class GraphormerGraphEncoder(nn.Module):
         self.traceable = config.traceable
 
         self.graph_node_feature = GraphormerGraphNodeFeature(config)
-        self.graph_attn_bias = GraphormerGraphAttnBias(config)
+        if not self.config.remove_attn_bias:
+            self.graph_attn_bias = GraphormerGraphAttnBias(config)
 
         self.embed_scale = config.embed_scale
 
@@ -645,12 +715,14 @@ class GraphormerGraphEncoder(nn.Module):
     ) -> tuple[Union[torch.Tensor, list[torch.LongTensor]], torch.Tensor]:
         # compute padding mask. This is needed for multi-head attention
         data_x = input_nodes
+        # logging.info(f"DATA X SHAPE = , {tuple(data_x.shape)}")
         n_graph, n_node = data_x.size()[:2]
         padding_mask = (data_x[:, :, 0]).eq(0)
         padding_mask_cls = torch.zeros(n_graph, 1, device=padding_mask.device, dtype=padding_mask.dtype)
         padding_mask = torch.cat((padding_mask_cls, padding_mask), dim=1)
 
-        attn_bias = self.graph_attn_bias(input_nodes, attn_bias, spatial_pos, input_edges, attn_edge_type)
+        if not self.config.remove_attn_bias:
+            attn_bias = self.graph_attn_bias(input_nodes, attn_bias, spatial_pos, input_edges, attn_edge_type)
 
         if token_embeddings is not None:
             input_nodes = token_embeddings
@@ -677,8 +749,9 @@ class GraphormerGraphEncoder(nn.Module):
         if not last_state_only:
             inner_states.append(input_nodes)
 
-        for layer in self.layers:
-            input_nodes, _ = layer(
+        for layer_idx, layer in enumerate(self.layers):
+            # logging.info(f"Processing layer:, {layer}, FOR INPUT:, {tuple(input_nodes.shape)}")
+            input_nodes, attn = layer(
                 input_nodes,
                 self_attn_padding_mask=padding_mask,
                 self_attn_mask=attn_mask,
@@ -693,9 +766,9 @@ class GraphormerGraphEncoder(nn.Module):
             inner_states = [input_nodes]
 
         if self.traceable:
-            return torch.stack(inner_states), graph_rep
+            return torch.stack(inner_states), graph_rep, attn  # last attn weight
         else:
-            return inner_states, graph_rep
+            return inner_states, graph_rep, attn  # last attn weight
 
 
 class GraphormerDecoderHead(nn.Module):
@@ -834,14 +907,46 @@ class GraphormerModel(GraphormerPreTrainedModel):
         masked_tokens: None = None,
         return_dict: Optional[bool] = None,
         edge_index: Optional[torch.LongTensor] = None,
+        log_step: Optional[int] = None,
+        log_group: Optional[int] = None,
 #        **unused,
          **kwargs
     ) -> Union[tuple[torch.LongTensor], BaseModelOutputWithNoAttention]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        inner_states, graph_rep = self.graph_encoder(
-            input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index
-        )
+        if self.config.freeze_pretrained_encoder:
+            with torch.no_grad():
+                inner_states, graph_rep, attn_weight = self.graph_encoder(
+                    input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index
+                )
+        else:
+            inner_states, graph_rep, attn_weight = self.graph_encoder(
+                input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index
+            )
+
+        # --- AttentionSNR logging: before diffusion ---
+        # Use last attn_weight (after softmax), and input_nodes before diffusion
+        labels = kwargs.get('labels', None)
+        node_mask = kwargs.get('node_mask', None)
+        if attn_weight is not None and labels is not None:
+            snr_attn = compute_attention_snr(attn_weight[:, 1:, 1:], labels, node_mask)
+            if log_group and log_step:
+                wandb.log({f"ASNR_{log_group}/attn_weight_before_diffusion": snr_attn,
+                           "step": self.config.current_step})
+        # Compute SNR from normalized dot product + softmax of input_nodes (before diffusion)
+        # input_nodes: [batch, num_nodes+1, hidden_dim], remove graph token
+        input_nodes_ = inner_states[-1].transpose(0, 1)[:, 1:, :]
+        if labels is not None:
+            # Compute dot product attention
+            normed = input_nodes_ / (input_nodes_.norm(dim=-1, keepdim=True) + 1e-8)
+            attn_sim = torch.matmul(normed, normed.transpose(1, 2))
+            attn_sim = torch.softmax(attn_sim, dim=-1)
+            snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
+            if log_group and log_step:
+            #    print(f"Logging ASNR_{log_group}/dotprod_softmax_before_diffusion: {snr_sim}, current_step={self.config.current_step}")
+                wandb.log({f"ASNR_{log_group}/dotprod_softmax_before_diffusion": snr_sim,
+                           "step": self.config.current_step})
+
         # last inner state, then revert Batch and Graph len
         input_nodes = inner_states[-1].transpose(0, 1)
 
@@ -852,14 +957,25 @@ class GraphormerModel(GraphormerPreTrainedModel):
             graph_token = input_nodes[:, :1, :]
             node_emb = input_nodes[:, 1:, :]
             # edge_index should be a list of edge_index tensors for each graph in batch
-            node_emb, attention_matching_loss = self.diffusion_model(node_emb, edge_index)
-            # print("ATM LOSS = ", attention_matching_loss)
-            # if self.config.optimize_diffuser:
-            #     self.diffusion_optimizer.zero_grad()
-            #     attention_matching_loss.backward(retain_graph=True)
-            #     self.diffusion_optimizer.step()
-
+            node_emb, attention_matching_loss = self.diffusion_model(
+                node_emb, edge_index,
+                aug_added_edges=kwargs.get("aug_added_edges", None),
+                aug_removed_edges=kwargs.get("aug_removed_edges", None),
+                aug_original_edges=kwargs.get("aug_original_edges", None)
+            )
             input_nodes = torch.cat([graph_token, node_emb], dim=1)
+
+            # --- AttentionSNR logging: after diffusion ---
+            labels = kwargs.get('labels', None)
+            node_mask = kwargs.get('node_mask', None)
+            if labels is not None:
+                normed = node_emb / (torch.sqrt(torch.tensor(node_emb.shape[-1])) + 1e-8)
+                attn_sim = torch.matmul(normed, normed.transpose(1, 2))
+                attn_sim = torch.softmax(attn_sim, dim=-1)
+                snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
+                if log_group and log_step:
+                    wandb.log({f"ASNR_{log_group}/dotprod_softmax_after_diffusion": snr_sim,
+                               "step": self.config.current_step})
         # --- End diffusion integration ---
 
         # project masked tokens only
@@ -874,7 +990,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
 
         if not return_dict:
             return tuple(x for x in [input_nodes, inner_states] if x is not None)
-        if self.config.optimize_diffuser:
+        if self.config.enable_diffusion:
             return BaseModelOutputWithNoAttention(
                 last_hidden_state=input_nodes,
                 hidden_states=inner_states), attention_matching_loss
@@ -913,7 +1029,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         self,
         input_nodes: torch.LongTensor,
         input_edges: torch.LongTensor,
-        attn_bias: torch.Tensor,
+        attn_bias: torch.Tensor,  # Zeros by default
         in_degree: torch.LongTensor,
         out_degree: torch.LongTensor,
         spatial_pos: torch.LongTensor,
@@ -921,8 +1037,10 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         labels: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
         edge_index: Optional[torch.LongTensor] = None,
-         **kwargs
-#        **unused,
+        log_step: Optional[int] = None,
+        log_group: Optional[int] = None,
+        **kwargs
+#       **unused,
     ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -935,14 +1053,16 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
             spatial_pos,
             attn_edge_type,
             return_dict=True,
-            edge_index=edge_index
+            edge_index=edge_index,
+            log_step=log_step,
+            log_group=log_group
         )
-        if self.config.optimize_diffuser:
+        if self.config.enable_diffusion:
             encoder_outputs, attention_matching_loss = encoder_outputs
         outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
 
         head_outputs = self.classifier(outputs)
-        logits = head_outputs[:, 0, :].contiguous()
+        logits = head_outputs[:, 0, :].contiguous()  # Graph/CLS token
 
         loss = None
         if labels is not None:
@@ -959,7 +1079,7 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
                 loss_fct = BCEWithLogitsLoss(reduction="sum")
                 loss = loss_fct(logits[mask], labels[mask])
 
-        if self.config.optimize_diffuser:
+        if self.config.enable_diffusion:
             if np.random.rand() < 0.01:
                 with open(f"{self.config.experiment_dir}/losses.csv", "a") as f:
                     print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)
@@ -969,4 +1089,99 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         return SequenceClassifierOutput(loss=loss, logits=logits, hidden_states=hidden_states, attentions=None)
 
 
-__all__ = ["GraphormerForGraphClassification", "GraphormerModel", "GraphormerPreTrainedModel"]
+class GraphormerForNodeClassification(GraphormerPreTrainedModel):
+    """
+    This model can be used for node-level classification or regression tasks.
+
+    It can be trained on
+    - regression (by setting config.num_classes to 1); there should be one float-type label per node
+    - single-task classification (by setting config.num_classes to the number of classes); there should be one integer label per node
+    - binary multi-task classification (by setting config.num_classes to the number of labels); there should be a list of integer labels for each node.
+    """
+
+    def __init__(self, config: GraphormerConfig):
+        super().__init__(config)
+        self.config = config
+        self.encoder = GraphormerModel(config)
+        self.embedding_dim = config.embedding_dim
+        self.num_classes = config.num_classes
+        self.classifier = GraphormerDecoderHead(self.embedding_dim, self.num_classes)
+        self.is_encoder_decoder = True
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def forward(
+        self,
+        input_nodes: torch.LongTensor,
+        input_edges: torch.LongTensor,
+        in_degree: torch.LongTensor,
+        out_degree: torch.LongTensor,
+        spatial_pos: torch.LongTensor,
+        attn_edge_type: torch.LongTensor,
+        attn_bias: Optional[torch.Tensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        return_dict: Optional[bool] = None,
+        edge_index: Optional[torch.LongTensor] = None,
+        node_mask: Optional[torch.BoolTensor] = None,
+        **kwargs
+    ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        if len(node_mask.shape) == 1:
+            node_mask = node_mask.unsqueeze(0)#.repeat(input_nodes.shape[0])  # add batch dimension
+        encoder_outputs = self.encoder(
+            input_nodes,
+            input_edges,
+            attn_bias,
+            in_degree,
+            out_degree,
+            spatial_pos,
+            attn_edge_type,
+            return_dict=True,
+            edge_index=edge_index,
+            labels=labels,
+            node_mask=node_mask,
+            **kwargs
+        )
+        if self.config.enable_diffusion:
+            encoder_outputs, attention_matching_loss = encoder_outputs
+        outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
+
+        # outputs: [batch, num_nodes+1, hidden_dim] (first token is graph token)
+        node_outputs = outputs[:, 1:, :]  # remove graph token
+        logits = self.classifier(node_outputs)  # [batch, num_nodes, num_classes]
+        
+        loss = None
+        if labels is not None:
+            # labels: [batch, num_nodes] or [batch, num_nodes, num_classes]
+            if node_mask is not None:  # node mask required for train/val/test masks. graph has all
+                # print("MASK:", node_mask.device, "LABELS:", torch.isnan(labels).device)
+                mask = node_mask & ~torch.isnan(labels)
+            else:
+                mask = ~torch.isnan(labels)
+
+            if self.num_classes == 1:  # regression
+                loss_fct = L1Loss()
+                loss = loss_fct(logits[mask].squeeze(), labels[mask].squeeze().float())
+            elif self.num_classes > 1 and len(labels.shape) == 2:  # single-task classification
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits[mask].view(-1, self.num_classes), labels[mask].view(-1))
+            else:  # binary multi-task classification
+                loss_fct = BCEWithLogitsLoss(reduction="sum")
+                loss = loss_fct(logits[mask], labels[mask])
+
+        if self.config.enable_diffusion:
+            if np.random.rand() < 0.01:
+                with open(f"{self.config.experiment_dir}/losses_node.csv", "a") as f:
+                    print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)
+            loss = loss + attention_matching_loss
+        if not return_dict:
+            return tuple(x for x in [loss, logits, hidden_states] if x is not None)
+        return SequenceClassifierOutput(loss=loss, logits=logits, hidden_states=hidden_states, attentions=None)
+
+__all__ = [
+    "GraphormerForGraphClassification",
+    "GraphormerForNodeClassification",
+    "GraphormerModel",
+    "GraphormerPreTrainedModel"
+]

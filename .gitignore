@@ -173,4 +173,8 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 *.pt
-CoBFormer
+CoBFormer/
+hyperparam_analysis
+*.png
+pretrained_model
+*.zip
