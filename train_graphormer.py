@@ -87,7 +87,7 @@ parser.add_argument("--enable_layerwise_diffusion", action="store_true", help="P
 parser.add_argument("--freeze_pretrained_encoder", type=str, default=None, help="Freeze the pretrained encoder and set weights from given path")
 parser.add_argument("--freeze_pretrained_diffusion", type=str, default=None, help="Freeze everything till diffusion model and set weights from given path")
 parser.add_argument("--mask_random_input_prob", type=float, default=0.0, help="Randomly mask this fraction of input node features during diffusion training")
-
+parser.add_argument("--node_augmentation", action="store_true", help="Perform dummy node addition")
 parser.add_argument("--learning_rate", type=float, default=2e-5, help="global learning_rate")
 
 
