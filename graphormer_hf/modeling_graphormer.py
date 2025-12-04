@@ -500,7 +500,6 @@ class GraphormerMultiheadAttention(nn.Module):
         # not supporting Optional types.
         if key_padding_mask is not None and key_padding_mask.dim() == 0:
             key_padding_mask = None
-
         if key_padding_mask is not None:
             if key_padding_mask.size(0) != bsz or key_padding_mask.size(1) != src_len:
                 raise AssertionError(
@@ -706,6 +705,20 @@ class GraphormerGraphEncoder(nn.Module):
                 for p in m.parameters():
                     p.requires_grad = False
 
+    def add_dummy_nodes(self, input_nodes, pad_size=100):
+        # input_nodes: [batch, num_nodes, feature_dim]
+        # input_edges: [batch, num_nodes, num_nodes, edge_feature_dim]
+        batch_size, num_nodes, feature_dim = input_nodes.size()
+        # add nodes as mean of randomly selected existing nodes
+        node_indices = torch.randint(0, num_nodes, (batch_size, pad_size, 5), device=input_nodes.device)#.unsqueeze(0).expand(input_nodes.shape[0], -1, -1)
+        batch_idx = torch.arange(batch_size, device=input_nodes.device).view(-1, 1, 1)
+        batch_idx = batch_idx.expand_as(node_indices)
+        node_padding = input_nodes[batch_idx, node_indices, :]
+        #node_padding = input_nodes.gather(dim=1, index=node_indices.unsqueeze(-1).expand(-1, -1, -1, input_nodes.shape[-1]))
+        node_padding = node_padding.mean(dim=2)
+        input_nodes = torch.cat([input_nodes, node_padding], dim=1)
+        return input_nodes
+
     def forward(
         self,
         input_nodes: torch.LongTensor,
@@ -723,12 +736,6 @@ class GraphormerGraphEncoder(nn.Module):
         attn_override: Optional[dict] = None,
     ) -> tuple[Union[torch.Tensor, list[torch.LongTensor]], torch.Tensor]:
         # compute padding mask. This is needed for multi-head attention
-        data_x = input_nodes
-        # logging.info(f"DATA X SHAPE = , {tuple(data_x.shape)}")
-        n_graph, n_node = data_x.size()[:2]
-        padding_mask = (data_x[:, :, 0]).eq(0)
-        padding_mask_cls = torch.zeros(n_graph, 1, device=padding_mask.device, dtype=padding_mask.dtype)
-        padding_mask = torch.cat((padding_mask_cls, padding_mask), dim=1)
 
         if not self.config.remove_attn_bias:
             attn_bias = self.graph_attn_bias(input_nodes, attn_bias, spatial_pos, input_edges, attn_edge_type)
@@ -737,6 +744,19 @@ class GraphormerGraphEncoder(nn.Module):
             input_nodes = token_embeddings
         else:
             input_nodes = self.graph_node_feature(input_nodes, in_degree, out_degree)
+
+        # Add dummy nodes
+        if self.config.node_augmentation and self.training:
+            input_nodes = self.add_dummy_nodes(input_nodes, pad_size=200)
+            num_original_nodes = input_nodes.size(1)
+        
+        # compute padding mask. This is needed for multi-head attention
+        data_x = input_nodes
+        # logging.info(f"DATA X SHAPE = , {tuple(data_x.shape)}")
+        n_graph, n_node = data_x.size()[:2]
+        padding_mask = (data_x[:, 1:, 0]).eq(0)
+        padding_mask_cls = torch.zeros(n_graph, 1, device=padding_mask.device, dtype=padding_mask.dtype)
+        padding_mask = torch.cat((padding_mask_cls, padding_mask), dim=1)
 
         if perturb is not None:
             input_nodes[:, 1:, :] += perturb
@@ -908,17 +928,6 @@ class GraphormerModel(GraphormerPreTrainedModel):
     def reset_output_layer_parameters(self):
         self.lm_output_learned_bias = nn.Parameter(torch.zeros(1))
     
-    def add_dummy_nodes(self, input_nodes, pad_size=100):
-        # input_nodes: [batch, num_nodes, feature_dim]
-        # input_edges: [batch, num_nodes, num_nodes, edge_feature_dim]
-        batch_size, num_nodes, feature_dim = input_nodes.size()
-        # add nodes as mean of randomly selected existing nodes
-        node_indices = torch.randint(1, num_nodes, (pad_size,), device=input_nodes.device)
-        node_padding = input_nodes[:, node_indices, :].mean(dim=1, keepdim=True).repeat(1, pad_size, 1)
-        input_nodes = torch.cat([input_nodes, node_padding], dim=1)
-
-        return input_nodes
-
     def calc_dummy_node_loss(self, input_nodes, attn_weight, num_original_nodes):
         batch_size, num_nodes, feature_dim = input_nodes.size()
         start_idx = num_original_nodes + 1
@@ -972,7 +981,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
         else:
             # add dummy nodes here
             if self.config.node_augmentation and self.training:
-                input_nodes = self.add_dummy_nodes(input_nodes, pad_size=self.config.aug_num_dummy_nodes)
+            #    input_nodes = self.add_dummy_nodes(input_nodes, pad_size=200)
                 num_original_nodes = input_nodes.size(1)
             inner_states, graph_rep, attn_weight = self.graph_encoder(
                 input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index, attn_override=attn_override
@@ -983,7 +992,9 @@ class GraphormerModel(GraphormerPreTrainedModel):
                 dummy_node_loss = self.calc_dummy_node_loss(
                     input_nodes, attn_weight, num_original_nodes=num_original_nodes
                 )
-                
+                input_nodes = input_nodes[:, :num_original_nodes+1, :]
+                attn_weight = attn_weight[:, :num_original_nodes+1, :num_original_nodes+1]
+                inner_states[-1] = inner_states[-1][:num_original_nodes+1, :, :]
 
         # --- AttentionSNR logging: before diffusion ---
         # Use last attn_weight (after softmax), and input_nodes before diffusion

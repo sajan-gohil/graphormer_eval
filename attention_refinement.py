@@ -1,4 +1,4 @@
-
+import shutil
 import torch
 import os
 import sys
@@ -8,7 +8,7 @@ import datetime
 import numpy as np
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
-from graphormer_hf.modeling_graphormer import GraphormerForGraphClassification, GraphormerForNodeClassification
+from graphormer_hf.modeling_graphormer import GraphormerForNodeClassification
 from graphormer_hf.configuration_graphormer import GraphormerConfig
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
 import dataset_utils
@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--steps", type=int, default=100, help="Number of refinement steps")
     parser.add_argument("--tolerance", type=float, default=1e-4, help="Tolerance for convergence")
     parser.add_argument("--layer_index", type=int, default=-1, help="Index of the layer to refine (default: last layer)")
-    
+    parser.add_argument("--name", type=str, default="attention_refinement")
     # Add other args needed for config
     parser.add_argument("--edge_type", type=str, default="multi_hop")
     parser.add_argument("--enable_spatial_encoder", action="store_true")
@@ -43,11 +43,26 @@ def main():
     parser.add_argument("--freeze_pretrained_encoder", type=str, default=None)
     parser.add_argument("--freeze_pretrained_diffusion", type=str, default=None)
     parser.add_argument("--mask_random_input_prob", type=float, default=0.0)
-    parser.add_argument("--experiment_dir", type=str, default="./experiments/attention_refinement")
+    parser.add_argument("--experiment_dir", type=str, default="./experiments/")
+    parser.add_argument("--create_subgraph", action="store_true", help="Create subgraphs from given large graph")
+    parser.add_argument("--onscreen_logs", action="store_true", help="print logs on screen instead of log files in experiment dir")
 
     args = parser.parse_args()
-    
-    os.makedirs(args.experiment_dir, exist_ok=True)
+    args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
+            exist_ok=True)
+
+    if not args.onscreen_logs:
+        sys.stdout = open(os.path.join(args.experiment_dir, "training_log.txt"), "w")
+        sys.stderr = open(os.path.join(args.experiment_dir, "training_error_log.txt"),"w")
+
+    print(f"Experiment directory: {args.experiment_dir}")
+    print(f"Parameters: {json.dumps(vars(args), indent=4)}")
+
+    shutil.copy("graph_diffusion.py", args.experiment_dir)
+    shutil.copytree("graphormer_hf/", os.path.join(args.experiment_dir, "graphormer_hf"))
+    shutil.copy("train_graphormer.py", args.experiment_dir)
+    shutil.copy("dataset_utils.py", args.experiment_dir)
 
     dataset_classes = {
         "cora": 7,

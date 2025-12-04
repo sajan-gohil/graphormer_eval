@@ -29,7 +29,7 @@ try:
 except:
     temp = lambda *args: 1
     PCQM4MEvaluator = temp 
-from graphormer_hf.modeling_graphormer import GraphormerForGraphClassification, GraphormerForNodeClassification
+from graphormer_hf.modeling_graphormer import GraphormerForNodeClassification
 from graphormer_hf.configuration_graphormer import GraphormerConfig
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
 import dataset_utils
@@ -331,7 +331,7 @@ prev_loss = float('-inf')
 # Early stopping settings
 # Stop if validation micro/macro F1 does not increase AND validation loss does not decrease
 # for EARLY_STOP_PATIENCE_EPOCHS consecutive epochs, but only after MIN_STEPS epochs have passed.
-EARLY_STOP_PATIENCE_EPOCHS = 1000
+EARLY_STOP_PATIENCE_EPOCHS = 2000
 MIN_STEPS = 8000
 epochs_since_improvement = 0
 # Track best validation metrics
