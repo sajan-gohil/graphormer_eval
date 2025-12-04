@@ -14,6 +14,9 @@ from graphormer_hf.modeling_graphormer import GraphormerForNodeClassification
 from graphormer_hf.configuration_graphormer import GraphormerConfig
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
 import dataset_utils
+import wandb
+import dotenv
+dotenv.load_dotenv()
 
 def main():
     parser = argparse.ArgumentParser(description="Attention Refinement Workflow")
@@ -48,6 +51,7 @@ def main():
     parser.add_argument("--experiment_dir", type=str, default="./experiments/")
     parser.add_argument("--create_subgraph", action="store_true", help="Create subgraphs from given large graph")
     parser.add_argument("--onscreen_logs", action="store_true", help="print logs on screen instead of log files in experiment dir")
+    parser.add_argument("--node_augmentation", action="store_true", help="Perform dummy node addition")
 
     args = parser.parse_args()
     args.experiment_dir = os.path.join(args.experiment_dir, args.name + "_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
@@ -199,9 +203,10 @@ def main():
         macro = f1_score(targets, preds, average="macro")
         
         return {"acc": acc, "micro_f1": micro, "macro_f1": macro}
-
+    model.to("cuda")
     # Process one batch from each split
     for split_name, loader in [("train", train_loader), ("val", valid_loader), ("test", test_loader)]:
+        config.current_split = split_name
         print(f"\n=== Processing {split_name} set ===")
         for batch in loader:
             # Move batch to device
@@ -210,7 +215,9 @@ def main():
                     batch[k] = v.to(device)
             
             labels = batch.get("labels", None)
+            labels = labels.to("cuda")
             node_mask = get_node_mask(loader, split_name, device, labels)
+            node_mask = node_mask.to(torch.device("cuda"))
             
             print(f"\n--- Starting Refinement for {split_name} (Max Steps: {args.steps}, Tolerance: {args.tolerance}) ---")
             
@@ -258,15 +265,15 @@ def main():
                     break
                 
                 prev_loss = current_loss
+                if split_name == "train":
+                    # Backward
+                    model.zero_grad()
+                    if current_attn_logits.grad is not None:
+                        current_attn_logits.grad.zero_()
                 
-                # Backward
-                model.zero_grad()
-                if current_attn_logits.grad is not None:
-                    current_attn_logits.grad.zero_()
+                    loss.backward()
                 
-                loss.backward()
-                
-                # Update attention scores
+                    # Update attention scores
                 with torch.no_grad():
                     current_attn_logits -= args.learning_rate * current_attn_logits.grad
                     
