@@ -100,7 +100,7 @@ os.makedirs(os.path.join(args.experiment_dir, "training_checkpoints"),
             exist_ok=True)
 
 # --- wandb init ---
-wandb_name = f"{args.dataset_name}_63934"
+wandb_name = f"{args.dataset_name}_5391ef"
 if args.onscreen_logs:
     wandb_name += "_temp"
 wandb.init(
