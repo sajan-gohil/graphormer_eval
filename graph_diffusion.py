@@ -398,6 +398,22 @@ class GraphLatentDiffusion(nn.Module):
         if isinstance(total_loss, int) and total_loss == 0:
              total_loss = torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
 
+        # Log individual diffusion losses
+        log_payload = {}
+        if isinstance(attn_loss, torch.Tensor):
+            log_payload["loss/diffusion_attention"] = attn_loss.detach()
+        if isinstance(reconstruction_loss, torch.Tensor):
+            log_payload["loss/diffusion_reconstruction"] = reconstruction_loss.detach()
+        if isinstance(aux_loss, torch.Tensor) and not isinstance(aux_loss, int):
+            log_payload["loss/diffusion_aux"] = aux_loss.detach()
+        if isinstance(total_loss, torch.Tensor):
+            log_payload["loss/diffusion_total"] = total_loss.detach()
+        step_value = getattr(self.config, "current_step", None)
+        if step_value is not None:
+            log_payload["step"] = step_value
+        if log_payload:
+            wandb.log(log_payload)
+
         return denoised_embeddings, total_loss
         # return denoised_embeddings, (attn_loss*self.structure_scale) + (reconstruction_loss*self.reconstruction_scale)
 

@@ -104,10 +104,10 @@ def main():
     train_loader, valid_loader, test_loader = dataset_utils.load_data(args.dataset_name, num_workers=args.num_workers, config=config)
     
     print("Creating model...")
-    if args.dataset_name == "pcqm4mv2":
-        model = GraphormerForGraphClassification(config)
-    else:
-        model = GraphormerForNodeClassification(config)
+    # if args.dataset_name == "pcqm4mv2":
+    #     model = GraphormerForGraphClassification(config)
+    # else:
+    model = GraphormerForNodeClassification(config)
 
     if args.pretrained_weights:
         print(f"Loading weights from {args.pretrained_weights}")

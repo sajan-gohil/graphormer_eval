@@ -140,8 +140,8 @@ config = GraphormerConfig(
     ffn_embedding_dim=768//4,
     num_attention_heads=8,
     dropout=0.0,
-    attention_dropout=0.5,
-    activation_dropout=0.5,
+    attention_dropout=0.0,
+    activation_dropout=0.0,
     num_classes=dataset_classes[args.dataset_name],  # Default to 1 for regression tasks
     **vars(args)
 )
