@@ -33,6 +33,7 @@ import numpy as np
 import datetime
 import argparse
 from model_utils import load_model, load_optimizer, load_scheduler, save_checkpoint
+from forward_pass import forward_pass
 
 import wandb
 import dotenv
@@ -207,59 +208,40 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     config.current_split = "train"
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{MAX_EPOCHS}")
     for batch in pbar:
-        for k in batch:
-            try:
-                batch[k] = batch[k].to(device)
-            except:
-                batch[k] = [i.to(device) for i in batch[k]]
-        labels = batch["labels"]
-
-        # outputs = model(**batch)
-        # Pass edge_index to model if present
         assert "edge_index" in batch.keys()
-        # print("batch index len = ", len(batch["edge_index"]))
-        # print(type(train_loader.dataset), dir(train_loader.dataset))
-        node_mask = getattr(train_loader.dataset[0], "train_mask", None)
-        if args.dataset_name not in ["pcqm4mv2"]:
-            assert node_mask is not None
-        if node_mask is not None:
-            node_mask = node_mask.to(device)
-        outputs = model(**batch, node_mask=node_mask, log_step=config.current_step, log_group="train")
+        outputs, labels, node_mask = forward_pass(
+            model, batch, device, config, train_loader, "train")
 
-        # loss = F.l1_loss(outputs[1].view(-1), labels.view(-1), reduction="mean")
         loss = outputs.loss
         if loss.item() < prev_loss:
             temp_grad_clip = GRAD_CLIP_NORM
             prev_loss = loss.item()
 
             # Log GPU memory and tensor sizes after forward pass
-            if torch.cuda.is_available():
+            if args.log_memory and torch.cuda.is_available():
                 wandb.log({"gpu/forward_memory_MB": torch.cuda.memory_allocated() / 1024**2,
                            "step": config.current_step})
 
         else:
             temp_grad_clip = GRAD_CLIP_NORM  # //2
+
         optimizer.zero_grad()
-        # diffusion_optimizer.zero_grad()
         loss.backward()
 
-        # --- wandb log gradients ---
+        # wandb log gradient norms
         for name, param in model.named_parameters():
             if param.grad is not None:
-                wandb.log({f"gradients/{name}": wandb.Histogram(param.grad.detach().cpu().numpy()),
+                wandb.log({f"grad_norms/{name}": param.grad.detach().data.norm(2).item(),
                            "step": config.current_step})
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), temp_grad_clip)
         optimizer.step()
-        # diffusion_optimizer.step()
         scheduler.step()
         reduce_lr_scheduler.step(loss.item())
-
-        # --- wandb log training loss ---
+        # wandb log training loss
         wandb.log({"train/loss": loss.item(), "step": config.current_step})
 
         pbar.set_postfix({"loss": loss.item(), "lr": scheduler.get_last_lr()[0]})
-
         train_step += 1
         if train_step >= MAX_STEPS:
             break
@@ -270,21 +252,8 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     y_pred, y_true = [], []
     with torch.no_grad():
         for i, batch in enumerate(valid_loader):
-            for k in batch:
-                try:
-                    batch[k] = batch[k].to(device)
-                except:
-                    batch[k] = [i.to(device) for i in batch[k]]
-            
-            labels = batch["labels"]
-            node_mask = getattr(valid_loader.dataset[0], "val_mask", None).view(-1)
-            if node_mask is not None:
-                node_mask = node_mask.to(device) & ~torch.isnan(labels.view(-1))
-            else:
-                node_mask = torch.ones(labels.shape, dtype=torch.int32, device=device)
-            
-            outputs = model(**batch, node_mask=node_mask, log_step=config.current_step, log_group="val", output_hidden_states=True)
-
+            outputs, labels, node_mask = forward_pass(
+                model, batch, device, config, valid_loader, "val")
             # y_pred.append(outputs[1].view(-1).cpu())
             if config.num_classes > 1:
                 y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
@@ -295,11 +264,10 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
 
     y_pred = torch.cat(y_pred, dim=0)
     y_true = torch.cat(y_true, dim=0)
-    
 
-    input_dict = {"y_true": y_true.numpy(), "y_pred": y_pred.numpy()}
     # Compute validation metrics
     if args.dataset_name in ["pcqm4mv2"]:
+        input_dict = {"y_true": y_true.numpy(), "y_pred": y_pred.numpy()}
         valid_mae = evaluator.eval(input_dict)["mae"]
         valid_score = str(valid_mae)
         wandb.log({"val/mae": valid_mae, "step": config.current_step})
@@ -320,21 +288,20 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
             "step": config.current_step
         })
         # For classification, we consider improvement if either micro or macro f1 increases
-        improved = (micro > best_micro_f1) or (macro > best_macro_f1)
+        improved = (micro > best_micro_f1) or (macro > best_macro_f1) or (
+            accuracy > best_f1) or (val_loss < best_val_loss)
         val_loss = float(outputs.loss.detach().cpu().item())
     
     with open(f"{args.experiment_dir}/val_metric.csv", "a") as f:
         f.write(f"epoch_{epoch},{valid_score}\n")
 
     print(f"Validation MAE: {valid_score}")
+
     # Early stopping bookkeeping
     # Update best metrics and reset patience counter on improvement
-    if args.dataset_name in ["pcqm4mv2"]:
-        if valid_mae < best_valid_mae:
-            improved = True
-        else:
-            improved = False
-    if improved:
+    if not improved:
+        epochs_since_improvement += 1
+    else:
         epochs_since_improvement = 0
         # Update best trackers
         if args.dataset_name in ["pcqm4mv2"]:
@@ -362,9 +329,6 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         for f in to_remove:
             os.remove(f)
 
-    else:
-        epochs_since_improvement += 1
-
     # If both the validation score did not improve AND validation loss did not decrease
     # for EARLY_STOP_PATIENCE_EPOCHS, and we've completed at least MIN_STEPS, stop training.
     no_improve_loss = (val_loss >= best_val_loss)
@@ -382,16 +346,9 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         y_pred, y_true = [], []
         with torch.no_grad():
             for batch in test_loader:
-                for k in batch:
-                    try:
-                        batch[k] = batch[k].to(device)
-                    except:
-                        batch[k] = [i.to(device) for i in batch[k]]
-                node_mask = getattr(test_loader.dataset[0], "test_mask", None)
-                if node_mask is not None:
-                    node_mask = node_mask.to(device)
-                labels = batch["labels"]
-                outputs = model(**batch, node_mask=node_mask, log_step=test_step, log_group="test")
+                outputs, labels, node_mask = forward_pass(
+                    model, batch, device, config, test_loader, "test", log_step=test_step)
+                
                 if config.num_classes > 1:
                     y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
                 else:
@@ -428,16 +385,9 @@ if args.dataset_name not in ["pcqm4mv2"]:
     y_pred, y_true = [], []
     with torch.no_grad():
         for batch in test_loader:
-            for k in batch:
-                try:
-                    batch[k] = batch[k].to(device)
-                except:
-                    batch[k] = [i.to(device) for i in batch[k]]
-            node_mask = getattr(test_loader.dataset[0], "test_mask", None)
-            if node_mask is not None:
-                node_mask = node_mask.to(device)
-            labels = batch["labels"]
-            outputs = model(**batch, node_mask=node_mask)
+            outputs, labels, node_mask = forward_pass(
+                model, batch, device, config, test_loader, "test")
+            
             if config.num_classes > 1:
                 y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
             else:
