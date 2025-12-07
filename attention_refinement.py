@@ -126,6 +126,18 @@ def main():
     
     print(f"Refining attention for layer {layer_idx}")
 
+    def move_to_device(obj, device):
+        """Recursively move tensors/lists/tuples/dicts to device."""
+        if torch.is_tensor(obj):
+            return obj.to(device)
+        if isinstance(obj, list):
+            return [move_to_device(o, device) for o in obj]
+        if isinstance(obj, tuple):
+            return tuple(move_to_device(list(obj), device))
+        if isinstance(obj, dict):
+            return {k: move_to_device(v, device) for k, v in obj.items()}
+        return obj
+
     print(f"Refining attention for layer {layer_idx}")
 
     def get_node_mask(loader, split_name, device, labels):
@@ -203,36 +215,39 @@ def main():
         macro = f1_score(targets, preds, average="macro")
         
         return {"acc": acc, "micro_f1": micro, "macro_f1": macro}
-    model.to("cuda")
     # Process one batch from each split
+    config.current_step = 0
     for split_name, loader in [("train", train_loader), ("val", valid_loader), ("test", test_loader)]:
+        config.current_step += 1
         config.current_split = split_name
         print(f"\n=== Processing {split_name} set ===")
         for batch in loader:
-            # Move batch to device
-            for k, v in batch.items():
-                if isinstance(v, torch.Tensor):
-                    batch[k] = v.to(device)
-            
+            config.current_step += 1
+            # Move batch to device (handles lists/dicts of tensors)
+            batch = move_to_device(batch, device)
+
             labels = batch.get("labels", None)
-            labels = labels.to("cuda")
+            if labels is not None:
+                labels = labels.to(device)
+
             node_mask = get_node_mask(loader, split_name, device, labels)
-            node_mask = node_mask.to(torch.device("cuda"))
-            
+
             print(f"\n--- Starting Refinement for {split_name} (Max Steps: {args.steps}, Tolerance: {args.tolerance}) ---")
-            
+
             # Get initial logits
             with torch.no_grad():
                 _ = model(**batch, node_mask=node_mask)
                 target_layer = model.encoder.graph_encoder.layers[layer_idx]
-                current_attn_logits = target_layer.self_attn.last_attn_logits.detach().clone()
-                current_attn_logits.requires_grad = True
+                # ensure logits are on the correct device and can receive grads
+                current_attn_logits = target_layer.self_attn.last_attn_logits.detach().clone().to(device)
+                current_attn_logits.requires_grad_(True)
 
             prev_loss = float('inf')
             initial_loss_val = None
             initial_metrics = None
             
             for step in range(args.steps):
+                config.current_step += 1
                 # Forward pass with override
                 attn_override = {layer_idx: current_attn_logits}
                 
@@ -266,16 +281,17 @@ def main():
                 
                 prev_loss = current_loss
                 if split_name == "train":
-                    # Backward
+                    # Backward and update only on train split
                     model.zero_grad()
                     if current_attn_logits.grad is not None:
                         current_attn_logits.grad.zero_()
-                
+
                     loss.backward()
-                
+
                     # Update attention scores
-                with torch.no_grad():
-                    current_attn_logits -= args.learning_rate * current_attn_logits.grad
+                    with torch.no_grad():
+                        if current_attn_logits.grad is not None:
+                            current_attn_logits -= args.learning_rate * current_attn_logits.grad
                     
             print(f"Final Loss ({split_name}): {prev_loss}")
             if initial_loss_val is not None:
@@ -290,3 +306,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
