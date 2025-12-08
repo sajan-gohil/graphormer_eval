@@ -347,7 +347,7 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         with torch.no_grad():
             for batch in test_loader:
                 outputs, labels, node_mask = forward_pass(
-                    model, batch, device, config, test_loader, "test", log_step=test_step)
+                    model, batch, device, config, test_loader, "test")
                 
                 if config.num_classes > 1:
                     y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())

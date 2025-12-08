@@ -36,8 +36,7 @@ def forward_pass(model, batch, device, config, loader, split):
         assert node_mask is not None
 
     if node_mask is not None:
-        node_mask = node_mask.view(-1) & ~torch.isnan(labels.view(-1))
-        node_mask = node_mask.to(device)
+        node_mask = node_mask.view(-1).to(device) & ~torch.isnan(labels.view(-1)).to(device)
     else:
         node_mask = torch.ones(labels.shape, dtype=torch.int32, device=device)        
 
