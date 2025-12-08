@@ -416,8 +416,8 @@ class GraphormerMultiheadAttention(nn.Module):
         # --- Diffusion part ----
 
         attn_weights_float = torch.nn.functional.softmax(attn_weights, dim=-1)
-        attn_weights = attn_weights_float.type_as(attn_weights)
-        attn_probs = self.attention_dropout_module(attn_weights)
+        # attn_weights = attn_weights_float.type_as(attn_weights)
+        attn_probs = self.attention_dropout_module(attn_weights_float)
 
         if v is None:
             raise AssertionError("No value generated")
@@ -428,9 +428,9 @@ class GraphormerMultiheadAttention(nn.Module):
         attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, embedding_dim)
         attn: torch.Tensor = self.out_proj(attn)
 
-        attn_weights = None
+        # attn_weights = None
         if need_weights:
-            attn_weights = attn_weights_float.contiguous().view(bsz, self.num_heads, tgt_len, src_len).transpose(1, 0)
+            attn_weights = attn_weights.contiguous().view(bsz, self.num_heads, tgt_len, src_len).transpose(1, 0)
             if not need_head_weights:
                 # average attention weights over heads
                 attn_weights = attn_weights.mean(dim=0)
