@@ -747,19 +747,23 @@ class GraphormerModel(PreTrainedModel):
         batch_size, num_nodes, feature_dim = input_nodes.size()
         start_idx = num_original_nodes + 1
         if start_idx >= num_nodes:
-            return 0.0
+            return torch.tensor(0.0, device=input_nodes.device, dtype=input_nodes.dtype)
             
         # attn_weight: [batch, num_heads, num_nodes, num_nodes]
         # Rows corresponding to dummy nodes
-        dummy_rows = attn_weight[:, :, start_idx:, :]
+        dummy_rows = attn_weight[:, :, start_idx:, :start_idx]
         # Cols corresponding to dummy nodes
-        dummy_cols = attn_weight[:, :, :, start_idx:]
-        dummy_overlap = attn_weight[:, :, start_idx:, start_idx:]
+        dummy_cols = attn_weight[:, :, :start_idx, start_idx:]
+        # dummy_overlap = attn_weight[:, :, start_idx:, start_idx:]
         # Sum of absolute values
-        loss = dummy_rows.abs().sum() + dummy_cols.abs().sum() - 2*dummy_overlap.abs().sum()
+        loss = dummy_rows.abs().sum() + dummy_cols.abs().sum()  #- 2*dummy_overlap.abs().sum()
+        print(f"Dummy node loss before normalization: {loss.item()}")
         # Normalize
         num_dummy = num_nodes - start_idx
-        loss = loss / torch.sqrt(batch_size * num_dummy * num_nodes * 2)
+        denom = torch.sqrt(torch.tensor(batch_size * num_dummy * num_nodes *
+                           2.0, device=input_nodes.device, dtype=loss.dtype) + 1e-8)
+        loss = loss / denom
+        print(f"Dummy node loss after normalization: {loss.item()}")
         return loss 
         
     def forward(
