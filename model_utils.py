@@ -1,6 +1,7 @@
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau, LambdaLR
 from torch.optim import Adam, AdamW
+from functools import partial
 import wandb
 
 ADAM_EPS = 1e-8
@@ -57,7 +58,8 @@ def load_model(model, args):
         state_dicts = torch.load(args.freeze_pretrained_encoder, weights_only=False)
     elif args.freeze_pretrained_diffusion:
         state_dicts = torch.load(args.freeze_pretrained_diffusion, weights_only=False)
-
+    else:
+        return model, 0
     model_state_dict = model.state_dict()
     pretrained_dict = {
         k: v
@@ -121,9 +123,9 @@ def load_optimizer(model, args):
 
 
 def load_scheduler(optimizer, args):
-    scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda,
+    scheduler = LambdaLR(optimizer, lr_lambda=partial(lr_lambda,
                          max_steps=args.max_steps,
-                         warmup_steps=args.warmup_steps)
+                         warmup_steps=args.warmup_steps))
     reduce_lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=500, min_lr=1e-8)
     if args.pretrained_weights:
         state_dicts = torch.load(args.pretrained_weights, weights_only=False)
