@@ -53,6 +53,9 @@ def compute_attention_snr(attn_weights, labels, node_mask):
     labels: [batch, num_nodes] or [num_nodes]
     node_mask: optional mask for valid nodes
     """
+    # If sum of rows for attention weights is > 1, apply softmax at row level
+    if attn_weights is not None and attn_weights.sum(dim=-1).max() > 1:
+        attn_weights = attn_weights.softmax(dim=-1)
     # if attn_weights is None or labels is None:
     #    return float('nan')
     if attn_weights.dim() == 4:
