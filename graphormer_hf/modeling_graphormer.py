@@ -299,6 +299,22 @@ class GraphormerMultiheadAttention(nn.Module):
             self.diffusion_model = GraphLatentDiffusion(
                 self.kdim, config.embedding_dim, config.diffusion_steps, config=self.config)
 
+    def reset_parameters(self):
+        if self.qkv_same_dim:
+            # Empirically observed the convergence to be much better with
+            # the scaled initialization
+            nn.init.xavier_uniform_(self.k_proj.weight, gain=1 / math.sqrt(2))
+            nn.init.xavier_uniform_(self.v_proj.weight, gain=1 / math.sqrt(2))
+            nn.init.xavier_uniform_(self.q_proj.weight, gain=1 / math.sqrt(2))
+        else:
+            nn.init.xavier_uniform_(self.k_proj.weight)
+            nn.init.xavier_uniform_(self.v_proj.weight)
+            nn.init.xavier_uniform_(self.q_proj.weight)
+
+        nn.init.xavier_uniform_(self.out_proj.weight)
+        if self.out_proj.bias is not None:
+            nn.init.constant_(self.out_proj.bias, 0.0)
+
     def remove_attention_noise(self, attn_weights, q, k, v, batch_size, target_len, source_len, edge_index_list):
         # attn_weights = [bsz * self.num_heads, tgt_len, src_len]
         attn_weights_float = torch.nn.functional.softmax(attn_weights, dim=-1)
@@ -707,13 +723,75 @@ class GraphormerDiffusion(nn.Module):
         return input_nodes, attention_matching_loss
 
 
-# Note: previously this module contained a custom `GraphormerPreTrainedModel` subclass
-# which implemented specialized initialization. The project prefers default PyTorch
-# initialization now, so we removed the custom class and let classes inherit
-# directly from `PreTrainedModel` (imported from transformers).
+class GraphormerPreTrainedModel(PreTrainedModel):
+    """
+    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
+    models.
+    """
+
+    config_class = GraphormerConfig
+    base_model_prefix = "graphormer"
+    main_input_name_nodes = "input_nodes"
+    main_input_name_edges = "input_edges"
+
+    def normal_(self, data: torch.Tensor):
+        # with FSDP, module params will be on CUDA, so we cast them back to CPU
+        # so that the RNG is consistent with and without FSDP
+        data.copy_(data.cpu().normal_(mean=0.0, std=0.02).to(data.device))
+
+    def init_graphormer_params(self, module: Union[nn.Linear, nn.Embedding, GraphormerMultiheadAttention]):
+        """
+        Initialize the weights specific to the Graphormer Model.
+        """
+        if isinstance(module, nn.Linear):
+            self.normal_(module.weight.data)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        if isinstance(module, nn.Embedding):
+            self.normal_(module.weight.data)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        if isinstance(module, GraphormerMultiheadAttention):
+            self.normal_(module.q_proj.weight.data)
+            self.normal_(module.k_proj.weight.data)
+            self.normal_(module.v_proj.weight.data)
+
+    def _init_weights(
+        self,
+        module: Union[
+            nn.Linear, nn.Conv2d, nn.Embedding, nn.LayerNorm, GraphormerMultiheadAttention, GraphormerGraphEncoder
+        ],
+    ):
+        """
+        Initialize the weights
+        """
+        if isinstance(module, (nn.Linear, nn.Conv2d)):
+            # We might be missing part of the Linear init, dependent on the layer num
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=0.02)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, GraphormerMultiheadAttention):
+            module.q_proj.weight.data.normal_(mean=0.0, std=0.02)
+            module.k_proj.weight.data.normal_(mean=0.0, std=0.02)
+            module.v_proj.weight.data.normal_(mean=0.0, std=0.02)
+            module.reset_parameters()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+        elif isinstance(module, GraphormerGraphEncoder):
+            if module.apply_graphormer_init:
+                module.apply(self.init_graphormer_params)
+
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
 
 
-class GraphormerModel(PreTrainedModel):
+class GraphormerModel(GraphormerPreTrainedModel):
     """The Graphormer model is a graph-encoder model.
 
     It goes from a graph to its representation. If you want to use the model for a downstream classification task, use
@@ -847,7 +925,7 @@ class GraphormerModel(PreTrainedModel):
         return self.max_nodes
 
 
-class GraphormerForNodeClassification(PreTrainedModel):
+class GraphormerForNodeClassification(GraphormerPreTrainedModel):
     """
     This model can be used for node-level classification or regression tasks.
 
