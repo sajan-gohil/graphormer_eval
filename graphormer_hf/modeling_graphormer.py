@@ -161,6 +161,9 @@ class GraphormerGraphNodeFeature(nn.Module):
             )
             # print("Processed")
         else:
+            # Normalize each node by l2 norm of the node features
+            input_nodes = input_nodes.to(dtype=torch.float32)
+            input_nodes = input_nodes / (input_nodes.norm(dim=-1, keepdim=True) + 1e-8)  # l2 norm
             node_feature = (  # node feature + graph token
                 self.atom_encoder(input_nodes).sum(dim=-2)  # [n_graph, n_node, n_hidden]
                 # + self.in_degree_encoder(in_degree)
