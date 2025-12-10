@@ -64,9 +64,7 @@ class GraphLatentDiffusion(nn.Module):
                                       layer_type=config.denoiser_type,
                                       config=self.config)
         self.diffusion_optimizer = torch.optim.Adam(self.denoiser.parameters(), lr=1e-4)
-        self.learnt_class_structure_scale = nn.Parameter(torch.tensor(1.0), requires_grad=True)
-        self.learnt_reconstruction_scale = nn.Parameter(torch.tensor(1.0), requires_grad=True)
-
+        
     def add_noise(self, x, t):
         noise = torch.randn_like(x)
         sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
@@ -282,26 +280,24 @@ class GraphLatentDiffusion(nn.Module):
 
         # Attention improvement loss
         attn_loss = 0
-        same_class_loss_scaled = 0
+        same_class_loss = 0
         if self.structure_scale > 0:
             attn_loss = self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index_list)
             if labels is not None:
                 same_class_loss = self.attention_same_class_improvement_loss(node_embeddings, denoised_embeddings,
                                                                        labels, edge_index_list)
-                same_class_loss_scaled = same_class_loss * self.learnt_class_structure_scale
-        # Auxiliary edge attention loss (if augmentation info provided)
-        aux_loss = 0
+                same_class_loss = same_class_loss
         if aug_added_edges is not None and aug_removed_edges is not None and aug_original_edges is not None:
             aux_loss = self.aux_edge_attention_loss(denoised_embeddings, aug_added_edges, aug_removed_edges, aug_original_edges)
         total_loss = 0
         if isinstance(attn_loss, torch.Tensor) and self.structure_scale > 0:
             total_loss = total_loss + (attn_loss * self.structure_scale)
 
-        # if isinstance(same_class_loss_scaled, torch.Tensor) and same_class_loss_scaled != 0:
-        #    total_loss = total_loss + same_class_loss_scaled
+        # if isinstance(same_class_loss, torch.Tensor) and same_class_loss != 0:
+        #    total_loss = total_loss + same_class_loss
 
         if isinstance(reconstruction_loss, torch.Tensor) and self.reconstruction_scale > 0:
-            total_loss = total_loss + (reconstruction_loss * self.reconstruction_scale * self.learnt_reconstruction_scale)
+            total_loss = total_loss + (reconstruction_loss * self.reconstruction_scale)
 
         if isinstance(aux_loss, torch.Tensor) and aux_loss != 0:
             total_loss = total_loss + (aux_loss * self.config.aug_loss_scale)
@@ -313,8 +309,8 @@ class GraphLatentDiffusion(nn.Module):
         log_payload = {}
         if isinstance(attn_loss, torch.Tensor):
             log_payload["loss/diffusion_attention"] = attn_loss.detach() * self.structure_scale
-        if isinstance(same_class_loss_scaled, torch.Tensor):
-            log_payload["loss/diffusion_same_class_attention"] = same_class_loss_scaled.detach()
+        if isinstance(same_class_loss, torch.Tensor):
+            log_payload["loss/diffusion_same_class_attention"] = same_class_loss.detach()
         if isinstance(reconstruction_loss, torch.Tensor):
             log_payload["loss/diffusion_reconstruction"] = reconstruction_loss.detach()
         if isinstance(aux_loss, torch.Tensor) and not isinstance(aux_loss, int):

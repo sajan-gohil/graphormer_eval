@@ -891,9 +891,6 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
         self.num_classes = config.num_classes
         self.classifier = GraphormerDecoderHead(self.embedding_dim, self.num_classes)
         self.is_encoder_decoder = True
-        self.learnt_loss_scale = torch.nn.Parameter(torch.tensor(1.0), requires_grad=True)
-        self.learnt_attention_matching_scale = torch.nn.Parameter(torch.tensor(1.0), requires_grad=True)
-        self.learnt_dummy_node_scale = torch.nn.Parameter(torch.tensor(1.0), requires_grad=True)
         
         if config.enable_diffusion:
             self.diffusion = GraphormerDiffusion(config)
@@ -1031,11 +1028,10 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
             else:  # binary multi-task classification
                 loss_fct = BCEWithLogitsLoss(reduction="sum")
                 loss = loss_fct(logits[mask], labels[mask])
-            supervised_loss = loss * self.learnt_loss_scale
+            supervised_loss = loss
             loss = supervised_loss
         
-        dummy_loss_scaled = dummy_node_loss * self.learnt_dummy_node_scale
-        loss = loss + dummy_loss_scaled if loss is not None else dummy_loss_scaled
+        loss = loss + dummy_node_loss if loss is not None else dummy_node_loss
 
         if self.config.enable_diffusion:
             if np.random.rand() < 0.01:
@@ -1043,7 +1039,7 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
                     print(f"{datetime.datetime.now()},{loss},{attention_matching_loss}", file=f)
             
             if isinstance(loss, torch.Tensor) and isinstance(attention_matching_loss, torch.Tensor):
-                attention_matching_scaled = attention_matching_loss * self.config.structure_scale * self.learnt_attention_matching_scale
+                attention_matching_scaled = attention_matching_loss * self.config.structure_scale
                 loss = loss + attention_matching_scaled
             else:
                 attention_matching_scaled = attention_matching_loss
@@ -1056,7 +1052,7 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
             log_step_value = log_step if log_step is not None else getattr(self.config, "current_step", None)
             log_payload = {
                 "loss/supervised": supervised_loss.detach() if supervised_loss is not None else None,
-                "loss/dummy_node": dummy_loss_scaled.detach(),
+                "loss/dummy_node": dummy_node_loss.detach(),
                 "loss/attention_matching": attention_matching_scaled.detach() if isinstance(attention_matching_scaled, torch.Tensor) else attention_matching_scaled,
                 "loss/total": loss.detach(),
             }
