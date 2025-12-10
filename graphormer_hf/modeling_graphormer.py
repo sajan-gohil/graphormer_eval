@@ -978,6 +978,24 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
                 aug_original_edges=kwargs.get("aug_original_edges", None),
                 log_group=log_group, log_step=log_step
             )
+            encoder_outputs, _ = self.encoder_2(
+                input_nodes,
+                input_edges,
+                attn_bias,
+                in_degree,
+                out_degree,
+                spatial_pos,
+                attn_edge_type,
+                return_dict=True,
+                edge_index=edge_index,
+                labels=labels,
+                node_mask=node_mask,
+                attn_override=attn_override,
+                token_embeddings=input_nodes
+                # return_pre_head = False,
+                **kwargs
+            )
+            outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
 
         # --- AttentionSNR logging: after diffusion ---
         if labels is not None and log_group and log_step:
