@@ -1051,19 +1051,13 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
         else:
             attention_matching_scaled = torch.tensor(0.0, device=input_nodes.device)
 
-        # --- Log individual loss components to wandb with learnt scales ---
+        # --- Log individual loss components to wandb ---
         if loss is not None:
             log_step_value = log_step if log_step is not None else getattr(self.config, "current_step", None)
             log_payload = {
-                "loss/supervised_pre_scale": supervised_loss.detach() / self.learnt_loss_scale.detach() if supervised_loss is not None else None,
-                "loss/supervised_post_scale": supervised_loss.detach() if supervised_loss is not None else None,
-                "scale/learnt_loss": self.learnt_loss_scale.detach() if supervised_loss is not None else None,
-                "loss/dummy_node_pre_scale": dummy_node_loss.detach() if dummy_node_loss is not None else None,
-                "loss/dummy_node_post_scale": dummy_loss_scaled.detach(),
-                "scale/learnt_dummy_node": self.learnt_dummy_node_scale.detach(),
-                "loss/attention_matching_pre_scale": attention_matching_loss.detach() if isinstance(attention_matching_loss, torch.Tensor) else attention_matching_loss,
-                "loss/attention_matching_post_scale": attention_matching_scaled.detach() if isinstance(attention_matching_scaled, torch.Tensor) else attention_matching_scaled,
-                "scale/learnt_attention_matching": self.learnt_attention_matching_scale.detach() if self.config.enable_diffusion else None,
+                "loss/supervised": supervised_loss.detach() if supervised_loss is not None else None,
+                "loss/dummy_node": dummy_loss_scaled.detach(),
+                "loss/attention_matching": attention_matching_scaled.detach() if isinstance(attention_matching_scaled, torch.Tensor) else attention_matching_scaled,
                 "loss/total": loss.detach(),
             }
             if log_step_value is not None:

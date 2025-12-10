@@ -282,7 +282,6 @@ class GraphLatentDiffusion(nn.Module):
 
         # Attention improvement loss
         attn_loss = 0
-        same_class_loss = 0
         same_class_loss_scaled = 0
         if self.structure_scale > 0:
             attn_loss = self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index_list)
@@ -301,10 +300,8 @@ class GraphLatentDiffusion(nn.Module):
         # if isinstance(same_class_loss_scaled, torch.Tensor) and same_class_loss_scaled != 0:
         #    total_loss = total_loss + same_class_loss_scaled
 
-        reconstruction_loss_scaled = 0
         if isinstance(reconstruction_loss, torch.Tensor) and self.reconstruction_scale > 0:
-            reconstruction_loss_scaled = reconstruction_loss * self.reconstruction_scale * self.learnt_reconstruction_scale
-            total_loss = total_loss + reconstruction_loss_scaled
+            total_loss = total_loss + (reconstruction_loss * self.reconstruction_scale * self.learnt_reconstruction_scale)
 
         if isinstance(aux_loss, torch.Tensor) and aux_loss != 0:
             total_loss = total_loss + (aux_loss * self.config.aug_loss_scale)
@@ -312,21 +309,14 @@ class GraphLatentDiffusion(nn.Module):
         if isinstance(total_loss, int) and total_loss == 0:
              total_loss = torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
 
-        # Log individual diffusion losses with learnt scales
+        # Log individual diffusion losses
         log_payload = {}
         if isinstance(attn_loss, torch.Tensor):
-            log_payload["loss/diffusion_attention_pre_scale"] = attn_loss.detach()
-            log_payload["loss/diffusion_attention_post_scale"] = (attn_loss.detach() * self.structure_scale)
-        if isinstance(same_class_loss, torch.Tensor):
-            log_payload["loss/diffusion_same_class_attention_pre_scale"] = same_class_loss.detach()
+            log_payload["loss/diffusion_attention"] = attn_loss.detach() * self.structure_scale
         if isinstance(same_class_loss_scaled, torch.Tensor):
-            log_payload["loss/diffusion_same_class_attention_post_scale"] = same_class_loss_scaled.detach()
-            log_payload["scale/learnt_class_structure"] = self.learnt_class_structure_scale.detach()
+            log_payload["loss/diffusion_same_class_attention"] = same_class_loss_scaled.detach()
         if isinstance(reconstruction_loss, torch.Tensor):
-            log_payload["loss/diffusion_reconstruction_pre_scale"] = reconstruction_loss.detach()
-        if isinstance(reconstruction_loss_scaled, torch.Tensor):
-            log_payload["loss/diffusion_reconstruction_post_scale"] = reconstruction_loss_scaled.detach()
-            log_payload["scale/learnt_reconstruction"] = self.learnt_reconstruction_scale.detach()
+            log_payload["loss/diffusion_reconstruction"] = reconstruction_loss.detach()
         if isinstance(aux_loss, torch.Tensor) and not isinstance(aux_loss, int):
             log_payload["loss/diffusion_aux"] = aux_loss.detach()
         if isinstance(total_loss, torch.Tensor):
