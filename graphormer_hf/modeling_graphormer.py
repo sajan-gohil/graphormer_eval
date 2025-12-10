@@ -17,6 +17,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 import math
 import wandb
+import copy
 
 from collections.abc import Iterable, Iterator
 from typing import Optional, Union
@@ -28,7 +29,7 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss, L1Loss
 from torch.optim import Adam
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
-    BaseModelOutputWithNoAttention,
+    BaseModelOutput,
     SequenceClassifierOutput,
 )
 from transformers.modeling_utils import PreTrainedModel
@@ -677,15 +678,6 @@ class GraphormerDiffusion(nn.Module):
             aug_original_edges=aug_original_edges,
             labels=labels
         )
-        
-        # --- AttentionSNR logging: after diffusion ---
-        if labels is not None and log_group and log_step:
-            normed = node_emb / (torch.sqrt(torch.tensor(node_emb.shape[-1])) + 1e-8)
-            attn_sim = torch.matmul(normed, normed.transpose(1, 2))
-            attn_sim = torch.softmax(attn_sim, dim=-1)
-            snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
-            wandb.log({f"ASNR_{log_group}/dotprod_softmax_after_diffusion": snr_sim,
-                       "step": self.config.current_step})
 
         input_nodes = torch.cat([graph_token, node_emb], dim=1)
         return input_nodes, attention_matching_loss
@@ -832,7 +824,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
         return_pre_head: bool = False,
 #        **unused,
          **kwargs
-    ) -> Union[tuple[torch.LongTensor], BaseModelOutputWithNoAttention]:
+    ) -> Union[tuple[torch.LongTensor], BaseModelOutput]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # add dummy nodes here
@@ -843,36 +835,14 @@ class GraphormerModel(GraphormerPreTrainedModel):
         )
         # Calculate loss based on attention weights for dummy nodes
         dummy_node_loss = torch.tensor(0.0, device=input_nodes.device)
-        print(self.config.node_augmentation, self.training)
+        # print(self.config.node_augmentation, self.training)
         if self.config.node_augmentation and self.training:
             dummy_node_loss = self.calc_dummy_node_loss(
                 inner_states[-1].transpose(1, 0), attn_weight, num_original_nodes=num_original_nodes
             )
-            print("CALCULATING LOSS: ", dummy_node_loss)
+            # print("CALCULATING LOSS: ", dummy_node_loss)
             attn_weight = attn_weight[:, :num_original_nodes+1, :num_original_nodes+1]
             inner_states[-1] = inner_states[-1][:num_original_nodes+1, :, :]
-
-        # --- AttentionSNR logging: before diffusion ---
-        # Use last attn_weight (after softmax), and input_nodes before diffusion
-        labels = kwargs.get('labels', None)
-        node_mask = kwargs.get('node_mask', None)
-        if attn_weight is not None and labels is not None:
-            snr_attn = compute_attention_snr(attn_weight[:, 1:, 1:], labels, node_mask)
-            if log_group and log_step:
-                wandb.log({f"ASNR_{log_group}/attn_weight_before_diffusion": snr_attn,
-                           "step": self.config.current_step})
-        # Compute SNR from normalized dot product + softmax of input_nodes (before diffusion)
-        # input_nodes: [batch, num_nodes+1, hidden_dim], remove graph token
-        input_nodes_ = inner_states[-1].transpose(0, 1)[:, 1:, :]
-        if labels is not None:
-            # Compute dot product attention
-            normed = input_nodes_ / (input_nodes_.norm(dim=-1, keepdim=True) + 1e-8)
-            attn_sim = torch.matmul(normed, normed.transpose(1, 2))
-            attn_sim = torch.softmax(attn_sim, dim=-1)
-            snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
-            if log_group and log_step:
-                wandb.log({f"ASNR_{log_group}/dotprod_softmax_before_diffusion": snr_sim,
-                           "step": self.config.current_step})
 
         # last inner state, then revert Batch and Graph len
         input_nodes = inner_states[-1].transpose(0, 1)
@@ -889,7 +859,9 @@ class GraphormerModel(GraphormerPreTrainedModel):
 
         if not return_dict:
             return tuple(x for x in [input_nodes, inner_states] if x is not None)
-        return BaseModelOutputWithNoAttention(last_hidden_state=input_nodes, hidden_states=inner_states), dummy_node_loss
+        return BaseModelOutput(last_hidden_state=input_nodes,
+                               hidden_states=inner_states,
+                               attentions=attn_weights), dummy_node_loss
 
     def max_nodes(self):
         """Maximum output length supported by the encoder."""
@@ -910,6 +882,11 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
         super().__init__(config)
         self.config = config
         self.encoder = GraphormerModel(config)
+        config_2 = copy.deepcopy(config)
+        config_2.num_hidden_layers = 1
+        config_2.node_augmentation = False
+        self.encoder_2 = GraphormerModel(config_2)
+
         self.embedding_dim = config.embedding_dim
         self.num_classes = config.num_classes
         self.classifier = GraphormerDecoderHead(self.embedding_dim, self.num_classes)
@@ -963,9 +940,31 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
             # return_pre_head = False,
             **kwargs
         )
-
         encoder_outputs, dummy_node_loss = encoder_outputs
         outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
+        attn_weight = encoder_outputs["attentions"]
+
+        # --- AttentionSNR logging: before diffusion ---
+        # Use last attn_weight (after softmax), and input_nodes before diffusion
+        labels = kwargs.get('labels', None)
+        # node_mask = kwargs.get('node_mask', None)
+        if attn_weight is not None and labels is not None:
+            snr_attn = compute_attention_snr(attn_weight[:, 1:, 1:], labels, node_mask)
+            if log_group and log_step:
+                wandb.log({f"ASNR_{log_group}/attn_weight_before_diffusion": snr_attn,
+                           "step": self.config.current_step})
+        # Compute SNR from normalized dot product + softmax of input_nodes (before diffusion)
+        # input_nodes: [batch, num_nodes+1, hidden_dim], remove graph token
+        input_nodes_ = hidden_states[-1].transpose(0, 1)[:, 1:, :]
+        if labels is not None:
+            # Compute dot product attention
+            normed = input_nodes_ / (input_nodes_.norm(dim=-1, keepdim=True) + 1e-8)
+            attn_sim = torch.matmul(normed, normed.transpose(1, 2))
+            attn_sim = torch.softmax(attn_sim, dim=-1)
+            snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
+            if log_group and log_step:
+                wandb.log({f"ASNR_{log_group}/dotprod_softmax_before_diffusion": snr_sim,
+                           "step": self.config.current_step})
 
         # last inner state, then revert Batch and Graph len
         input_nodes = hidden_states[-1].transpose(0, 1)
@@ -980,6 +979,14 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
                 log_group=log_group, log_step=log_step
             )
 
+        # --- AttentionSNR logging: after diffusion ---
+        if labels is not None and log_group and log_step:
+            normed = outputs / (torch.sqrt(torch.tensor(outputs.shape[-1])) + 1e-8)
+            attn_sim = torch.matmul(normed, normed.transpose(1, 2))
+            attn_sim = torch.softmax(attn_sim, dim=-1)
+            snr_sim = compute_attention_snr(attn_sim, labels, node_mask)
+            wandb.log({f"ASNR_{log_group}/dotprod_softmax_after_diffusion": snr_sim,
+                       "step": self.config.current_step})
         # Apply LM head
         # outputs = self.encoder.apply_lm_head(input_nodes)
 
