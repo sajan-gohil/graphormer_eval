@@ -84,7 +84,7 @@ parser.add_argument("--diffusion_lr", type=float, default=2e-5, help="Learning r
 
 parser.add_argument("--debug", action="store_true", help="Enable anomaly detection and verbose logging")
 parser.add_argument("--log_memory", action="store_true", help="Log GPU memory usage at various stages")
-parser.add_argument("--max_steps", type=int, default=50000, help="Maximum number of training steps")
+parser.add_argument("--max_steps", type=int, default=20000, help="Maximum number of training steps")
 parser.add_argument("--warmup_steps", type=int, default=1000, help="Number of warmup steps for learning rate scheduler")
 
 args = parser.parse_args()
