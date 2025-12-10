@@ -227,6 +227,7 @@ class GraphLatentDiffusion(nn.Module):
             noisy_embeddings += (torch.randn_like(noisy_embeddings) * mask.unsqueeze(-1))  # Replace masked with noise
         else:
             mask = torch.ones_like(noisy_embeddings[:,:,0], device=noisy_embeddings.device)  # No masking, all ones
+            print("MASK SHAPES: ", noisy_embeddings.shape, mask.shape)
 
         denoised_embeddings = self.denoiser(noisy_embeddings, t_emb, edge_index_list)
 
@@ -296,8 +297,8 @@ class GraphLatentDiffusion(nn.Module):
         if isinstance(attn_loss, torch.Tensor) and self.structure_scale > 0:
             total_loss = total_loss + (attn_loss * self.structure_scale)
 
-        if isinstance(same_class_loss_scaled, torch.Tensor) and same_class_loss_scaled != 0:
-            total_loss = total_loss + same_class_loss_scaled
+        # if isinstance(same_class_loss_scaled, torch.Tensor) and same_class_loss_scaled != 0:
+        #    total_loss = total_loss + same_class_loss_scaled
 
         if isinstance(reconstruction_loss, torch.Tensor) and self.reconstruction_scale > 0:
             total_loss = total_loss + (reconstruction_loss * self.reconstruction_scale * self.learnt_reconstruction_scale)

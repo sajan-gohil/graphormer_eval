@@ -435,7 +435,7 @@ class GraphormerMultiheadAttention(nn.Module):
         # --- Diffusion part ----
 
         attn_weights_float = torch.nn.functional.softmax(attn_weights, dim=-1)
-        # attn_weights = attn_weights_float.type_as(attn_weights)
+        attn_weights = attn_weights_float.type_as(attn_weights)
         attn_probs = self.attention_dropout_module(attn_weights_float)
 
         if v is None:
@@ -576,7 +576,7 @@ class GraphormerGraphEncoder(nn.Module):
         # input_edges: [batch, num_nodes, num_nodes, edge_feature_dim]
         batch_size, num_nodes, feature_dim = input_nodes.size()
         # add nodes as mean of randomly selected existing nodes
-        node_indices = torch.randint(0, num_nodes, (batch_size, pad_size, 5), device=input_nodes.device)#.unsqueeze(0).expand(input_nodes.shape[0], -1, -1)
+        node_indices = torch.randint(0, num_nodes, (batch_size, pad_size, 30), device=input_nodes.device)#.unsqueeze(0).expand(input_nodes.shape[0], -1, -1)
         batch_idx = torch.arange(batch_size, device=input_nodes.device).view(-1, 1, 1)
         batch_idx = batch_idx.expand_as(node_indices)
         node_padding = input_nodes[batch_idx, node_indices, :]
@@ -827,24 +827,25 @@ class GraphormerModel(GraphormerPreTrainedModel):
     def calc_dummy_node_loss(self, input_nodes, attn_weight, num_original_nodes):
         batch_size, num_nodes, feature_dim = input_nodes.size()
         start_idx = num_original_nodes + 1
-        if start_idx >= num_nodes:
-            return torch.tensor(0.0, device=input_nodes.device, dtype=input_nodes.dtype)
+        # print("start, tot", start_idx, num_nodes, input_nodes.shape)
+        #if start_idx >= num_nodes:
+        #    return torch.tensor(0.0, device=input_nodes.device, dtype=input_nodes.dtype)
             
         # attn_weight: [batch, num_heads, num_nodes, num_nodes]
         # Rows corresponding to dummy nodes
-        dummy_rows = attn_weight[:, :, start_idx:, :start_idx]
+        dummy_rows = attn_weight[:, start_idx:, :start_idx]
         # Cols corresponding to dummy nodes
-        dummy_cols = attn_weight[:, :, :start_idx, start_idx:]
+        dummy_cols = attn_weight[:, :start_idx, start_idx:]
         # dummy_overlap = attn_weight[:, :, start_idx:, start_idx:]
         # Sum of absolute values
         loss = dummy_rows.abs().sum() + dummy_cols.abs().sum()  #- 2*dummy_overlap.abs().sum()
-        print(f"Dummy node loss before normalization: {loss.item()}")
+        # print(f"Dummy node loss before normalization: {loss.item()}")
         # Normalize
         num_dummy = num_nodes - start_idx
         denom = torch.sqrt(torch.tensor(batch_size * num_dummy * num_nodes *
                            2.0, device=input_nodes.device, dtype=loss.dtype) + 1e-8)
         loss = loss / denom
-        print(f"Dummy node loss after normalization: {loss.item()}")
+        # print(f"Dummy node loss after normalization: {loss.item()}")
         return loss 
         
     def forward(
@@ -877,10 +878,12 @@ class GraphormerModel(GraphormerPreTrainedModel):
         )
         # Calculate loss based on attention weights for dummy nodes
         dummy_node_loss = torch.tensor(0.0, device=input_nodes.device)
+        print(self.config.node_augmentation, self.training)
         if self.config.node_augmentation and self.training:
             dummy_node_loss = self.calc_dummy_node_loss(
-                input_nodes, attn_weight, num_original_nodes=num_original_nodes
+                inner_states[-1].transpose(1, 0), attn_weight, num_original_nodes=num_original_nodes
             )
+            print("CALCULATING LOSS: ", dummy_node_loss)
             attn_weight = attn_weight[:, :num_original_nodes+1, :num_original_nodes+1]
             inner_states[-1] = inner_states[-1][:num_original_nodes+1, :, :]
 
