@@ -111,6 +111,22 @@ wandb.init(
     # mode="online" if args.onscreen_logs else "offline"
 )
 
+# Define metrics as line charts instead of bar charts
+loss_metrics = [
+    "loss/supervised_pre_scale", "loss/supervised_post_scale",
+    "loss/dummy_node_pre_scale", "loss/dummy_node_post_scale",
+    "loss/attention_matching_pre_scale", "loss/attention_matching_post_scale",
+    "loss/diffusion_attention_pre_scale", "loss/diffusion_attention_post_scale",
+    "loss/diffusion_same_class_attention_pre_scale", "loss/diffusion_same_class_attention_post_scale",
+    "loss/diffusion_reconstruction_pre_scale", "loss/diffusion_reconstruction_post_scale",
+    "loss/diffusion_aux", "loss/diffusion_total", "loss/total",
+    "scale/learnt_loss", "scale/learnt_dummy_node", "scale/learnt_attention_matching",
+    "scale/learnt_class_structure", "scale/learnt_reconstruction",
+    "train/loss", "val/mae"
+]
+for metric in loss_metrics:
+    wandb.define_metric(metric, step_metric="step")
+
 if not args.onscreen_logs:
     sys.stdout = open(os.path.join(args.experiment_dir, "training_log.txt"), "w")
     sys.stderr = open(os.path.join(args.experiment_dir, "training_error_log.txt"),"w")
