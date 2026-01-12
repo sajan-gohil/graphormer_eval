@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.datasets import Planetoid
 from torch_geometric.nn import GATv2Conv
+from torch_geometric.transforms import NormalizeFeatures
 from sklearn.metrics import accuracy_score, f1_score
 import argparse
 import random
@@ -128,7 +129,12 @@ def main(args):
     set_seed()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dataset = Planetoid(root="./data", name="Cora")
+    dataset = Planetoid(
+        root="./data",
+        name="Cora",
+        transform=NormalizeFeatures()
+    )
+
     data = dataset[0].to(device)
 
     model = GATv2Model(

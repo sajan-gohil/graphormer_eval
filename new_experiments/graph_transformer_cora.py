@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.datasets import Planetoid
 from torch_geometric.utils import add_self_loops
-# from torch_scatter import scatter
+from torch_geometric.transforms import NormalizeFeatures
 from sklearn.metrics import accuracy_score, f1_score
 import argparse
 import random
@@ -122,7 +122,12 @@ def evaluate(model, data, mask):
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dataset = Planetoid(root="./data", name="Cora")
+    dataset = Planetoid(
+        root="./data",
+        name="Cora",
+        transform=NormalizeFeatures()
+    )
+
     data = dataset[0].to(device)
 
     model = GraphTransformer(
