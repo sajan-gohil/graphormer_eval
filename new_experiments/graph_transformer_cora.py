@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.datasets import Planetoid
 from torch_geometric.utils import add_self_loops
-from torch_scatter import scatter
+# from torch_scatter import scatter
 from sklearn.metrics import accuracy_score, f1_score
 import argparse
 import random
@@ -35,21 +35,19 @@ class GraphMultiHeadAttention(nn.Module):
 
     def forward(self, x, edge_index):
         N = x.size(0)
-        edge_index, _ = add_self_loops(edge_index, num_nodes=N)
+        # edge_index, _ = add_self_loops(edge_index, num_nodes=N)
         src, dst = edge_index
 
         Q = self.W_q(x).view(N, self.num_heads, self.head_dim)
         K = self.W_k(x).view(N, self.num_heads, self.head_dim)
         V = self.W_v(x).view(N, self.num_heads, self.head_dim)
-
         # Edge-wise attention
-        scores = (Q[dst] * K[src]).sum(dim=-1) / (self.head_dim ** 0.5)
-        attn = scatter(scores, dst, dim=0, reduce="softmax")
-        attn = self.dropout(attn)
+        scores = (Q * K).sum(dim=-1) / (self.head_dim ** 0.5)
+        # attn = scatter(scores, dst, dim=0, reduce="softmax")
+        attn = self.dropout(scores)
 
-        out = V[src] * attn.unsqueeze(-1)
-        out = scatter(out, dst, dim=0, reduce="sum")
-
+        out = V * attn.unsqueeze(-1)
+        # out = scatter(out, dst, dim=0, reduce="sum")
         out = out.reshape(N, self.embed_dim)
         return self.out_proj(out)
 

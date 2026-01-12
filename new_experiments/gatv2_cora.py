@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.datasets import Planetoid
-from torch_geometric.utils import add_self_loops
-from torch_scatter import scatter
+from torch_geometric.nn import GATv2Conv
 from sklearn.metrics import accuracy_score, f1_score
 import argparse
 import random
@@ -16,47 +15,26 @@ def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-# GATv2 Layer (Explicit)
-class GATv2Layer(nn.Module):
-    def __init__(self, in_dim, out_dim, heads, dropout):
-        super().__init__()
-        self.heads = heads
-        self.out_dim = out_dim
 
-        self.W = nn.Linear(in_dim, heads * out_dim, bias=False)
-        self.attn = nn.Parameter(torch.empty(heads, 2 * out_dim))
-        nn.init.xavier_uniform_(self.attn)
-
-        self.leaky_relu = nn.LeakyReLU(0.2)
-        self.dropout = nn.Dropout(dropout)
-        self.out_proj = nn.Linear(heads * out_dim, heads * out_dim)
-
-    def forward(self, x, edge_index):
-        N = x.size(0)
-        edge_index, _ = add_self_loops(edge_index, num_nodes=N)
-        src, dst = edge_index
-
-        h = self.W(x).view(N, self.heads, self.out_dim)
-        h_src, h_dst = h[src], h[dst]
-
-        e = self.leaky_relu((torch.cat([h_src, h_dst], dim=-1) * self.attn).sum(-1))
-        alpha = scatter(e, dst, dim=0, reduce="softmax")
-        alpha = self.dropout(alpha)
-
-        out = scatter(h_src * alpha.unsqueeze(-1), dst, dim=0, reduce="sum")
-        return self.out_proj(out.reshape(N, -1))
-
-
-# GATv2 Block
 class GATv2Block(nn.Module):
     def __init__(self, in_dim, out_dim, heads, dropout):
         super().__init__()
-        self.gat = GATv2Layer(in_dim, out_dim, heads, dropout)
+
+        self.gat = GATv2Conv(
+            in_channels=in_dim,
+            out_channels=out_dim,
+            heads=heads,
+            dropout=dropout,
+            concat=True,        # heads are concatenated
+            add_self_loops=True
+        )
+
         self.norm = nn.LayerNorm(out_dim * heads)
+
         self.ffn = nn.Sequential(
             nn.Linear(out_dim * heads, out_dim * heads),
             nn.GELU(),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout),
         )
 
     def forward(self, x, edge_index):
@@ -211,3 +189,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
+
