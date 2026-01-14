@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.datasets import Planetoid
+from torch_geometric.datasets import LRGBDataset
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import global_mean_pool
 from torch_geometric.utils import add_self_loops
 from torch_geometric.transforms import NormalizeFeatures
 from sklearn.metrics import accuracy_score, f1_score
@@ -92,59 +94,74 @@ class GraphTransformer(nn.Module):
 
         self.output_proj = nn.Linear(hidden_dim, out_dim)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, batch):
         x = self.input_proj(x)
-        # print("After input projection:", x.shape)
         for layer in self.layers:
             x = layer(x, edge_index)
-            # print("After layer:", x.shape)
+
+        # graph-level pooling
+        x = global_mean_pool(x, batch)
         return self.output_proj(x)
 
 
-# Training & Evaluation
-def train_epoch(model, data, optimizer):
+def train_epoch(model, loader, optimizer, device):
     model.train()
-    optimizer.zero_grad()
-    out = model(data.x, data.edge_index)
-    loss = F.cross_entropy(out[data.train_mask], data.y[data.train_mask])
-    loss.backward()
-    optimizer.step()
-    return loss.item()
+    total_loss = 0
+
+    for data in loader:
+        data = data.to(device)
+        optimizer.zero_grad()
+        out = model(data.x.float(), data.edge_index, data.batch)
+        loss = F.binary_cross_entropy_with_logits(out, data.y)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * data.num_graphs
+
+    return total_loss / len(loader.dataset)
+
 
 @torch.no_grad()
-def evaluate(model, data, mask):
+@torch.no_grad()
+def evaluate(model, loader, device):
     model.eval()
-    logits = model(data.x, data.edge_index)[mask]
-    preds = logits.argmax(dim=-1).cpu().numpy()
-    labels = data.y[mask].cpu().numpy()
+    ys, preds = [], []
 
-    return {
-        "accuracy": accuracy_score(labels, preds),
-        "micro_f1": f1_score(labels, preds, average="micro"),
-        "macro_f1": f1_score(labels, preds, average="macro"),
-    }
+    for data in loader:
+        data = data.to(device)
+        out = model(data.x.float(), data.edge_index, data.batch)
+        preds.append(out.cpu())
+        ys.append(data.y.cpu())
+
+    y = torch.cat(ys, dim=0)
+    pred = torch.cat(preds, dim=0)
+    pred = (pred > 0).int()
+
+    return f1_score(y.numpy(), pred.numpy(), average="micro")
 
 
 # Driver
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dataset = Planetoid(
-        root="./data",
-        name="Cora",
-        transform=NormalizeFeatures()
-    )
+    train_dataset = LRGBDataset(root="./data", name="Peptides-func", split="train")
+    val_dataset   = LRGBDataset(root="./data", name="Peptides-func", split="val")
+    test_dataset  = LRGBDataset(root="./data", name="Peptides-func", split="test")
 
-    data = dataset[0].to(device)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32)
+    test_loader = DataLoader(test_dataset, batch_size=32)
+
+    print(train_dataset[0])
 
     model = GraphTransformer(
-        in_dim=data.num_node_features,
+        in_dim=train_dataset.num_node_features,
         hidden_dim=args.hidden_dim,
-        out_dim=dataset.num_classes,
+        out_dim=train_dataset.num_classes,
         layers=args.num_layers,
         heads=args.num_heads,
         dropout=args.dropout
     ).to(device)
+
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=5e-4)
 
@@ -152,34 +169,23 @@ def main(args):
     best_state = None
 
     for epoch in range(1, args.epochs + 1):
-        loss = train_epoch(model, data, optimizer)
-        val = evaluate(model, data, data.val_mask)
+        loss = train_epoch(model, train_loader, optimizer, device)
+        val_f1 = evaluate(model, val_loader, device)
 
-        if val["micro_f1"] > best_val:
-            best_val = val["micro_f1"]
+        if val_f1 > best_val:
+            best_val = val_f1
             best_state = model.state_dict()
 
         if epoch % 10 == 0 or epoch == 1:
             print(
                 f"Epoch {epoch:03d} | Loss {loss:.4f} | "
-                f"Val Acc {val['accuracy']:.4f} | "
-                f"Val Micro-F1 {val['micro_f1']:.4f}"
+                f"Val Micro-F1 {val_f1:.4f}"
             )
 
     model.load_state_dict(best_state)
+    test_f1 = evaluate(model, test_loader, device)
+    print(f"\nTest Micro-F1: {test_f1:.4f}")
 
-    print("\nFinal Metrics")
-    for name, mask in [
-        ("Train", data.train_mask),
-        ("Val", data.val_mask),
-        ("Test", data.test_mask),
-    ]:
-        m = evaluate(model, data, mask)
-        print(
-            f"{name:5s} | Acc {m['accuracy']:.4f} | "
-            f"Micro-F1 {m['micro_f1']:.4f} | "
-            f"Macro-F1 {m['macro_f1']:.4f}"
-        )
 
 
 if __name__ == "__main__":
