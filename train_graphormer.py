@@ -19,7 +19,7 @@ try:
 except:
     temp = lambda *args: 1
     PCQM4MEvaluator = temp 
-from graphormer_hf.modeling_graphormer import GraphormerForNodeClassification
+from graphormer_hf.modeling_graphormer import GraphormerForNodeClassification, GraphormerForGraphClassification
 from graphormer_hf.configuration_graphormer import GraphormerConfig
 from graphormer_hf.collating_graphormer import GraphormerDataCollator
 import dataset_utils
@@ -132,7 +132,15 @@ dataset_classes = {
     "ogbn-arxiv": 40,
     "ogbn-products": 47,
     "pcqm4mv2": 1,  # Regression task
+    # LRGB datasets
+    "peptides-func": 10,  # Multi-label graph classification (10 binary labels)
+    "peptides-struct": 11,  # Graph regression (11 targets)
 }
+
+# Datasets that are graph-level tasks (not node-level)
+GRAPH_LEVEL_DATASETS = {"peptides-func", "peptides-struct", "pcqm4mv2"}
+is_graph_task = args.dataset_name.lower() in GRAPH_LEVEL_DATASETS
+
 # 2. Model Configuration - Graphormer-base
 config = GraphormerConfig(
     num_hidden_layers=6,
@@ -142,14 +150,21 @@ config = GraphormerConfig(
     dropout=0.0,
     attention_dropout=0.0,
     activation_dropout=0.0,
-    num_classes=dataset_classes[args.dataset_name],  # Default to 1 for regression tasks
+    num_classes=dataset_classes[args.dataset_name.lower()],  # Default to 1 for regression tasks
+    is_graph_task=is_graph_task,
     **vars(args)
 )
 
 # Data loaders
 train_loader, valid_loader, test_loader = dataset_utils.load_data(args.dataset_name, num_workers=args.num_workers, config=config)
 
-model = GraphormerForNodeClassification(config)
+# Select model based on task type
+if is_graph_task:
+    print(f"Using GraphormerForGraphClassification for graph-level task: {args.dataset_name}")
+    model = GraphormerForGraphClassification(config)
+else:
+    print(f"Using GraphormerForNodeClassification for node-level task: {args.dataset_name}")
+    model = GraphormerForNodeClassification(config)
 # Compile as graph is always same
 # if config.diffusion_type != "ddim":
 #   # _ = model(torch.randn(1, 2708, 1433))
@@ -250,23 +265,58 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
     model.eval()
     config.current_split = "val"
     y_pred, y_true = [], []
+    val_losses = []
     with torch.no_grad():
         for i, batch in enumerate(valid_loader):
             outputs, labels, node_mask = forward_pass(
                 model, batch, device, config, valid_loader, "val")
-            # y_pred.append(outputs[1].view(-1).cpu())
-            if config.num_classes > 1:
-                y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
+            
+            if is_graph_task:
+                # Graph-level task: outputs.logits is [batch, num_classes]
+                y_pred.append(outputs.logits.cpu())
+                y_true.append(labels.cpu())
+                if outputs.loss is not None:
+                    val_losses.append(outputs.loss.item())
             else:
-                y_pred.append(outputs[1].view(-1).cpu())
-            y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
+                # Node-level task
+                if config.num_classes > 1:
+                    y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
+                else:
+                    y_pred.append(outputs[1].view(-1).cpu())
+                y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
             val_step += 1
 
     y_pred = torch.cat(y_pred, dim=0)
     y_true = torch.cat(y_true, dim=0)
 
     # Compute validation metrics
-    if args.dataset_name in ["pcqm4mv2"]:
+    if args.dataset_name.lower() == "peptides-func":
+        # Multi-label classification: use Average Precision (AP)
+        from sklearn.metrics import average_precision_score
+        # Apply sigmoid to get probabilities
+        y_pred_probs = torch.sigmoid(y_pred).numpy()
+        y_true_np = y_true.numpy()
+        # Compute AP for each label and average
+        ap_scores = []
+        for i in range(y_true_np.shape[1]):
+            if len(np.unique(y_true_np[:, i])) > 1:  # Skip if only one class present
+                ap = average_precision_score(y_true_np[:, i], y_pred_probs[:, i])
+                ap_scores.append(ap)
+        mean_ap = np.mean(ap_scores) if ap_scores else 0.0
+        valid_score = f"AP={mean_ap:.4f}"
+        valid_mae = mean_ap  # Use AP as main metric
+        wandb.log({"val/mean_AP": mean_ap, "step": config.current_step})
+        improved = mean_ap > best_valid_mae
+        val_loss = np.mean(val_losses) if val_losses else float('inf')
+    elif args.dataset_name.lower() == "peptides-struct":
+        # Graph regression: use MAE
+        mae = torch.mean(torch.abs(y_pred - y_true)).item()
+        valid_score = f"MAE={mae:.4f}"
+        valid_mae = -mae  # Negative for "higher is better" logic
+        wandb.log({"val/mae": mae, "step": config.current_step})
+        improved = mae < -best_valid_mae
+        val_loss = mae
+    elif args.dataset_name in ["pcqm4mv2"]:
         input_dict = {"y_true": y_true.numpy(), "y_pred": y_pred.numpy()}
         valid_mae = evaluator.eval(input_dict)["mae"]
         valid_score = str(valid_mae)
@@ -349,22 +399,49 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
                 outputs, labels, node_mask = forward_pass(
                     model, batch, device, config, test_loader, "test")
                 
-                if config.num_classes > 1:
+                if is_graph_task:
+                    y_pred.append(outputs.logits.cpu())
+                    y_true.append(labels.cpu())
+                elif config.num_classes > 1:
                     y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
+                    y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
                 else:
                     y_pred.append(outputs[1].view(-1).cpu())
-                y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
+                    y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
                 test_step += 1
 
         y_pred = torch.cat(y_pred, dim=0)
         y_true = torch.cat(y_true, dim=0)
-        micro_f1 = f1_score(y_true, y_pred, average="micro")
-        macro_f1 = f1_score(y_true, y_pred, average="macro")
-        test_accuracy = float((y_pred == y_true).to(torch.float32).mean().item())
-        print(f"Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}, Accuracy: {test_accuracy:.4f}")
-        with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
-            f.write(f"epoch_{epoch},{micro_f1},{macro_f1},{test_accuracy}\n")
-        wandb.log({"test/micro_f1": micro_f1, "test/macro_f1": macro_f1, "test/accuracy": test_accuracy, "step": config.current_step})
+        
+        if args.dataset_name.lower() == "peptides-func":
+            # Multi-label classification: use Average Precision (AP)
+            from sklearn.metrics import average_precision_score
+            y_pred_probs = torch.sigmoid(y_pred).numpy()
+            y_true_np = y_true.numpy()
+            ap_scores = []
+            for i in range(y_true_np.shape[1]):
+                if len(np.unique(y_true_np[:, i])) > 1:
+                    ap = average_precision_score(y_true_np[:, i], y_pred_probs[:, i])
+                    ap_scores.append(ap)
+            mean_ap = np.mean(ap_scores) if ap_scores else 0.0
+            print(f"Test Mean AP: {mean_ap:.4f}")
+            with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
+                f.write(f"epoch_{epoch},{mean_ap}\n")
+            wandb.log({"test/mean_AP": mean_ap, "step": config.current_step})
+        elif args.dataset_name.lower() == "peptides-struct":
+            mae = torch.mean(torch.abs(y_pred - y_true)).item()
+            print(f"Test MAE: {mae:.4f}")
+            with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
+                f.write(f"epoch_{epoch},{mae}\n")
+            wandb.log({"test/mae": mae, "step": config.current_step})
+        else:
+            micro_f1 = f1_score(y_true, y_pred, average="micro")
+            macro_f1 = f1_score(y_true, y_pred, average="macro")
+            test_accuracy = float((y_pred == y_true).to(torch.float32).mean().item())
+            print(f"Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}, Accuracy: {test_accuracy:.4f}")
+            with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
+                f.write(f"epoch_{epoch},{micro_f1},{macro_f1},{test_accuracy}\n")
+            wandb.log({"test/micro_f1": micro_f1, "test/macro_f1": macro_f1, "test/accuracy": test_accuracy, "step": config.current_step})
 
     if train_step >= MAX_STEPS:
         print("Reached max training steps.")
@@ -388,17 +465,41 @@ if args.dataset_name not in ["pcqm4mv2"]:
             outputs, labels, node_mask = forward_pass(
                 model, batch, device, config, test_loader, "test")
             
-            if config.num_classes > 1:
+            if is_graph_task:
+                y_pred.append(outputs.logits.cpu())
+                y_true.append(labels.cpu())
+            elif config.num_classes > 1:
                 y_pred.append(torch.argmax(outputs[1], axis=-1).view(-1, 1)[node_mask].view(-1).cpu())
+                y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
             else:
                 y_pred.append(outputs[1].view(-1).cpu())
-            y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
+                y_true.append(labels.view(-1, 1)[node_mask].view(-1).cpu())
 
     y_pred = torch.cat(y_pred, dim=0)
     y_true = torch.cat(y_true, dim=0)
-    micro_f1 = f1_score(y_true, y_pred, average="micro")
-    macro_f1 = f1_score(y_true, y_pred, average="macro")
-    best_test_accuracy = float((y_pred == y_true).to(torch.float32).mean().item())
-    print(f"BEST Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}, Accuracy: {best_test_accuracy:.4f}")
-    with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
-        f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\naccuracy,{best_test_accuracy}\n")
+    
+    if args.dataset_name.lower() == "peptides-func":
+        from sklearn.metrics import average_precision_score
+        y_pred_probs = torch.sigmoid(y_pred).numpy()
+        y_true_np = y_true.numpy()
+        ap_scores = []
+        for i in range(y_true_np.shape[1]):
+            if len(np.unique(y_true_np[:, i])) > 1:
+                ap = average_precision_score(y_true_np[:, i], y_pred_probs[:, i])
+                ap_scores.append(ap)
+        mean_ap = np.mean(ap_scores) if ap_scores else 0.0
+        print(f"BEST Test Mean AP: {mean_ap:.4f}")
+        with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
+            f.write(f"mean_AP,{mean_ap}\n")
+    elif args.dataset_name.lower() == "peptides-struct":
+        mae = torch.mean(torch.abs(y_pred - y_true)).item()
+        print(f"BEST Test MAE: {mae:.4f}")
+        with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
+            f.write(f"mae,{mae}\n")
+    else:
+        micro_f1 = f1_score(y_true, y_pred, average="micro")
+        macro_f1 = f1_score(y_true, y_pred, average="macro")
+        best_test_accuracy = float((y_pred == y_true).to(torch.float32).mean().item())
+        print(f"BEST Test Micro F1: {micro_f1:.4f}, Macro F1: {macro_f1:.4f}, Accuracy: {best_test_accuracy:.4f}")
+        with open(f"{args.experiment_dir}/test_metric.csv", "a") as f:
+            f.write(f"micro_f1,{micro_f1}\nmacro_f1,{macro_f1}\naccuracy,{best_test_accuracy}\n")

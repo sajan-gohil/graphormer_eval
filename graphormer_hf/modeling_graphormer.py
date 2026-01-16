@@ -96,9 +96,12 @@ class GraphormerGraphNodeFeature(nn.Module):
         self.config = config
         self.num_heads = config.num_attention_heads
         self.num_atoms = config.num_atoms
+        
+        # Get input feature dimension from config, default to 1433 (Cora)
+        self.input_feature_dim = getattr(config, 'input_feature_dim', 1433)
 
         # self.atom_encoder = nn.Embedding(config.num_atoms + 1, config.hidden_size, padding_idx=config.pad_token_id)
-        self.feature_encoder = nn.Linear(1433, config.hidden_size)
+        self.feature_encoder = nn.Linear(self.input_feature_dim, config.hidden_size)
         # self.in_degree_encoder = nn.Embedding(
         #     config.num_in_degree, config.hidden_size, padding_idx=config.pad_token_id
         # )
@@ -1066,8 +1069,114 @@ class GraphormerForNodeClassification(GraphormerPreTrainedModel):
             return tuple(x for x in [loss, logits, hidden_states] if x is not None)
         return SequenceClassifierOutput(loss=loss, logits=logits, hidden_states=hidden_states, attentions=None)
 
+    
+class GraphormerForGraphClassification(GraphormerPreTrainedModel):
+    """
+    Graphormer model for graph-level classification or regression tasks.
+    
+    Uses the graph token (first token) for predictions.
+    
+    Can be used for:
+    - regression (by setting config.num_classes to 1)
+    - single-task classification (by setting config.num_classes to number of classes)
+    - multi-label classification (by setting config.num_classes to number of labels)
+    """
+
+    def __init__(self, config: GraphormerConfig):
+        super().__init__(config)
+        self.config = config
+        self.encoder = GraphormerModel(config)
+        
+        self.embedding_dim = config.embedding_dim
+        self.num_classes = config.num_classes
+        
+        # Graph-level classifier using the graph token
+        self.classifier = nn.Sequential(
+            nn.Linear(config.embedding_dim, config.embedding_dim),
+            nn.GELU(),
+            nn.Dropout(config.dropout),
+            nn.Linear(config.embedding_dim, config.num_classes)
+        )
+        
+        self.is_encoder_decoder = True
+        
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def forward(
+        self,
+        input_nodes: torch.LongTensor,
+        input_edges: torch.LongTensor,
+        in_degree: torch.LongTensor,
+        out_degree: torch.LongTensor,
+        spatial_pos: torch.LongTensor,
+        attn_edge_type: torch.LongTensor,
+        attn_bias: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        return_dict: Optional[bool] = None,
+        edge_index: Optional[torch.LongTensor] = None,
+        node_mask: Optional[torch.BoolTensor] = None,
+        attn_override: Optional[dict] = None,
+        log_step: Optional[int] = None,
+        log_group: Optional[int] = None,
+        **kwargs
+    ) -> Union[tuple[torch.Tensor], SequenceClassifierOutput]:
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        
+        encoder_outputs = self.encoder(
+            input_nodes,
+            input_edges,
+            attn_bias,
+            in_degree,
+            out_degree,
+            spatial_pos,
+            attn_edge_type,
+            return_dict=True,
+            edge_index=edge_index,
+            attn_override=attn_override,
+            **kwargs
+        )
+        encoder_outputs, dummy_node_loss = encoder_outputs
+        outputs, hidden_states = encoder_outputs["last_hidden_state"], encoder_outputs["hidden_states"]
+        
+        # Use graph token (first token) for graph-level prediction
+        # outputs: [batch, num_nodes+1, hidden_dim] - first token is graph token
+        graph_token = outputs[:, 0, :]  # [batch, hidden_dim]
+        logits = self.classifier(graph_token)  # [batch, num_classes]
+        
+        loss = None
+        if labels is not None:
+            if self.num_classes == 1:
+                # Regression task
+                loss_fct = L1Loss()
+                loss = loss_fct(logits.squeeze(-1), labels.squeeze(-1).float())
+            elif labels.dim() == 1 or (labels.dim() == 2 and labels.size(-1) == 1):
+                # Single-label classification
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits, labels.view(-1).long())
+            else:
+                # Multi-label classification (e.g., peptides-func with 10 binary labels)
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels.float())
+        
+        # Add dummy node loss if applicable
+        loss = loss + dummy_node_loss if loss is not None else dummy_node_loss
+        
+        # Log loss components
+        if loss is not None and log_step is not None:
+            wandb.log({
+                "loss/supervised": loss.detach() if loss is not None else None,
+                "loss/total": loss.detach(),
+                "step": log_step
+            })
+        
+        if not return_dict:
+            return tuple(x for x in [loss, logits, hidden_states] if x is not None)
+        return SequenceClassifierOutput(loss=loss, logits=logits, hidden_states=hidden_states, attentions=None)
+
+
 __all__ = [
-    # "GraphormerForGraphClassification",
+    "GraphormerForGraphClassification",
     "GraphormerForNodeClassification",
     "GraphormerModel",
     # "GraphormerPreTrainedModel"
