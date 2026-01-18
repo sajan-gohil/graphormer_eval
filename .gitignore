@@ -180,3 +180,9 @@ pretrained_model
 *.zip
 start.sh
 .gitignore
+experiments
+new_experiments/experiments/
+data
+datasets
+citeceer_experiments
+temp_experiments

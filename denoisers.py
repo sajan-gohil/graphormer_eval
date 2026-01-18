@@ -21,7 +21,7 @@ class DenoiserModel(nn.Module):
         self.num_layers = num_layers
         # Increase dim only for linear/GNN
         self.num_channels = [
-            self.in_channels * i  # if layer_type != "mha" else self.in_channels
+            self.in_channels * i if layer_type != "mha" else self.in_channels
             for i in range(1, num_layers + 2)
         ]
         self.num_channels += self.num_channels[-2::-1]
@@ -77,7 +77,10 @@ class DenoiserModel(nn.Module):
                 t_emb = self.t_proj[i](time_embedding_batch)
                 if len(t_emb.shape) <= 1:
                     t_emb = t_emb.unsqueeze(0)
-                x_batch += t_emb
+                # For mha/linear with 3D input, broadcast time embedding across sequence dim
+                if len(x_batch.shape) == 3 and len(t_emb.shape) == 2:
+                    t_emb = t_emb.unsqueeze(1)  # [B, D] -> [B, 1, D]
+                x_batch = x_batch + t_emb
             x_batch = self.layers[i](x_batch) if self.layer_type != "gat" else self.layers[i](
                 x_batch, edge_index_list)
             if self.layer_type != "mha":
@@ -89,18 +92,20 @@ class DenoiserModel(nn.Module):
         for idx, i in enumerate(list(range(self.num_layers, len(self.layers))), 1): # Start from 1 to skip bottleneck
             if time_embedding_batch is not None:
                 t_emb = self.t_proj[i](time_embedding_batch)
-                if len(x_batch.shape) == 3:
-                    t_emb = t_emb.unsqueeze(1)
-                x_batch += t_emb
+                # For mha/linear with 3D input, broadcast time embedding across sequence dim
+                if len(x_batch.shape) == 3 and len(t_emb.shape) == 2:
+                    t_emb = t_emb.unsqueeze(1)  # [B, D] -> [B, 1, D]
+                x_batch = x_batch + t_emb
             x_batch = self.layers[i](x_batch) if self.layer_type != "gat" else self.layers[i](
                 x_batch, edge_index_list)
             if self.layer_type != "mha":
                 if idx < len(down_res):
                     # print("Adding down res:", idx, down_res[idx].shape)
-                    x_batch += down_res[idx]
+                    x_batch = x_batch + down_res[idx]
                 x_batch = self.norms[i](x_batch)
                 if i != len(self.layers)-1:  # linear activation in last layer
                     x_batch = F.silu(x_batch)
+
 
         if self.layer_type == "gat":
             x_batch = torch.stack(x_batch.split(batch.batch.bincount().tolist(), dim=0), dim=0)

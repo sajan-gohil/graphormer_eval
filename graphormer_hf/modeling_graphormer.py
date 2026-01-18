@@ -837,7 +837,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
             input_nodes, input_edges, attn_bias, in_degree, out_degree, spatial_pos, attn_edge_type, perturb=perturb, edge_index=edge_index, attn_override=attn_override
         )
         # Calculate loss based on attention weights for dummy nodes
-        dummy_node_loss = torch.tensor(0.0, device=input_nodes.device)
+        dummy_node_loss = torch.tensor(0.0, device=input_nodes.device, requires_grad=True)
         # print(self.config.node_augmentation, self.training)
         if self.config.node_augmentation and self.training:
             dummy_node_loss = self.calc_dummy_node_loss(
@@ -864,7 +864,7 @@ class GraphormerModel(GraphormerPreTrainedModel):
             return tuple(x for x in [input_nodes, inner_states] if x is not None)
         return BaseModelOutput(last_hidden_state=input_nodes,
                                hidden_states=inner_states,
-                               attentions=attn_weights), dummy_node_loss
+                               attentions=attn_weight), dummy_node_loss
 
     def max_nodes(self):
         """Maximum output length supported by the encoder."""
