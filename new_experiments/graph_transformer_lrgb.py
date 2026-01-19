@@ -305,7 +305,7 @@ def main(args):
         layers=args.num_layers,
         heads=args.num_heads,
         dropout=args.dropout,
-        use_vae_refiner=args.use_vae_refiner and not args.no_vae_refiner
+        use_vae_refiner=not args.no_vae_refiner
     ).to(device)
 
 
@@ -342,8 +342,6 @@ if __name__ == "__main__":
     parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--use_vae_refiner", action='store_true', default=True,
-                        help="Whether to use VAE-based node embedding refinement")
     parser.add_argument("--no_vae_refiner", action='store_true', default=False,
                         help="Disable VAE-based node embedding refinement")
     args = parser.parse_args()
