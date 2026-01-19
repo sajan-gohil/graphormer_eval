@@ -145,22 +145,27 @@ class NodeEmbeddingGenerator(nn.Module):
     - Aggregate information from all other nodes
     - Use VAE to predict/generate refined embedding for node i
     """
-    def __init__(self, embed_dim, latent_dim):
+    def __init__(self, embed_dim, latent_dim, num_context_heads=4, context_dropout=0.1):
         super().__init__()
         self.embed_dim = embed_dim
         self.vae = NodeEmbeddingVAE(embed_dim, latent_dim)
         
         # Attention-based aggregation for context (all nodes except i)
+        # num_context_heads and context_dropout can be tuned for performance
         self.context_attn = nn.MultiheadAttention(
             embed_dim=embed_dim,
-            num_heads=4,
-            dropout=0.1,
+            num_heads=num_context_heads,
+            dropout=context_dropout,
             batch_first=True
         )
         
     def forward(self, x, batch):
         """
         Generate refined embeddings for all nodes.
+        
+        Note: This implementation uses nested loops with O(n²) complexity per graph,
+        where n is the number of nodes. For large graphs, this may be a performance
+        bottleneck. Future optimization could involve vectorized operations.
         
         Args:
             x: Node embeddings [num_nodes, embed_dim]
