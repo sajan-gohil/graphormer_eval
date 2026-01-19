@@ -4,7 +4,7 @@
 This implementation adds a Variational Autoencoder (VAE) based node embedding generator to the GraphTransformer model in `new_experiments/graph_transformer_lrgb.py`.
 
 ## Mathematical Framework
-The implementation follows the framework: **f(G) = {EP(Ni | N-Ni) for every i = 0 to i = len(N)}**
+The implementation follows the framework: **f(G) = {EP(Ni | N-Ni) for all i ∈ {1, 2, ..., |N|}}**
 
 Where:
 - **G** = Graph
