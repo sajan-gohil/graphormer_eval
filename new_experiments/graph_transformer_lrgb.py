@@ -183,6 +183,13 @@ class NodeEmbeddingGenerator(nn.Module):
             
             # For each node i in the graph
             for i in range(num_nodes):
+                # Special case: single node graph
+                if num_nodes == 1:
+                    # Use the node's own embedding through VAE
+                    refined = self.vae(graph_nodes[0])
+                    graph_refined.append(refined)
+                    continue
+                
                 # Create mask for all nodes except i
                 context_mask = torch.ones(num_nodes, dtype=torch.bool, device=x.device)
                 context_mask[i] = False
@@ -260,7 +267,6 @@ def train_epoch(model, loader, optimizer, device):
 
 
 @torch.no_grad()
-@torch.no_grad()
 def evaluate(model, loader, device):
     model.eval()
     ys, preds = [], []
@@ -299,7 +305,7 @@ def main(args):
         layers=args.num_layers,
         heads=args.num_heads,
         dropout=args.dropout,
-        use_vae_refiner=args.use_vae_refiner
+        use_vae_refiner=args.use_vae_refiner and not args.no_vae_refiner
     ).to(device)
 
 
@@ -336,7 +342,9 @@ if __name__ == "__main__":
     parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--use_vae_refiner", type=bool, default=True, 
+    parser.add_argument("--use_vae_refiner", action='store_true', default=True,
                         help="Whether to use VAE-based node embedding refinement")
+    parser.add_argument("--no_vae_refiner", action='store_true', default=False,
+                        help="Disable VAE-based node embedding refinement")
     args = parser.parse_args()
     main(args)

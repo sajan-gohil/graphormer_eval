@@ -162,8 +162,7 @@ def test_end_to_end_training():
     # Create a simple batch
     edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
     x = torch.randn(3, in_dim)
-    y = torch.randint(0, 2, (1, out_dim)).float()  # Binary labels
-    data = Data(x=x, edge_index=edge_index, y=y)
+    data = Data(x=x, edge_index=edge_index)
     batch_data = Batch.from_data_list([data])
     
     # Training step
@@ -174,7 +173,9 @@ def test_end_to_end_training():
     for step in range(10):
         optimizer.zero_grad()
         output = model(batch_data.x, batch_data.edge_index, batch_data.batch)
-        loss = F.binary_cross_entropy_with_logits(output, batch_data.y)
+        # Create properly shaped labels matching the output
+        y = torch.randint(0, 2, output.shape).float()
+        loss = F.binary_cross_entropy_with_logits(output, y)
         
         if step == 0:
             initial_loss = loss.item()
@@ -236,6 +237,36 @@ def test_without_vae():
     print()
 
 
+def test_single_node_graph():
+    """Test Node Embedding Generator with single-node graphs."""
+    print("=" * 60)
+    print("Test 6: Single-Node Graph Handling")
+    print("=" * 60)
+    
+    embed_dim = 64
+    latent_dim = 32
+    
+    generator = NodeEmbeddingGenerator(embed_dim, latent_dim)
+    
+    # Create a batch with a single-node graph
+    x = torch.randn(1, embed_dim)
+    batch = torch.tensor([0])
+    
+    # Test forward pass
+    refined = generator(x, batch)
+    
+    assert refined.shape == x.shape, \
+        f"Expected shape {x.shape}, got {refined.shape}"
+    assert not torch.isnan(refined).any(), \
+        "Output contains NaN values"
+    
+    print(f"✓ Input: Single node graph")
+    print(f"✓ Output shape: {refined.shape}")
+    print(f"✓ No NaN values in output")
+    print(f"✓ Single-node graph handled correctly")
+    print()
+
+
 if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("VAE-based Node Embedding Generator Test Suite")
@@ -247,6 +278,7 @@ if __name__ == "__main__":
         test_graph_transformer_integration()
         test_end_to_end_training()
         test_without_vae()
+        test_single_node_graph()
         
         print("=" * 60)
         print("✓ ALL TESTS PASSED")
@@ -257,6 +289,7 @@ if __name__ == "__main__":
         print("- GraphTransformer integrates VAE before pooling")
         print("- Model trains end-to-end with only task loss (no reconstruction loss)")
         print("- Baseline model (without VAE) still works")
+        print("- Single-node graphs are handled correctly without NaN values")
         print()
         
     except Exception as e:
