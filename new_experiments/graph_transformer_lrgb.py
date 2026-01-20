@@ -54,7 +54,7 @@ class GraphMultiHeadAttention(nn.Module):
         out = torch.einsum("hnm,hmd->hnd", scores, V)
         out = out.transpose(0, 1).contiguous().view(N, self.embed_dim)
         # print("Attention output shape:", out.shape)
-        return self.out_proj(out)
+        return self.out_proj(out, flush=True)
 
 
 # Transformer Layer
@@ -296,7 +296,7 @@ def main(args):
     val_loader = DataLoader(val_dataset, batch_size=32)
     test_loader = DataLoader(test_dataset, batch_size=32)
 
-    print(train_dataset[0])
+    print(train_dataset[0], flush=True)
 
     model = GraphTransformer(
         in_dim=train_dataset.num_node_features,
@@ -326,11 +326,11 @@ def main(args):
             print(
                 f"Epoch {epoch:03d} | Loss {loss:.4f} | "
                 f"Val Micro-F1 {val_f1:.4f}"
-            )
+            , flush=True)
 
     model.load_state_dict(best_state)
     test_f1 = evaluate(model, test_loader, device)
-    print(f"\nTest Micro-F1: {test_f1:.4f}")
+    print(f"\nTest Micro-F1: {test_f1:.4f}", flush=True)
 
 
 
