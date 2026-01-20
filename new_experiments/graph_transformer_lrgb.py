@@ -197,7 +197,7 @@ def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.1):
         task_loss = F.binary_cross_entropy_with_logits(out, data.y)
         
         # Attention improvement loss
-        attn_loss = 0
+        attn_loss = torch.tensor(0)
         if attn_loss_weight > 0:
             attn_loss = attention_improvement_loss(
                 initial_emb, denoised_emb, data.edge_index, data.batch
