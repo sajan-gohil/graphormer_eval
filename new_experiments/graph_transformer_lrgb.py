@@ -174,7 +174,6 @@ class NodeEmbeddingGenerator(nn.Module):
             Refined node embeddings [num_nodes, embed_dim]
         """
         all_aggregated_contexts = []
-        node_indices = []  # Track which nodes to process
         
         # Process each graph in the batch separately to collect contexts
         unique_batches = torch.unique(batch)
@@ -205,7 +204,6 @@ class NodeEmbeddingGenerator(nn.Module):
                     aggregated = aggregated.squeeze(0).squeeze(0)  # [embed_dim]
                 
                 all_aggregated_contexts.append(aggregated)
-                node_indices.append((batch_idx, i))
         
         # Batch all aggregated contexts and process through VAE in one forward pass
         # This ensures gradients propagate correctly during backpropagation
@@ -215,10 +213,8 @@ class NodeEmbeddingGenerator(nn.Module):
         else:
             batched_refined = torch.empty(0, self.embed_dim, device=x.device)
         
-        # Reconstruct the refined embeddings in the original order
-        refined_embeddings = batched_refined
-        
-        return refined_embeddings
+        # Return the refined embeddings in the original order
+        return batched_refined
 
 
 # Graph Transformer
