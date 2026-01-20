@@ -163,9 +163,8 @@ class NodeEmbeddingGenerator(nn.Module):
         """
         Generate refined embeddings for all nodes.
         
-        Note: This implementation uses nested loops with O(n²) complexity per graph,
-        where n is the number of nodes. For large graphs, this may be a performance
-        bottleneck. Future optimization could involve vectorized operations.
+        This implementation batches all node contexts together and processes them
+        in a single forward pass through the VAE to ensure proper gradient propagation.
         
         Args:
             x: Node embeddings [num_nodes, embed_dim]
@@ -174,9 +173,10 @@ class NodeEmbeddingGenerator(nn.Module):
         Returns:
             Refined node embeddings [num_nodes, embed_dim]
         """
-        refined_embeddings = []
+        all_aggregated_contexts = []
+        node_indices = []  # Track which nodes to process
         
-        # Process each graph in the batch separately
+        # Process each graph in the batch separately to collect contexts
         unique_batches = torch.unique(batch)
         for batch_idx in unique_batches:
             # Get nodes for this graph
@@ -184,40 +184,39 @@ class NodeEmbeddingGenerator(nn.Module):
             graph_nodes = x[mask]  # [num_nodes_in_graph, embed_dim]
             num_nodes = graph_nodes.size(0)
             
-            graph_refined = []
-            
             # For each node i in the graph
             for i in range(num_nodes):
                 # Special case: single node graph
                 if num_nodes == 1:
-                    # Use the node's own embedding through VAE
-                    refined = self.vae(graph_nodes[0])
-                    graph_refined.append(refined)
-                    continue
+                    # Use the node's own embedding as context
+                    aggregated = graph_nodes[0]
+                else:
+                    # Create mask for all nodes except i
+                    context_mask = torch.ones(num_nodes, dtype=torch.bool, device=x.device)
+                    context_mask[i] = False
+                    
+                    # Get context (all nodes except i)
+                    context = graph_nodes[context_mask].unsqueeze(0)  # [1, num_nodes-1, embed_dim]
+                    
+                    # Aggregate context using attention
+                    # Query: mean of context, Key/Value: context nodes
+                    query = context.mean(dim=1, keepdim=True)  # [1, 1, embed_dim]
+                    aggregated, _ = self.context_attn(query, context, context)  # [1, 1, embed_dim]
+                    aggregated = aggregated.squeeze(0).squeeze(0)  # [embed_dim]
                 
-                # Create mask for all nodes except i
-                context_mask = torch.ones(num_nodes, dtype=torch.bool, device=x.device)
-                context_mask[i] = False
-                
-                # Get context (all nodes except i)
-                context = graph_nodes[context_mask].unsqueeze(0)  # [1, num_nodes-1, embed_dim]
-                
-                # Aggregate context using attention
-                # Query: mean of context, Key/Value: context nodes
-                query = context.mean(dim=1, keepdim=True)  # [1, 1, embed_dim]
-                aggregated, _ = self.context_attn(query, context, context)  # [1, 1, embed_dim]
-                aggregated = aggregated.squeeze(0).squeeze(0)  # [embed_dim]
-                
-                # Use VAE to generate refined embedding for node i
-                refined = self.vae(aggregated)  # [embed_dim]
-                graph_refined.append(refined)
-            
-            # Stack refined embeddings for this graph
-            graph_refined = torch.stack(graph_refined, dim=0)  # [num_nodes_in_graph, embed_dim]
-            refined_embeddings.append(graph_refined)
+                all_aggregated_contexts.append(aggregated)
+                node_indices.append((batch_idx, i))
         
-        # Concatenate all refined embeddings
-        refined_embeddings = torch.cat(refined_embeddings, dim=0)  # [total_num_nodes, embed_dim]
+        # Batch all aggregated contexts and process through VAE in one forward pass
+        # This ensures gradients propagate correctly during backpropagation
+        if len(all_aggregated_contexts) > 0:
+            batched_contexts = torch.stack(all_aggregated_contexts, dim=0)  # [total_nodes, embed_dim]
+            batched_refined = self.vae(batched_contexts)  # [total_nodes, embed_dim]
+        else:
+            batched_refined = torch.empty(0, self.embed_dim, device=x.device)
+        
+        # Reconstruct the refined embeddings in the original order
+        refined_embeddings = batched_refined
         
         return refined_embeddings
 

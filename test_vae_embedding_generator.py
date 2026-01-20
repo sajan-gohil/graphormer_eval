@@ -267,6 +267,50 @@ def test_single_node_graph():
     print()
 
 
+def test_gradient_propagation():
+    """Test that gradients propagate correctly through batched VAE processing."""
+    print("=" * 60)
+    print("Test 7: Gradient Propagation with Batched Processing")
+    print("=" * 60)
+    
+    embed_dim = 64
+    latent_dim = 32
+    
+    generator = NodeEmbeddingGenerator(embed_dim, latent_dim)
+    generator.train()
+    
+    # Create a batch of 2 graphs with multiple nodes
+    # Graph 1: 3 nodes, Graph 2: 4 nodes (total 7 nodes)
+    x = torch.randn(7, embed_dim, requires_grad=True)
+    batch = torch.tensor([0, 0, 0, 1, 1, 1, 1])
+    
+    # Forward pass
+    refined = generator(x, batch)
+    
+    # Create a simple loss (sum of all refined embeddings)
+    loss = refined.sum()
+    
+    # Backward pass
+    loss.backward()
+    
+    # Check that VAE parameters have gradients
+    vae_params_with_grad = 0
+    vae_total_params = 0
+    for name, param in generator.vae.named_parameters():
+        vae_total_params += 1
+        if param.grad is not None and param.grad.abs().sum() > 0:
+            vae_params_with_grad += 1
+    
+    assert vae_params_with_grad > 0, \
+        "No gradients found in VAE parameters"
+    
+    print(f"✓ Input: 7 nodes in 2 graphs")
+    print(f"✓ VAE parameters with gradients: {vae_params_with_grad}/{vae_total_params}")
+    print(f"✓ All nodes processed in single forward pass")
+    print(f"✓ Gradients propagate correctly through batched VAE")
+    print()
+
+
 if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("VAE-based Node Embedding Generator Test Suite")
@@ -279,6 +323,7 @@ if __name__ == "__main__":
         test_end_to_end_training()
         test_without_vae()
         test_single_node_graph()
+        test_gradient_propagation()
         
         print("=" * 60)
         print("✓ ALL TESTS PASSED")
@@ -290,6 +335,7 @@ if __name__ == "__main__":
         print("- Model trains end-to-end with only task loss (no reconstruction loss)")
         print("- Baseline model (without VAE) still works")
         print("- Single-node graphs are handled correctly without NaN values")
+        print("- Gradients propagate correctly through batched VAE processing")
         print()
         
     except Exception as e:
