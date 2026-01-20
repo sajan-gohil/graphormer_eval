@@ -81,9 +81,145 @@ class GraphTransformerLayer(nn.Module):
         return x
 
 
+# Node Embedding VAE (without reconstruction loss)
+class NodeEmbeddingVAE(nn.Module):
+    """
+    Variational Autoencoder for node embeddings.
+    Encodes to latent space and decodes to generate refined embeddings.
+    No reconstruction loss - trained end-to-end with task loss only.
+    """
+    def __init__(self, embed_dim, latent_dim):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.latent_dim = latent_dim
+        
+        # Encoder: maps embeddings to latent distribution
+        self.encoder = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU()
+        )
+        self.fc_mu = nn.Linear(embed_dim // 2, latent_dim)
+        self.fc_logvar = nn.Linear(embed_dim // 2, latent_dim)
+        
+        # Decoder: generates refined embeddings from latent samples
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, embed_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim // 2, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
+    
+    def encode(self, x):
+        """Encode input to latent distribution parameters."""
+        h = self.encoder(x)
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h)
+        return mu, logvar
+    
+    def reparameterize(self, mu, logvar):
+        """Reparameterization trick: z = mu + sigma * epsilon."""
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+    
+    def decode(self, z):
+        """Decode latent sample to refined embedding."""
+        return self.decoder(z)
+    
+    def forward(self, x):
+        """Forward pass: encode, sample, decode."""
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        return self.decode(z)
+
+
+# Node Embedding Generator using VAE
+class NodeEmbeddingGenerator(nn.Module):
+    """
+    Implements EP(Ni | N-Ni) for all nodes in a graph.
+    For each node i:
+    - Mask out the i'th node embedding
+    - Aggregate information from all other nodes
+    - Use VAE to predict/generate refined embedding for node i
+    """
+    def __init__(self, embed_dim, latent_dim, num_context_heads=4, context_dropout=0.1):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.vae = NodeEmbeddingVAE(embed_dim, latent_dim)
+        
+        # Attention-based aggregation for context (all nodes except i)
+        # num_context_heads and context_dropout can be tuned for performance
+        self.context_attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_context_heads,
+            dropout=context_dropout,
+            batch_first=True
+        )
+        
+    def forward(self, x, batch):
+        """
+        Generate refined embeddings for all nodes.
+        
+        This implementation batches all node contexts together and processes them
+        in a single forward pass through the VAE to ensure proper gradient propagation.
+        
+        Args:
+            x: Node embeddings [num_nodes, embed_dim]
+            batch: Batch assignment for each node [num_nodes]
+            
+        Returns:
+            Refined node embeddings [num_nodes, embed_dim]
+        """
+        all_aggregated_contexts = []
+        
+        # Process each graph in the batch separately to collect contexts
+        unique_batches = torch.unique(batch)
+        for batch_idx in unique_batches:
+            # Get nodes for this graph
+            mask = batch == batch_idx
+            graph_nodes = x[mask]  # [num_nodes_in_graph, embed_dim]
+            num_nodes = graph_nodes.size(0)
+            
+            # For each node i in the graph
+            for i in range(num_nodes):
+                # Special case: single node graph
+                if num_nodes == 1:
+                    # Use the node's own embedding as context
+                    aggregated = graph_nodes[0]
+                else:
+                    # Create mask for all nodes except i
+                    context_mask = torch.ones(num_nodes, dtype=torch.bool, device=x.device)
+                    context_mask[i] = False
+                    
+                    # Get context (all nodes except i)
+                    context = graph_nodes[context_mask].unsqueeze(0)  # [1, num_nodes-1, embed_dim]
+                    
+                    # Aggregate context using attention
+                    # Query: mean of context, Key/Value: context nodes
+                    query = context.mean(dim=1, keepdim=True)  # [1, 1, embed_dim]
+                    aggregated, _ = self.context_attn(query, context, context)  # [1, 1, embed_dim]
+                    aggregated = aggregated.squeeze(0).squeeze(0)  # [embed_dim]
+                
+                all_aggregated_contexts.append(aggregated)
+        
+        # Batch all aggregated contexts and process through VAE in one forward pass
+        # This ensures gradients propagate correctly during backpropagation
+        if len(all_aggregated_contexts) > 0:
+            batched_contexts = torch.stack(all_aggregated_contexts, dim=0)  # [total_nodes, embed_dim]
+            batched_refined = self.vae(batched_contexts)  # [total_nodes, embed_dim]
+        else:
+            batched_refined = torch.empty(0, self.embed_dim, device=x.device)
+        
+        # Return the refined embeddings in the original order
+        return batched_refined
+
+
 # Graph Transformer
 class GraphTransformer(nn.Module):
-    def __init__(self, in_dim, hidden_dim, out_dim, layers, heads, dropout):
+    def __init__(self, in_dim, hidden_dim, out_dim, layers, heads, dropout, use_vae_refiner=True):
         super().__init__()
         self.input_proj = nn.Linear(in_dim, hidden_dim)
 
@@ -91,6 +227,12 @@ class GraphTransformer(nn.Module):
             GraphTransformerLayer(hidden_dim, heads, dropout)
             for _ in range(layers)
         ])
+        
+        # VAE-based embedding generator (optional)
+        self.use_vae_refiner = use_vae_refiner
+        if use_vae_refiner:
+            latent_dim = hidden_dim // 2  # Latent dimension is half of embedding dimension
+            self.embedding_generator = NodeEmbeddingGenerator(hidden_dim, latent_dim)
 
         self.output_proj = nn.Linear(hidden_dim, out_dim)
 
@@ -98,6 +240,10 @@ class GraphTransformer(nn.Module):
         x = self.input_proj(x)
         for layer in self.layers:
             x = layer(x, edge_index)
+        
+        # Apply VAE-based embedding refinement before pooling
+        if self.use_vae_refiner:
+            x = self.embedding_generator(x, batch)
 
         # graph-level pooling
         x = global_mean_pool(x, batch)
@@ -120,7 +266,6 @@ def train_epoch(model, loader, optimizer, device):
     return total_loss / len(loader.dataset)
 
 
-@torch.no_grad()
 @torch.no_grad()
 def evaluate(model, loader, device):
     model.eval()
@@ -159,7 +304,8 @@ def main(args):
         out_dim=train_dataset.num_classes,
         layers=args.num_layers,
         heads=args.num_heads,
-        dropout=args.dropout
+        dropout=args.dropout,
+        use_vae_refiner=not args.no_vae_refiner
     ).to(device)
 
 
@@ -196,5 +342,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--no_vae_refiner", action='store_true', default=False,
+                        help="Disable VAE-based node embedding refinement")
     args = parser.parse_args()
     main(args)
