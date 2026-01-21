@@ -21,6 +21,16 @@ from graph_transformer_lrgb_pcgrad import (
 )
 
 
+class DummyLoader:
+    """Simple loader for testing that wraps a single batch."""
+    def __init__(self, data):
+        self.data = [data]
+        self.dataset = data
+    
+    def __iter__(self):
+        return iter(self.data)
+
+
 def create_dummy_batch(num_graphs=2, num_nodes_per_graph=5, num_features=10, num_classes=3):
     """Create a dummy batch of graphs for testing."""
     graphs = []
@@ -71,15 +81,6 @@ def test_train_epoch_with_struct_loss():
     
     # Create dummy data
     batch = create_dummy_batch(num_graphs=2, num_nodes_per_graph=5, num_features=10, num_classes=3)
-    
-    # Create a simple loader
-    class DummyLoader:
-        def __init__(self, data):
-            self.data = [data]
-            self.dataset = data
-        
-        def __iter__(self):
-            return iter(self.data)
     
     loader = DummyLoader(batch)
     
@@ -132,15 +133,6 @@ def test_train_epoch_without_struct_loss():
     
     # Create dummy data
     batch = create_dummy_batch(num_graphs=2, num_nodes_per_graph=5, num_features=10, num_classes=3)
-    
-    # Create a simple loader
-    class DummyLoader:
-        def __init__(self, data):
-            self.data = [data]
-            self.dataset = data
-        
-        def __iter__(self):
-            return iter(self.data)
     
     loader = DummyLoader(batch)
     
