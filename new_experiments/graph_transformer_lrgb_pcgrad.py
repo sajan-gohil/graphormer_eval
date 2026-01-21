@@ -326,8 +326,14 @@ def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.1, struct_l
             
             # Compute gradients for auxiliary loss (struct)
             grads_aux = torch.autograd.grad(
-                struct_loss, params, retain_graph=False, create_graph=False
+                struct_loss, params, retain_graph=False, create_graph=False, allow_unused=True
             )
+            
+            # Replace None gradients with zero tensors for unused parameters
+            grads_aux = [
+                g if g is not None else torch.zeros_like(p)
+                for g, p in zip(grads_aux, params)
+            ]
             
             # Apply PCGrad projection
             grads_aux_proj = pcgrad_project(grads_main, grads_aux, params)
