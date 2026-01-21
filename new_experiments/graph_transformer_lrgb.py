@@ -67,6 +67,66 @@ def attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index,
     
     return (per_graph_loss / counts).mean()
 
+
+def structure_reconstruction_loss(node_embeddings, edge_index, batch):
+    """
+    Compute structure reconstruction loss by predicting adjacency matrix
+    from node embeddings using self dot product + sigmoid.
+    
+    Args:
+        node_embeddings: Node embeddings after first transformer layer [N, D]
+        edge_index: Original edge indices [2, E]
+        batch: Batch assignment for each node [N]
+    
+    Returns:
+        BCE loss between predicted and original adjacency
+    """
+    device = node_embeddings.device
+    num_nodes = node_embeddings.size(0)
+    num_graphs = batch.max().item() + 1
+    
+    total_loss = 0.0
+    
+    for b in range(num_graphs):
+        # Get nodes belonging to this graph
+        node_mask = (batch == b)
+        graph_nodes = node_embeddings[node_mask]  # [n, D]
+        n = graph_nodes.size(0)
+        
+        if n <= 1:
+            continue
+        
+        # Compute predicted adjacency via dot product + sigmoid
+        # [n, D] @ [D, n] -> [n, n]
+        pred_adj = torch.sigmoid(torch.mm(graph_nodes, graph_nodes.t()))
+        
+        # Create target adjacency matrix from edge_index
+        # Get edges belonging to this graph
+        node_indices = torch.where(node_mask)[0]
+        node_mapping = {idx.item(): i for i, idx in enumerate(node_indices)}
+        
+        target_adj = torch.zeros(n, n, device=device)
+        src, dst = edge_index
+        
+        for i in range(edge_index.size(1)):
+            s, d = src[i].item(), dst[i].item()
+            if s in node_mapping and d in node_mapping:
+                local_s, local_d = node_mapping[s], node_mapping[d]
+                target_adj[local_s, local_d] = 1.0
+                target_adj[local_d, local_s] = 1.0  # Symmetric for undirected
+        
+        # Exclude diagonal (self-loops) from loss computation
+        mask = ~torch.eye(n, dtype=torch.bool, device=device)
+        pred_flat = pred_adj[mask]
+        target_flat = target_adj[mask]
+        
+        # Binary cross entropy loss
+        graph_loss = F.binary_cross_entropy(pred_flat, target_flat)
+        total_loss += graph_loss
+    
+    return total_loss / max(num_graphs, 1)
+
+
 # Graph Multi-Head Attention
 class GraphMultiHeadAttention(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout):
@@ -160,10 +220,15 @@ class GraphTransformer(nn.Module):
         initial_embeddings = x.clone()  # Store initial embeddings for attention loss
         
         all_qkv_embeddings = []
-        for layer in self.layers:
+        first_layer_embeddings = None
+        
+        for i, layer in enumerate(self.layers):
             if return_attn_loss:
                 x, qkv_emb = layer(x, edge_index, return_qkv=True)
                 all_qkv_embeddings.append(qkv_emb)
+                # Store embeddings after first transformer layer for structure loss
+                if i == 0:
+                    first_layer_embeddings = x.clone()
             else:
                 x = layer(x, edge_index)
 
@@ -174,22 +239,23 @@ class GraphTransformer(nn.Module):
         if return_attn_loss:
             # Average QKV embeddings across layers as denoised embeddings
             denoised_embeddings = all_qkv_embeddings  # torch.stack(all_qkv_embeddings, dim=0).mean(dim=0)
-            return out, initial_embeddings, denoised_embeddings
+            return out, initial_embeddings, denoised_embeddings, first_layer_embeddings
         return out
 
 
-def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.1):
+def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.1, struct_loss_weight=0.1):
     model.train()
     total_loss = 0
     total_task_loss = 0
     total_attn_loss = 0
+    total_struct_loss = 0
 
     for data in loader:
         data = data.to(device)
         optimizer.zero_grad()
         
         # Forward pass with attention loss components
-        out, initial_emb, denoised_emb = model(
+        out, initial_emb, denoised_emb, first_layer_emb = model(
             data.x.float(), data.edge_index, data.batch, return_attn_loss=True
         )
         
@@ -197,14 +263,21 @@ def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.1):
         task_loss = F.binary_cross_entropy_with_logits(out, data.y)
         
         # Attention improvement loss
-        attn_loss = torch.tensor(0)
+        attn_loss = torch.tensor(0.0, device=device)
         if attn_loss_weight > 0:
             attn_loss = attention_improvement_loss(
                 initial_emb, denoised_emb, data.edge_index, data.batch
             )
         
+        # Structure reconstruction loss
+        struct_loss = torch.tensor(0.0, device=device)
+        if struct_loss_weight > 0 and first_layer_emb is not None:
+            struct_loss = structure_reconstruction_loss(
+                first_layer_emb, data.edge_index, data.batch
+            )
+        
         # Combined loss
-        loss = task_loss + attn_loss_weight * attn_loss
+        loss = task_loss + attn_loss_weight * attn_loss + struct_loss_weight * struct_loss
         
         loss.backward()
         optimizer.step()
@@ -212,9 +285,10 @@ def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.1):
         total_loss += loss.item() * data.num_graphs
         total_task_loss += task_loss.item() * data.num_graphs
         total_attn_loss += attn_loss.item() * data.num_graphs
+        total_struct_loss += struct_loss.item() * data.num_graphs
 
     n = len(loader.dataset)
-    return total_loss / n, total_task_loss / n, total_attn_loss / n
+    return total_loss / n, total_task_loss / n, total_attn_loss / n, total_struct_loss / n
 
 
 @torch.no_grad()
@@ -265,8 +339,10 @@ def main(args):
     best_state = None
 
     for epoch in range(1, args.epochs + 1):
-        loss, task_loss, attn_loss = train_epoch(
-            model, train_loader, optimizer, device, attn_loss_weight=args.attn_loss_weight
+        loss, task_loss, attn_loss, struct_loss = train_epoch(
+            model, train_loader, optimizer, device, 
+            attn_loss_weight=args.attn_loss_weight,
+            struct_loss_weight=args.struct_loss_weight
         )
         val_f1 = evaluate(model, val_loader, device)
 
@@ -277,7 +353,7 @@ def main(args):
         if epoch % 10 == 0 or epoch == 1:
             print(
                 f"Epoch {epoch:03d} | Loss {loss:.4f} | Task {task_loss:.4f} | "
-                f"Attn {attn_loss:.4f} | Val Micro-F1 {val_f1:.4f}"
+                f"Attn {attn_loss:.4f} | Struct {struct_loss:.4f} | Val Micro-F1 {val_f1:.4f}"
             , flush=True)
 
     model.load_state_dict(best_state)
@@ -294,8 +370,10 @@ if __name__ == "__main__":
     parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--attn_loss_weight", type=float, default=0.1,
+    parser.add_argument("--attn_loss_weight", type=float, default=0,
                         help="Weight for attention improvement loss")
+    parser.add_argument("--struct_loss_weight", type=float, default=0,
+                        help="Weight for structure reconstruction loss")
     args = parser.parse_args()
     print(args.__dict__, flush=True)
     main(args)
