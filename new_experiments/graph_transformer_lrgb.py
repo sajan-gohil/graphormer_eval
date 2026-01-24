@@ -31,9 +31,6 @@ def attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index,
         tau: Temperature for sigmoid
     """
     # Normalize embeddings
-    if not isinstance(denoised_embeddings, torch.Tensor):
-        denoised_embeddings = torch.stack(denoised_embeddings, dim=0).mean(dim=0)
-
     node_emb_normed = F.normalize(node_embeddings, p=2, dim=-1)
     denoised_emb_normed = F.normalize(denoised_embeddings, p=2, dim=-1)
     
@@ -73,6 +70,8 @@ def structure_reconstruction_loss(node_embeddings, edge_index, batch):
     Compute structure reconstruction loss by predicting adjacency matrix
     from node embeddings using self dot product + sigmoid.
     
+    Vectorized implementation for efficiency.
+    
     Args:
         node_embeddings: Node embeddings after first transformer layer [N, D]
         edge_index: Original edge indices [2, E]
@@ -83,48 +82,55 @@ def structure_reconstruction_loss(node_embeddings, edge_index, batch):
     """
     device = node_embeddings.device
     num_nodes = node_embeddings.size(0)
-    num_graphs = batch.max().item() + 1
     
-    total_loss = 0.0
+    # Normalize embeddings for numerical stability
+    node_emb_normed = F.normalize(node_embeddings, p=2, dim=-1)
     
-    for b in range(num_graphs):
-        # Get nodes belonging to this graph
-        node_mask = (batch == b)
-        graph_nodes = node_embeddings[node_mask]  # [n, D]
-        n = graph_nodes.size(0)
-        
-        if n <= 1:
-            continue
-        
-        # Compute predicted adjacency via dot product + sigmoid
-        # [n, D] @ [D, n] -> [n, n]
-        pred_adj = torch.sigmoid(torch.mm(graph_nodes, graph_nodes.t()))
-        
-        # Create target adjacency matrix from edge_index
-        # Get edges belonging to this graph
-        node_indices = torch.where(node_mask)[0]
-        node_mapping = {idx.item(): i for i, idx in enumerate(node_indices)}
-        
-        target_adj = torch.zeros(n, n, device=device)
-        src, dst = edge_index
-        
-        for i in range(edge_index.size(1)):
-            s, d = src[i].item(), dst[i].item()
-            if s in node_mapping and d in node_mapping:
-                local_s, local_d = node_mapping[s], node_mapping[d]
-                target_adj[local_s, local_d] = 1.0
-                target_adj[local_d, local_s] = 1.0  # Symmetric for undirected
-        
-        # Exclude diagonal (self-loops) from loss computation
-        mask = ~torch.eye(n, dtype=torch.bool, device=device)
-        pred_flat = pred_adj[mask]
-        target_flat = target_adj[mask]
-        
-        # Binary cross entropy loss
-        graph_loss = F.binary_cross_entropy(pred_flat, target_flat)
-        total_loss += graph_loss
+    # Sample negative edges (non-connected node pairs within same graph)
+    src, dst = edge_index
+    num_pos = edge_index.size(1)
     
-    return total_loss / max(num_graphs, 1)
+    # Positive edge predictions (connected pairs)
+    pos_scores = (node_emb_normed[src] * node_emb_normed[dst]).sum(dim=-1)
+    pos_pred = torch.sigmoid(pos_scores)
+    
+    # Sample negative edges: random pairs within the same graph
+    # Use ~2x negative samples for balance
+    num_neg = min(num_pos * 2, num_nodes * 10)
+    
+    # Random node indices
+    neg_src = torch.randint(0, num_nodes, (num_neg,), device=device)
+    neg_dst = torch.randint(0, num_nodes, (num_neg,), device=device)
+    
+    # Keep only pairs in the same graph and not self-loops
+    same_graph = batch[neg_src] == batch[neg_dst]
+    not_self = neg_src != neg_dst
+    valid_neg = same_graph & not_self
+    
+    neg_src = neg_src[valid_neg]
+    neg_dst = neg_dst[valid_neg]
+    
+    # Filter out actual edges (optional but more accurate)
+    # Create edge set for fast lookup
+    edge_set = src * num_nodes + dst
+    neg_edge_ids = neg_src * num_nodes + neg_dst
+    is_not_edge = ~torch.isin(neg_edge_ids, edge_set)
+    
+    neg_src = neg_src[is_not_edge]
+    neg_dst = neg_dst[is_not_edge]
+    
+    if neg_src.size(0) == 0:
+        return torch.tensor(0.0, device=device)
+    
+    # Negative edge predictions (non-connected pairs)
+    neg_scores = (node_emb_normed[neg_src] * node_emb_normed[neg_dst]).sum(dim=-1)
+    neg_pred = torch.sigmoid(neg_scores)
+    
+    # BCE loss: positive edges should be 1, negative should be 0
+    pos_loss = F.binary_cross_entropy(pos_pred, torch.ones_like(pos_pred))
+    neg_loss = F.binary_cross_entropy(neg_pred, torch.zeros_like(neg_pred))
+    
+    return (pos_loss + neg_loss) / 2
 
 
 # Graph Multi-Head Attention
@@ -243,7 +249,7 @@ class GraphTransformer(nn.Module):
         return out
 
 
-def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.1, struct_loss_weight=0.1):
+def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.0, struct_loss_weight=0.0):
     model.train()
     total_loss = 0
     total_task_loss = 0
@@ -262,12 +268,13 @@ def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.1, struct_l
         # Task loss (binary cross-entropy)
         task_loss = F.binary_cross_entropy_with_logits(out, data.y)
         
-        # Attention improvement loss
+        # Attention improvement loss (computed for each layer separately and summed)
         attn_loss = torch.tensor(0.0, device=device)
         if attn_loss_weight > 0:
-            attn_loss = attention_improvement_loss(
-                initial_emb, denoised_emb, data.edge_index, data.batch
-            )
+            for layer_qkv_emb in denoised_emb:
+                attn_loss = attn_loss + attention_improvement_loss(
+                    initial_emb, layer_qkv_emb, data.edge_index, data.batch
+                )
         
         # Structure reconstruction loss
         struct_loss = torch.tensor(0.0, device=device)
