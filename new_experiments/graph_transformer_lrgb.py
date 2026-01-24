@@ -271,10 +271,12 @@ def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.0, struct_l
         # Attention improvement loss (computed for each layer separately and summed)
         attn_loss = torch.tensor(0.0, device=device)
         if attn_loss_weight > 0:
+            input_emb = initial_emb
             for layer_qkv_emb in denoised_emb:
                 attn_loss = attn_loss + attention_improvement_loss(
                     initial_emb, layer_qkv_emb, data.edge_index, data.batch
                 )
+                input_emb = layer_qkv_emb  # Update input for next layer
         
         # Structure reconstruction loss
         struct_loss = torch.tensor(0.0, device=device)
