@@ -274,7 +274,7 @@ def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.0, struct_l
             input_emb = initial_emb
             for layer_qkv_emb in denoised_emb:
                 attn_loss = attn_loss + attention_improvement_loss(
-                    initial_emb, layer_qkv_emb, data.edge_index, data.batch
+                    input_emb, layer_qkv_emb, data.edge_index, data.batch
                 )
                 input_emb = layer_qkv_emb  # Update input for next layer
         
