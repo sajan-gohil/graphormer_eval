@@ -1,0 +1,3 @@
+[submodule "new_experiments/sota_architectures/GraphGPS"]
+	path = new_experiments/sota_architectures/GraphGPS
+	url = https://github.com/sajan-gohil/GraphGPS.git
