@@ -42,6 +42,7 @@ def get_timestep_embedding(timesteps, embedding_dim):
         emb = F.pad(emb, (0, 1))
     return emb
 
+
 class DiffusionScheduler:
     """
     Simple diffusion scheduler for attention matrices.
@@ -86,14 +87,16 @@ class DiffusionScheduler:
         return self.alphas_cumprod[t]
 
 
-class AttentionDenoiser(nn.Module):
+class AttentionGenerator(nn.Module):
     """
-    Simplified denoiser that refines attention scores using node embeddings.
+    Generates attention matrix directly from node embeddings using diffusion.
+    Instead of Q*K^T, we learn to generate attention from node features.
     """
-    def __init__(self, embed_dim, num_heads, hidden_dim=128, num_denoise_layers=2):
+    def __init__(self, embed_dim, num_heads, hidden_dim=128):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
+        self.hidden_dim = hidden_dim
         
         # Time embedding MLP - output to hidden_dim
         self.time_embed = nn.Sequential(
@@ -105,19 +108,22 @@ class AttentionDenoiser(nn.Module):
         # Node projection
         self.node_proj = nn.Linear(embed_dim, hidden_dim)
         
-        # Per-pair refinement network
-        self.denoise_mlp = nn.Sequential(
+        # Attention generation network: takes noisy attention + node pair features
+        # and predicts the clean attention (or noise, depending on training objective)
+        self.attn_gen = nn.Sequential(
             nn.Linear(1 + 2 * hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, num_heads)  # Output attention for all heads
         )
     
     def forward(self, noisy_attn, node_embeddings, t):
         """
+        Denoise attention matrix conditioned on node embeddings.
+        
         Args:
             noisy_attn: Noisy attention [H, N, N]
             node_embeddings: Node embeddings [N, D]
@@ -132,7 +138,7 @@ class AttentionDenoiser(nn.Module):
         if t.dim() == 0:
             t = t.unsqueeze(0)
         t_emb = get_timestep_embedding(t, self.embed_dim)  # [1, D]
-        t_emb = self.time_embed(t_emb).squeeze(0)  # [D]
+        t_emb = self.time_embed(t_emb).squeeze(0)  # [hidden_dim]
         
         # Project node embeddings
         node_proj = self.node_proj(node_embeddings)  # [N, hidden_dim]
@@ -142,54 +148,62 @@ class AttentionDenoiser(nn.Module):
         node_j = node_proj.unsqueeze(0).expand(N, -1, -1)  # [N, N, hidden_dim]
         
         # Broadcast time embedding
-        t_emb_expanded = t_emb.unsqueeze(0).unsqueeze(0).expand(N, N, -1)  # [N, N, D]
+        t_emb_expanded = t_emb.unsqueeze(0).unsqueeze(0).expand(N, N, -1)  # [N, N, hidden_dim]
         
-        # Reshape for batch processing all heads at once
-        noisy_attn_flat = noisy_attn.reshape(H * N * N, 1)  # [H*N*N, 1]
+        # Average noisy attention across heads for conditioning
+        noisy_attn_avg = noisy_attn.mean(dim=0, keepdim=False)  # [N, N]
         
-        # Replicate node embeddings for H heads
-        node_i_rep = node_i.unsqueeze(0).expand(H, -1, -1, -1).reshape(H * N * N, -1)  # [H*N*N, hidden_dim]
-        node_j_rep = node_j.unsqueeze(0).expand(H, -1, -1, -1).reshape(H * N * N, -1)  # [H*N*N, hidden_dim]
-        t_emb_rep = t_emb_expanded.unsqueeze(0).expand(H, -1, -1, -1).reshape(H * N * N, -1)  # [H*N*N, D]
-        
-        # Combine features for all pairs and heads in single batch
+        # Combine features for each pair
         combined = torch.cat([
-            noisy_attn_flat,  # [H*N*N, 1]
-            node_i_rep,  # [H*N*N, hidden_dim]
-            node_j_rep + t_emb_rep  # [H*N*N, hidden_dim]
-        ], dim=-1)  # [H*N*N, 1 + 2*hidden_dim]
+            noisy_attn_avg.unsqueeze(-1),  # [N, N, 1]
+            node_i,  # [N, N, hidden_dim]
+            node_j + t_emb_expanded  # [N, N, hidden_dim]
+        ], dim=-1)  # [N, N, 1 + 2*hidden_dim]
         
-        # Refine attention scores in one pass
-        delta = self.denoise_mlp(combined).squeeze(-1)  # [H*N*N]
-        delta = delta.reshape(H, N, N)
+        # Generate attention for all heads at once
+        attn_out = self.attn_gen(combined)  # [N, N, H]
+        attn_out = attn_out.permute(2, 0, 1)  # [H, N, N]
         
         # Residual connection
-        return noisy_attn + delta
+        return noisy_attn + attn_out
+    
+    def generate_initial_attention(self, node_embeddings):
+        """
+        Generate initial attention from node embeddings (used as diffusion target).
+        Uses simple dot-product similarity as a baseline.
+        
+        Args:
+            node_embeddings: [N, D]
+        
+        Returns:
+            Initial attention scores [H, N, N] (before softmax)
+        """
+        N = node_embeddings.size(0)
+        
+        # Project and compute pairwise similarity
+        node_proj = self.node_proj(node_embeddings)  # [N, hidden_dim]
+        
+        # Compute cosine similarity as base attention
+        node_norm = F.normalize(node_proj, p=2, dim=-1)
+        base_attn = torch.mm(node_norm, node_norm.t())  # [N, N]
+        
+        # Expand to all heads
+        return base_attn.unsqueeze(0).expand(self.num_heads, -1, -1)  # [H, N, N]
 
 
 def attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index, batch, tau=0.2):
     """
     Compute attention improvement loss to encourage better structural associations.
-    
-    Args:
-        node_embeddings: Initial node embeddings [N, D]
-        denoised_embeddings: Embeddings after QKV transformation [N, D]
-        edge_index: Edge indices [2, E]
-        batch: Batch assignment for each node [N]
-        tau: Temperature for sigmoid
     """
-    # Normalize embeddings
     node_emb_normed = F.normalize(node_embeddings, p=2, dim=-1)
     denoised_emb_normed = F.normalize(denoised_embeddings, p=2, dim=-1)
     
     src, dst = edge_index
     
-    # Compute similarity scores for connected nodes
     initial_scores = (node_emb_normed[src] * node_emb_normed[dst]).sum(-1)
     final_scores = (denoised_emb_normed[src] * denoised_emb_normed[dst]).sum(-1)
     
-    # Compute per-graph threshold as mean initial score
-    edge_batch = batch[src]  # batch assignment for each edge
+    edge_batch = batch[src]
     num_graphs = batch.max().item() + 1
     
     with torch.no_grad():
@@ -199,50 +213,30 @@ def attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index,
             if mask.sum() > 0:
                 threshold[mask] = initial_scores[mask].mean()
     
-    # Loss: encourage final scores to be higher than threshold
     loss = F.relu(threshold - final_scores).mean()
-    
     return loss
 
 
 def structure_reconstruction_loss(node_embeddings, edge_index, batch):
     """
-    Compute structure reconstruction loss by predicting adjacency matrix
-    from node embeddings using self dot product + sigmoid.
-    
-    Vectorized implementation for efficiency.
-    
-    Args:
-        node_embeddings: Node embeddings after first transformer layer [N, D]
-        edge_index: Original edge indices [2, E]
-        batch: Batch assignment for each node [N]
-    
-    Returns:
-        BCE loss between predicted and original adjacency
+    Compute structure reconstruction loss.
     """
     device = node_embeddings.device
     num_nodes = node_embeddings.size(0)
     
-    # Normalize embeddings for numerical stability
     node_emb_normed = F.normalize(node_embeddings, p=2, dim=-1)
     
-    # Sample negative edges (non-connected node pairs within same graph)
     src, dst = edge_index
     num_pos = edge_index.size(1)
     
-    # Positive edge predictions (connected pairs)
     pos_scores = (node_emb_normed[src] * node_emb_normed[dst]).sum(dim=-1)
     pos_pred = torch.sigmoid(pos_scores)
     
-    # Sample negative edges: random pairs within the same graph
-    # Use ~2x negative samples for balance
     num_neg = min(num_pos * 2, num_nodes * 10)
     
-    # Random node indices
     neg_src = torch.randint(0, num_nodes, (num_neg,), device=device)
     neg_dst = torch.randint(0, num_nodes, (num_neg,), device=device)
     
-    # Keep only pairs in the same graph and not self-loops
     same_graph = batch[neg_src] == batch[neg_dst]
     not_self = neg_src != neg_dst
     valid_neg = same_graph & not_self
@@ -250,8 +244,6 @@ def structure_reconstruction_loss(node_embeddings, edge_index, batch):
     neg_src = neg_src[valid_neg]
     neg_dst = neg_dst[valid_neg]
     
-    # Filter out actual edges (optional but more accurate)
-    # Create edge set for fast lookup
     edge_set = src * num_nodes + dst
     neg_edge_ids = neg_src * num_nodes + neg_dst
     is_not_edge = ~torch.isin(neg_edge_ids, edge_set)
@@ -262,107 +254,90 @@ def structure_reconstruction_loss(node_embeddings, edge_index, batch):
     if neg_src.size(0) == 0:
         return torch.tensor(0.0, device=device)
     
-    # Negative edge predictions (non-connected pairs)
     neg_scores = (node_emb_normed[neg_src] * node_emb_normed[neg_dst]).sum(dim=-1)
     neg_pred = torch.sigmoid(neg_scores)
     
-    # BCE loss: positive edges should be 1, negative should be 0
     pos_loss = F.binary_cross_entropy(pos_pred, torch.ones_like(pos_pred))
     neg_loss = F.binary_cross_entropy(neg_pred, torch.zeros_like(neg_pred))
     
     return (pos_loss + neg_loss) / 2
 
 
-# Graph Multi-Head Attention with Diffusion
-class GraphMultiHeadAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads, dropout, use_diffusion=False, num_diff_steps=10):
+# Graph Multi-Head Attention with Diffusion-Generated Attention
+class DiffusionAttention(nn.Module):
+    """
+    Multi-head attention where the attention matrix is generated via diffusion
+    instead of Q*K^T computation.
+    """
+    def __init__(self, embed_dim, num_heads, dropout, num_diff_steps=10):
         super().__init__()
         assert embed_dim % num_heads == 0
 
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
-        self.use_diffusion = use_diffusion
         self.num_diff_steps = num_diff_steps
 
-        self.W_q = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.W_k = nn.Linear(embed_dim, embed_dim, bias=False)
+        # Only need V projection - attention is generated via diffusion
         self.W_v = nn.Linear(embed_dim, embed_dim, bias=False)
-
         self.out_proj = nn.Linear(embed_dim, embed_dim)
         self.dropout = nn.Dropout(dropout)
         
-        # Diffusion components
-        if use_diffusion:
-            self.denoiser = AttentionDenoiser(embed_dim, num_heads)
-            self.scheduler = DiffusionScheduler(num_timesteps=1000)
-
-    def compute_base_attention(self, x):
-        """Compute the base attention scores from Q and K."""
-        N = x.size(0)
-        Q = self.W_q(x).view(N, self.num_heads, self.head_dim).transpose(0, 1)
-        K = self.W_k(x).view(N, self.num_heads, self.head_dim).transpose(0, 1)
-        V = self.W_v(x).view(N, self.num_heads, self.head_dim).transpose(0, 1)
-        
-        # Compute raw attention scores
-        scores = torch.einsum("hnd,hmd->hnm", Q, K) / np.sqrt(self.head_dim)
-        
-        return Q, K, V, scores
+        # Diffusion components for attention generation
+        self.attn_generator = AttentionGenerator(embed_dim, num_heads)
+        self.scheduler = DiffusionScheduler(num_timesteps=1000)
 
     def forward(self, x, edge_index, return_qkv=False):
         N = x.size(0)
-        Q, K, V, scores = self.compute_base_attention(x)
         
-        # Store QKV embeddings for attention improvement loss
-        qkv_embeddings = (Q + K + V).mean(dim=0).view(N, -1)
+        # Compute V
+        V = self.W_v(x).view(N, self.num_heads, self.head_dim).transpose(0, 1)  # [H, N, head_dim]
         
-        # Make diagonal zero (no self-attention)
-        diag_mask = torch.eye(N, device=scores.device).bool()
-        scores = scores.masked_fill(diag_mask.unsqueeze(0), float('-inf'))
+        # Generate attention via diffusion
+        diag_mask = torch.eye(N, device=x.device).bool()
         
-        if self.use_diffusion and self.training:
-            # During training: use diffusion to refine attention
-            # Sample random timestep
+        if self.training:
+            # During training: sample timestep and denoise
             t = torch.randint(0, self.num_diff_steps, (1,), device=x.device)
             
-            # Get base attention (before softmax) - this is what we want to denoise
-            base_attn = scores.clone()
+            # Start from initial attention based on node similarity
+            base_attn = self.attn_generator.generate_initial_attention(x)  # [H, N, N]
             
-            # Add noise to attention scores
+            # Add noise
             noise = torch.randn_like(base_attn)
             noisy_attn = self.scheduler.add_noise(base_attn, t, noise)
             
-            # Denoise the attention
-            denoised_attn = self.denoiser(noisy_attn, x, t)
+            # Denoise
+            denoised_attn = self.attn_generator(noisy_attn, x, t)
             
-            # Mask diagonal again after denoising
+            # Mask diagonal (no self-attention)
             denoised_attn = denoised_attn.masked_fill(diag_mask.unsqueeze(0), float('-inf'))
             
-            # Use denoised attention
             attn_weights = torch.softmax(denoised_attn, dim=-1)
-        elif self.use_diffusion and not self.training:
-            # During inference: run full denoising process
-            attn = scores.clone()
+        else:
+            # During inference: iterative denoising from noise
+            # Start from pure noise
+            attn = torch.randn(self.num_heads, N, N, device=x.device)
             
-            # Iterative denoising from T to 0
+            # Iterative denoising
             for t_val in reversed(range(self.num_diff_steps)):
                 t = torch.tensor([t_val], device=x.device)
-                attn = self.denoiser(attn, x, t)
+                attn = self.attn_generator(attn, x, t)
             
             # Mask diagonal
             attn = attn.masked_fill(diag_mask.unsqueeze(0), float('-inf'))
             attn_weights = torch.softmax(attn, dim=-1)
-        else:
-            # No diffusion
-            attn_weights = torch.softmax(scores, dim=-1)
         
         attn_weights = self.dropout(attn_weights)
 
+        # Apply attention to values
         out = torch.einsum("hnm,hmd->hnd", attn_weights, V)
         out = out.transpose(0, 1).contiguous().view(N, self.embed_dim)
         
         if return_qkv:
-            return self.out_proj(out), qkv_embeddings
+            # Return V embeddings for auxiliary losses (no Q, K in this version)
+            v_emb = V.mean(dim=0).view(N, -1)
+            return self.out_proj(out), v_emb
         return self.out_proj(out)
 
 
@@ -370,7 +345,10 @@ class GraphMultiHeadAttention(nn.Module):
 class GraphTransformerLayer(nn.Module):
     def __init__(self, dim, heads, dropout, use_diffusion=False, num_diff_steps=10):
         super().__init__()
-        self.attn = GraphMultiHeadAttention(dim, heads, dropout, use_diffusion, num_diff_steps)
+        if use_diffusion:
+            self.attn = DiffusionAttention(dim, heads, dropout, num_diff_steps)
+        else:
+            self.attn = StandardGraphAttention(dim, heads, dropout)
         self.norm1 = nn.LayerNorm(dim)
         self.ffn = nn.Sequential(
             nn.Linear(dim, 4 * dim),
@@ -382,7 +360,6 @@ class GraphTransformerLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, edge_index, return_qkv=False):
-        # print("Layer input:", x.shape)
         if return_qkv:
             attn_out, qkv_emb = self.attn(self.norm1(x), edge_index, return_qkv=True)
             x = x + self.dropout(attn_out)
@@ -392,6 +369,47 @@ class GraphTransformerLayer(nn.Module):
             x = x + self.dropout(self.attn(self.norm1(x), edge_index))
             x = x + self.dropout(self.ffn(self.norm2(x)))
             return x
+
+
+# Standard attention (no diffusion) for comparison
+class StandardGraphAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads, dropout):
+        super().__init__()
+        assert embed_dim % num_heads == 0
+
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+
+        self.W_q = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.W_k = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.W_v = nn.Linear(embed_dim, embed_dim, bias=False)
+
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, edge_index, return_qkv=False):
+        N = x.size(0)
+        Q = self.W_q(x).view(N, self.num_heads, self.head_dim).transpose(0, 1)
+        K = self.W_k(x).view(N, self.num_heads, self.head_dim).transpose(0, 1)
+        V = self.W_v(x).view(N, self.num_heads, self.head_dim).transpose(0, 1)
+        
+        scores = torch.einsum("hnd,hmd->hnm", Q, K) / np.sqrt(self.head_dim)
+        
+        # Mask diagonal
+        diag_mask = torch.eye(N, device=scores.device).bool()
+        scores = scores.masked_fill(diag_mask.unsqueeze(0), float('-inf'))
+        
+        attn_weights = torch.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        out = torch.einsum("hnm,hmd->hnd", attn_weights, V)
+        out = out.transpose(0, 1).contiguous().view(N, self.embed_dim)
+        
+        if return_qkv:
+            qkv_emb = (Q + K + V).mean(dim=0).view(N, -1)
+            return self.out_proj(out), qkv_emb
+        return self.out_proj(out)
 
 
 # Graph Transformer
@@ -410,7 +428,7 @@ class GraphTransformer(nn.Module):
 
     def forward(self, x, edge_index, batch, return_attn_loss=False):
         x = self.input_proj(x)
-        initial_embeddings = x.clone()  # Store initial embeddings for attention loss
+        initial_embeddings = x.clone()
         
         all_qkv_embeddings = []
         first_layer_embeddings = None
@@ -419,19 +437,16 @@ class GraphTransformer(nn.Module):
             if return_attn_loss:
                 x, qkv_emb = layer(x, edge_index, return_qkv=True)
                 all_qkv_embeddings.append(qkv_emb)
-                # Store embeddings after first transformer layer for structure loss
                 if i == 0:
                     first_layer_embeddings = x.clone()
             else:
                 x = layer(x, edge_index)
 
-        # graph-level pooling
         pooled = global_mean_pool(x, batch)
         out = self.output_proj(pooled)
         
         if return_attn_loss:
-            # Average QKV embeddings across layers as denoised embeddings
-            denoised_embeddings = all_qkv_embeddings  # torch.stack(all_qkv_embeddings, dim=0).mean(dim=0)
+            denoised_embeddings = all_qkv_embeddings
             return out, initial_embeddings, denoised_embeddings, first_layer_embeddings
         return out
 
@@ -447,15 +462,12 @@ def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.0, struct_l
         data = data.to(device)
         optimizer.zero_grad()
         
-        # Forward pass with attention loss components
         out, initial_emb, denoised_emb, first_layer_emb = model(
             data.x.float(), data.edge_index, data.batch, return_attn_loss=True
         )
         
-        # Task loss (binary cross-entropy)
         task_loss = F.binary_cross_entropy_with_logits(out, data.y)
         
-        # Attention improvement loss (computed for each layer separately and summed)
         attn_loss = torch.tensor(0.0, device=device)
         if attn_loss_weight > 0:
             input_emb = initial_emb
@@ -463,16 +475,14 @@ def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.0, struct_l
                 attn_loss = attn_loss + attention_improvement_loss(
                     input_emb, layer_qkv_emb, data.edge_index, data.batch
                 )
-                input_emb = layer_qkv_emb  # Update input for next layer
+                input_emb = layer_qkv_emb
         
-        # Structure reconstruction loss
         struct_loss = torch.tensor(0.0, device=device)
         if struct_loss_weight > 0 and first_layer_emb is not None:
             struct_loss = structure_reconstruction_loss(
                 first_layer_emb, data.edge_index, data.batch
             )
         
-        # Combined loss
         loss = task_loss + attn_loss_weight * attn_loss + struct_loss_weight * struct_loss
         
         loss.backward()
@@ -505,7 +515,6 @@ def evaluate(model, loader, device):
     return f1_score(y.numpy(), pred.numpy(), average="micro")
 
 
-# Driver
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -529,7 +538,6 @@ def main(args):
         use_diffusion=args.use_diffusion,
         num_diff_steps=args.num_diff_steps
     ).to(device)
-
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=5e-4)
 
@@ -559,7 +567,6 @@ def main(args):
     print(f"\nTest Micro-F1: {test_f1:.4f}", flush=True)
 
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=200)
@@ -573,9 +580,9 @@ if __name__ == "__main__":
     parser.add_argument("--struct_loss_weight", type=float, default=0,
                         help="Weight for structure reconstruction loss")
     parser.add_argument("--use_diffusion", action="store_true",
-                        help="Use diffusion pipeline for attention prediction")
+                        help="Use diffusion to generate attention (instead of Q*K)")
     parser.add_argument("--num_diff_steps", type=int, default=10,
-                        help="Number of diffusion steps for attention denoising")
+                        help="Number of diffusion steps for attention generation")
     args = parser.parse_args()
     print(args.__dict__, flush=True)
     main(args)
