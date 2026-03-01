@@ -5,8 +5,16 @@ from collections.abc import Mapping
 from typing import Any
 
 import random
+import sys
+import os
 import numpy as np
 import torch
+
+# Ensure the repository root is on the path so that graph_transforms can be
+# imported from inside the graphormer_hf package sub-directory.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from transformers.utils import is_cython_available, requires_backends
 from torch_geometric.data import Data
@@ -101,6 +109,7 @@ CACHED = None
 # @lru_cache(maxsize=512)
 def preprocess_item(item, config, keep_features=True, split="train"):
     global CACHED
+    gnn_transform = getattr(config, "gnn_transform", "none") if config else "none"
     if not (config.augment_edges and split == "train") and (
             not config.create_subgraph) and (config.dataset_name
                                              != "pcqm4mv2") and CACHED is not None:
@@ -121,11 +130,84 @@ def preprocess_item(item, config, keep_features=True, split="train"):
 
     edge_index = np.asarray(item["edge_index"], dtype=np.int64)
 
+    num_nodes = item["x"].shape[0]
+
+    # --- Apply GNN structural transform (controlled by config.gnn_transform) ---
+    if gnn_transform in ("random_edges", "bounded_diameter", "relay_nodes"):
+        from graph_transforms import (
+            add_random_edges,
+            add_edges_bounded_diameter,
+            add_relay_nodes,
+        )
+        ei_t = torch.from_numpy(edge_index)
+
+        if gnn_transform == "random_edges":
+            # Add random shortcut edges (≈10 % of existing edges)
+            ei_t = add_random_edges(ei_t, num_nodes)
+            n_new = ei_t.shape[1] - edge_index.shape[1]
+            edge_index = ei_t.numpy()
+            if n_new > 0:
+                new_ea = np.ones(
+                    (n_new, edge_attr.shape[-1] if edge_attr.ndim > 1 else 1),
+                    dtype=edge_attr.dtype,
+                )
+                if edge_attr.ndim == 1:
+                    new_ea = new_ea.reshape(-1)
+                edge_attr = np.concatenate([edge_attr, new_ea], axis=0)
+
+        elif gnn_transform == "bounded_diameter":
+            # Deterministically add edges so the graph diameter < 6
+            ei_t = add_edges_bounded_diameter(ei_t, num_nodes, max_diameter=5)
+            n_new = ei_t.shape[1] - edge_index.shape[1]
+            edge_index = ei_t.numpy()
+            if n_new > 0:
+                new_ea = np.ones(
+                    (n_new, edge_attr.shape[-1] if edge_attr.ndim > 1 else 1),
+                    dtype=edge_attr.dtype,
+                )
+                if edge_attr.ndim == 1:
+                    new_ea = new_ea.reshape(-1)
+                edge_attr = np.concatenate([edge_attr, new_ea], axis=0)
+
+        elif gnn_transform == "relay_nodes":
+            # Insert virtual relay nodes between distant node pairs
+            x_t = torch.from_numpy(node_feature)
+            ea_t = torch.from_numpy(edge_attr)
+            x_t, ei_t, ea_t = add_relay_nodes(x_t, ei_t, ea_t)
+            n_relay = x_t.shape[0] - num_nodes
+            node_feature = x_t.numpy()
+            edge_index = ei_t.numpy()
+            edge_attr = ea_t.numpy()
+            if n_relay > 0:
+                # Extend y and split masks; relay nodes are excluded from loss
+                y = item["y"]
+                if isinstance(y, torch.Tensor):
+                    item["y"] = torch.cat(
+                        [y, torch.full((n_relay,), -1, dtype=y.dtype)]
+                    )
+                else:
+                    y_arr = np.asarray(y)
+                    item["y"] = np.concatenate(
+                        [y_arr, np.full((n_relay,) + y_arr.shape[1:], -1, dtype=y_arr.dtype)]
+                    )
+                for _mkey in ("train_mask", "val_mask", "test_mask"):
+                    if _mkey in item.keys():
+                        _m = item[_mkey]
+                        if isinstance(_m, torch.Tensor):
+                            item[_mkey] = torch.cat(
+                                [_m, torch.zeros(n_relay, dtype=_m.dtype)]
+                            )
+                        else:
+                            _m_arr = np.asarray(_m, dtype=bool)
+                            item[_mkey] = torch.from_numpy(
+                                np.concatenate([_m_arr, np.zeros(n_relay, dtype=bool)])
+                            )
+            num_nodes = node_feature.shape[0]
+
+    # Recompute input_nodes from (possibly modified) node_feature
     input_nodes = node_feature
     if config and config.dataset_name in ["pcqm4mv2"]:
         input_nodes = convert_to_single_emb(node_feature) + 1
-
-    num_nodes = item["x"].shape[0]
 
     if len(edge_attr.shape) == 1:
         edge_attr = edge_attr[:, None]
@@ -144,6 +226,13 @@ def preprocess_item(item, config, keep_features=True, split="train"):
         input_edges = np.zeros([num_nodes, num_nodes, 1, attn_edge_type.shape[-1]], dtype=np.int64)
         # np.fill_diagonal(input_edges, 1)
     attn_bias = np.zeros([num_nodes + 1, num_nodes + 1], dtype=np.single)  # with graph token
+
+    # Add Laplacian spectral positional encodings to attention bias
+    if gnn_transform == "spectral_bias":
+        from graph_transforms import add_spectral_attn_bias
+        attn_bias = add_spectral_attn_bias(
+            attn_bias, torch.from_numpy(edge_index), num_nodes
+        )
 
     # combine
     item["input_nodes"] = input_nodes + 1  # we shift all indices by one for padding
