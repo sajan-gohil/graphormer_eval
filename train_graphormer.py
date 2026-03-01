@@ -88,6 +88,9 @@ parser.add_argument("--freeze_pretrained_encoder", type=str, default=None, help=
 parser.add_argument("--freeze_pretrained_diffusion", type=str, default=None, help="Freeze everything till diffusion model and set weights from given path")
 parser.add_argument("--mask_random_input_prob", type=float, default=0.0, help="Randomly mask this fraction of input node features during diffusion training")
 
+parser.add_argument("--gnn_transform", type=str, default="none",
+                    choices=["none", "random_edges", "bounded_diameter", "relay_nodes", "spectral_bias"],
+                    help="Graph structural transform: none | random_edges | bounded_diameter | relay_nodes | spectral_bias")
 parser.add_argument("--learning_rate", type=float, default=2e-5, help="global learning_rate")
 
 
