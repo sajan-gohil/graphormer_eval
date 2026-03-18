@@ -919,7 +919,7 @@ def phase4_5_train_hypergraph(denoiser, sched, train_loader, val_loader, test_lo
     backbone = HypergraphGraphTransformer().to(DEVICE)
     # Initialize encoder from Phase 1 weights if available
     if p1_state_dict is not None:
-        enc_state = {k.replace("encoder.", ""): v for k, v in p1_state_dict.items()
+        enc_state = {k[len("encoder."):]: v for k, v in p1_state_dict.items()
                      if k.startswith("encoder.")}
         backbone.encoder.load_state_dict(enc_state)
         print("  Loaded Phase 1 encoder weights")
@@ -1245,7 +1245,7 @@ def phase5_train_gnn_with_proxies(denoiser, sched,
     backbone = ProxyGNN().to(DEVICE)
     # Initialize node encoder from Phase 1 pretrained weights
     if p1_state_dict is not None:
-        enc_state = {k.replace("encoder.", ""): v for k, v in p1_state_dict.items()
+        enc_state = {k[len("encoder."):]: v for k, v in p1_state_dict.items()
                      if k.startswith("encoder.")}
         backbone.node_encoder.load_state_dict(enc_state)
         print("  Loaded Phase 1 encoder weights into Phase 5 GNN node_encoder")

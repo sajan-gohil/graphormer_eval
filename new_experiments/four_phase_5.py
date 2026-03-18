@@ -34,15 +34,15 @@ from torchmetrics.classification import MultilabelAveragePrecision
 # ================================================================
 # CONFIG
 # ================================================================
-HIDDEN_DIM  = 256
-NUM_HEADS   = 8
+HIDDEN_DIM  = 128
+NUM_HEADS   = 4
 NUM_LAYERS  = 4
 NUM_PROXY   = 64
-BATCH_SIZE  = 32
+BATCH_SIZE  = 64
 OUTPUT_DIM  = 10
 T_DIFF      = 20        # single source-of-truth for diffusion timesteps
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
-SAVE_DIR    = "./checkpoints4"
+SAVE_DIR    = "./checkpoints6"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 print(f"Using device: {DEVICE}")
@@ -1456,7 +1456,7 @@ if __name__ == "__main__":
     else:
         proxy_pairs, sample_improved = phase2_optimize_proxies(
             p1_backbone, train_ds, subset_fraction=1.0,
-            num_proxy=NUM_PROXY, max_steps=1000, proxy_lr=1e-3, num_repeats=5,
+            num_proxy=NUM_PROXY, max_steps=1000, proxy_lr=1e-3, num_repeats=2,
         )
 
     # ── Phase 2.5 ────────────────────────────────────────────────
