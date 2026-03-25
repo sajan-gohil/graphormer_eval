@@ -38,7 +38,7 @@ HIDDEN_DIM  = 128
 NUM_HEADS   = 4
 NUM_LAYERS  = 4
 NUM_PROXY   = 64
-BATCH_SIZE  = 64
+BATCH_SIZE  = 512
 OUTPUT_DIM  = 10
 T_DIFF      = 20        # single source-of-truth for diffusion timesteps
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
@@ -281,35 +281,60 @@ def phase1_train(epochs=500, lr=3e-5, weight_decay=1e-5, patience=50):
 # ================================================================
 
 def _count_correct_classes(logits, labels):
-    """Count number of classes where prediction matches label (threshold 0.5)."""
+    """Count number of correctly predicted classes per sample (threshold 0.5)."""
     preds = (torch.sigmoid(logits) > 0.5).float()
-    return int((preds == labels).sum().item())
+    return (preds == labels).sum(dim=1)
 
 
-def optimize_single_graph(model, batch, num_proxy=NUM_PROXY, max_steps=1000, lr=1e-3):
-    loss_fn = nn.BCEWithLogitsLoss()
-    proxy   = nn.Parameter(torch.randn(1, num_proxy, model.hidden_dim, device=DEVICE) * 0.02)
-    opt     = torch.optim.Adam([proxy], lr=lr)
+def _per_sample_bce_loss(logits, labels):
+    """Per-sample BCE loss averaged over labels."""
+    return F.binary_cross_entropy_with_logits(logits, labels, reduction="none").mean(dim=1)
+
+
+def optimize_batch_graphs(model, batch, num_proxy=NUM_PROXY, max_steps=1000, lr=1e-3):
+    """
+    Jointly optimize one proxy tensor per graph in a mini-batch.
+
+    Returns per-sample best proxy and stats, so filtering remains sample-wise.
+    """
+    B = batch.y.size(0)
+    proxy = nn.Parameter(
+        torch.randn(B, num_proxy, model.hidden_dim, device=DEVICE) * 0.02
+    )
+    opt = torch.optim.Adam([proxy], lr=lr)
 
     with torch.no_grad():
         base_logits = model(batch)[0]
-        base_loss = loss_fn(base_logits, batch.y).item()
+        base_loss = _per_sample_bce_loss(base_logits, batch.y)
         base_correct = _count_correct_classes(base_logits, batch.y)
 
-    best_loss, best_proxy = base_loss, proxy.data.clone()
-    best_correct = base_correct
+    best_loss = base_loss.clone()
+    best_proxy = proxy.detach().clone()
+    best_correct = base_correct.clone()
+
     for _ in range(max_steps):
         opt.zero_grad()
         logits, _ = model(batch, proxy_embeddings=proxy)
-        loss = loss_fn(logits, batch.y)
+        per_sample_loss = _per_sample_bce_loss(logits, batch.y)
+        loss = per_sample_loss.mean()
         loss.backward()
         opt.step()
-        if loss.item() < best_loss:
-            best_loss, best_proxy = loss.item(), proxy.data.clone()
-            with torch.no_grad():
-                best_correct = _count_correct_classes(logits, batch.y)
 
-    return best_proxy.detach(), base_loss, best_loss, base_correct, best_correct
+        with torch.no_grad():
+            improved = per_sample_loss < best_loss
+            if improved.any():
+                best_loss[improved] = per_sample_loss[improved]
+                best_proxy[improved] = proxy.detach()[improved]
+                cur_correct = _count_correct_classes(logits, batch.y)
+                best_correct[improved] = cur_correct[improved]
+
+    return (
+        best_proxy.detach(),
+        base_loss.detach(),
+        best_loss.detach(),
+        base_correct.detach(),
+        best_correct.detach(),
+    )
 
 
 def phase2_optimize_proxies(backbone, train_dataset,
@@ -324,8 +349,12 @@ def phase2_optimize_proxies(backbone, train_dataset,
     NOTE: proxy_pairs will have len = num_repeats * len(train_dataset).
           OracleProxyDataset only uses the first len(train_dataset) entries.
     """
+    opt_batch_size = BATCH_SIZE
     print("\n" + "=" * 60)
-    print(f"PHASE 2: Per-Sample Proxy Optimisation  ({num_repeats}× per graph)")
+    print(
+        f"PHASE 2: Per-Sample Proxy Optimisation  "
+        f"({num_repeats}× per graph, batch={opt_batch_size})"
+    )
     print("=" * 60)
 
     if save_path is None:
@@ -334,7 +363,7 @@ def phase2_optimize_proxies(backbone, train_dataset,
     _freeze(backbone)
     backbone.eval()
 
-    single_loader = DataLoader(train_dataset, batch_size=1, shuffle=False)
+    batch_loader = DataLoader(train_dataset, batch_size=opt_batch_size, shuffle=False)
     n_total       = int(len(train_dataset) * subset_fraction)
     proxy_pairs   = []
     improvements  = []
@@ -342,44 +371,58 @@ def phase2_optimize_proxies(backbone, train_dataset,
     sample_improved = [0] * n_total
 
     for rep in range(num_repeats):
-        for idx, batch in enumerate(tqdm(single_loader, total=n_total,
-                                         desc=f"Proxy opt rep {rep+1}/{num_repeats}")):
-            if idx >= n_total:
+        processed = 0
+        pbar = tqdm(total=n_total//opt_batch_size, desc=f"Proxy opt rep {rep+1}/{num_repeats}")
+        for batch in batch_loader:
+            if processed >= n_total:
                 break
             batch = batch.to(DEVICE)
             with torch.no_grad():
                 dense_x, dense_mask = backbone.encode_dense(batch)
 
             best_proxy, base_loss, opt_loss, base_correct, best_correct = \
-                optimize_single_graph(
+                optimize_batch_graphs(
                     backbone, batch, num_proxy=num_proxy,
                     max_steps=max_steps, lr=proxy_lr
                 )
             improvement = (base_loss - opt_loss) / (base_loss + 1e-8)
-            improvements.append(improvement)
+            improvements.extend(improvement.cpu().tolist())
+            batch_size_cur = batch.y.size(0)
+            for j in range(len(batch.y)):
+                sample_idx = processed + j
+                base_loss_j = float(base_loss[j].item())
+                opt_loss_j = float(opt_loss[j].item())
+                base_correct_j = int(base_correct[j].item())
+                best_correct_j = int(best_correct[j].item())
 
-            # Only keep sample if significant improvement:
-            #   opt_loss < 0.005  OR  number of correct classes increased
-            is_significant = (opt_loss < 0.005) or (best_correct > base_correct)
-            if is_significant:
-                sample_improved[idx] = 1
-                proxy_pairs.append({
-                    "encoder_emb": dense_x.squeeze(0).cpu(),
-                    "mask":        dense_mask.squeeze(0).cpu(),
-                    "proxy_emb":   best_proxy.squeeze(0).cpu(),
-                    "base_loss":   base_loss,
-                    "opt_loss":    opt_loss,
-                    "sample_idx":  idx,
-                })
+                # Only keep sample if significant improvement:
+                #   opt_loss < 0.005  OR  number of correct classes increased
+                is_significant = (opt_loss_j < 0.005) or (best_correct_j > base_correct_j)
+                if is_significant:
+                    sample_improved[sample_idx] = 1
+                    proxy_pairs.append({
+                        "encoder_emb": dense_x[j].cpu(),
+                        "mask":        dense_mask[j].cpu(),
+                        "proxy_emb":   best_proxy[j].cpu(),
+                        "base_loss":   base_loss_j,
+                        "opt_loss":    opt_loss_j,
+                        "sample_idx":  sample_idx,
+                    })
 
-            if (idx + 1) % 200 == 0:
-                n_improved = sum(sample_improved[:idx+1])
+            processed += batch_size_cur
+            pbar.update(batch_size_cur)
+
+            if processed % 200 == 0:
+                n_improved = sum(sample_improved)
+                recent = improvements[-200:] if len(improvements) >= 200 else improvements
                 print(
-                    f"  [rep {rep+1} | {idx+1}/{n_total}] "
-                    f"Avg improvement: {np.mean(improvements[-200:]):.4f}  "
-                    f"Improved: {sum(i>0 for i in improvements[-200:])}/200  "
-                    f"Kept (significant): {n_improved}/{idx+1}"
+                    f"  [rep {rep+1} | {processed}/{n_total}] "
+                    f"Avg improvement: {np.mean(recent):.4f}  "
+                    f"Improved: {sum(i > 0 for i in recent)}/{len(recent)}  "
+                    f"Kept (significant, unique): {n_improved}/{n_total}"
                 )
+
+        pbar.close()
 
     _unfreeze(backbone)
     with open(save_path, "wb") as f:
@@ -968,8 +1011,9 @@ def phase4_5_train_hypergraph(denoiser, sched, train_loader, val_loader, test_lo
     backbone = HypergraphGraphTransformer().to(DEVICE)
     # Initialize encoder from Phase 1 weights if available
     if p1_state_dict is not None:
-        enc_state = {k.replace("encoder.", ""): v for k, v in p1_state_dict.items()
-                     if k.startswith("encoder.")}
+        prefix = "encoder."
+        enc_state = {k[len(prefix):]: v for k, v in p1_state_dict.items()
+                     if k.startswith(prefix)}
         backbone.encoder.load_state_dict(enc_state)
         print("  Loaded Phase 1 encoder weights")
     # Freeze encoder
@@ -1294,8 +1338,9 @@ def phase5_train_gnn_with_proxies(denoiser, sched,
     backbone = ProxyGNN().to(DEVICE)
     # Initialize node encoder from Phase 1 pretrained weights
     if p1_state_dict is not None:
-        enc_state = {k.replace("encoder.", ""): v for k, v in p1_state_dict.items()
-                     if k.startswith("encoder.")}
+        prefix = "encoder."
+        enc_state = {k[len(prefix):]: v for k, v in p1_state_dict.items()
+                     if k.startswith(prefix)}
         backbone.node_encoder.load_state_dict(enc_state)
         print("  Loaded Phase 1 encoder weights into Phase 5 GNN node_encoder")
     # Freeze encoder — only finetune GNN layers + head
