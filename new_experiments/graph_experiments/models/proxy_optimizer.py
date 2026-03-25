@@ -205,6 +205,48 @@ class ProxyOptimizer:
 
         return total_loss, task_loss, mmd_loss, logits
 
+    @staticmethod
+    def _count_class_corrections(baseline_probs, optimized_probs, labels, threshold=0.5):
+        """
+        Count how many classes were corrected by proxy optimization.
+
+        A class is "corrected" if:
+          - For a positive class (label=1): baseline sigmoid < 0.5, optimized >= 0.5
+          - For a negative class (label=0): baseline sigmoid >= 0.5, optimized < 0.5
+
+        Args:
+            baseline_probs: (N, C) baseline sigmoid probabilities.
+            optimized_probs: (N, C) optimized sigmoid probabilities.
+            labels: (N, C) binary ground truth.
+            threshold: decision threshold (default 0.5).
+
+        Returns:
+            dict with correction counts and details.
+        """
+        baseline_pred = (baseline_probs >= threshold).astype(int)
+        optimized_pred = (optimized_probs >= threshold).astype(int)
+
+        baseline_correct = (baseline_pred == labels)
+        optimized_correct = (optimized_pred == labels)
+
+        # Classes that went from wrong → right
+        newly_correct = (~baseline_correct & optimized_correct).sum()
+        # Classes that went from right → wrong
+        newly_wrong = (baseline_correct & ~optimized_correct).sum()
+
+        total_classes = labels.size
+        baseline_num_correct = baseline_correct.sum()
+        optimized_num_correct = optimized_correct.sum()
+
+        return {
+            'newly_correct': int(newly_correct),
+            'newly_wrong': int(newly_wrong),
+            'net_corrections': int(newly_correct) - int(newly_wrong),
+            'baseline_correct': int(baseline_num_correct),
+            'optimized_correct': int(optimized_num_correct),
+            'total_classes': int(total_classes),
+        }
+
     def optimize(self, batch, device, log_trajectory=False, log_every=50):
         """
         Run proxy optimization with multiple random restarts.
@@ -212,7 +254,7 @@ class ProxyOptimizer:
         Args:
             batch: PyG Batch object (single batch of graphs).
             device: torch device.
-            log_trajectory: If True, log loss/AP at every `log_every` iterations.
+            log_trajectory: If True, log loss at every `log_every` iterations.
             log_every: Logging frequency for trajectory.
 
         Returns:
@@ -220,8 +262,11 @@ class ProxyOptimizer:
                 'best_B': (num_graphs, M, d) optimized proxy embeddings
                 'baseline_loss': float, loss without proxies
                 'optimized_loss': float, best loss with proxies
-                'baseline_ap': float, AP without proxies
-                'optimized_ap': float, best AP with proxies
+                'baseline_probs': np.ndarray (N, C) baseline sigmoid probs
+                'optimized_probs': np.ndarray (N, C) optimized sigmoid probs
+                'labels': np.ndarray (N, C) ground truth binary labels
+                'loss_improvement': float, baseline_loss - optimized_loss
+                'class_corrections': dict with newly_correct, newly_wrong, etc.
                 'trajectory': list of dicts (if log_trajectory=True)
                 'final_mmd': float, MMD² at convergence
                 'init_mmd': float, MMD² at initialization
@@ -239,9 +284,6 @@ class ProxyOptimizer:
             baseline_loss = criterion(baseline_logits, batch.y.float()).item()
             baseline_probs = torch.sigmoid(baseline_logits).cpu().numpy()
             baseline_labels = batch.y.cpu().numpy()
-
-        from evaluation.metrics import compute_macro_ap
-        baseline_ap = compute_macro_ap(baseline_probs, baseline_labels)
 
         # --- Multiple random restarts ---
         best_result = None
@@ -271,18 +313,20 @@ class ProxyOptimizer:
 
                 opt.step()
 
-                # Trajectory logging
+                # Trajectory logging — use loss and class corrections, not degenerate AP
                 if log_trajectory and (step % log_every == 0 or step == self.num_iterations - 1):
                     with torch.no_grad():
-                        probs = torch.sigmoid(logits).cpu().numpy()
-                        labels = batch.y.cpu().numpy()
-                        step_ap = compute_macro_ap(probs, labels)
+                        step_probs = torch.sigmoid(logits).cpu().numpy()
+                        step_corrections = self._count_class_corrections(
+                            baseline_probs, step_probs, baseline_labels
+                        )
                         trajectory.append({
                             'step': step,
                             'total_loss': total_loss.item(),
                             'task_loss': task_loss.item(),
                             'mmd_loss': mmd_loss.item(),
-                            'ap': step_ap,
+                            'net_corrections': step_corrections['net_corrections'],
+                            'newly_correct': step_corrections['newly_correct'],
                         })
 
             # Evaluate this restart
@@ -290,11 +334,15 @@ class ProxyOptimizer:
                 final_total_loss, final_task_loss, final_mmd, final_logits = \
                     self._compute_loss(batch, B, h_init, batch_idx, criterion)
                 final_probs = torch.sigmoid(final_logits).cpu().numpy()
-                final_ap = compute_macro_ap(final_probs, baseline_labels)
                 final_mmd_val = final_mmd.item()
 
             if final_total_loss.item() < best_total_loss:
                 best_total_loss = final_total_loss.item()
+
+                # Class correction analysis
+                corrections = self._count_class_corrections(
+                    baseline_probs, final_probs, baseline_labels
+                )
 
                 # Compute diagnostics
                 proxy_norms = B.detach().norm(dim=-1)  # (B_graphs, M)
@@ -314,9 +362,11 @@ class ProxyOptimizer:
                     'best_B': B.detach().cpu(),
                     'baseline_loss': baseline_loss,
                     'optimized_loss': final_task_loss.item(),
-                    'baseline_ap': baseline_ap,
-                    'optimized_ap': final_ap,
-                    'ap_improvement': final_ap - baseline_ap,
+                    'loss_improvement': baseline_loss - final_task_loss.item(),
+                    'baseline_probs': baseline_probs,
+                    'optimized_probs': final_probs,
+                    'labels': baseline_labels,
+                    'class_corrections': corrections,
                     'trajectory': trajectory if log_trajectory else None,
                     'init_mmd': init_mmd,
                     'final_mmd': final_mmd_val,

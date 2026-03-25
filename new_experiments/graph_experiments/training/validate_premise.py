@@ -30,7 +30,9 @@ from data.peptides_func import get_peptides_func_loaders
 from models.transformer import GPSModel
 from models.proxy_optimizer import ProxyOptimizer
 from evaluation.metrics import compute_macro_ap, compute_per_class_ap, compute_correct_classes
+# compute_macro_ap is used for aggregated AP over the full subset (not per-graph)
 from torch_geometric.loader import DataLoader
+from utils.device import get_device
 
 
 def set_seed(seed):
@@ -187,6 +189,10 @@ def run_validation(config, checkpoint_path, device, M_values=(2, 4, 8, 16),
 
         graph_results = []
         diagnostics = []
+        # Collect raw predictions for aggregated AP computation
+        all_baseline_probs = []
+        all_optimized_probs = []
+        all_labels = []
         start_time = time.time()
 
         for i, idx in enumerate(selected_indices):
@@ -203,17 +209,28 @@ def run_validation(config, checkpoint_path, device, M_values=(2, 4, 8, 16),
                 log_every=50,
             )
 
+            # Collect raw predictions for aggregated AP
+            all_baseline_probs.append(result['baseline_probs'])
+            all_optimized_probs.append(result['optimized_probs'])
+            all_labels.append(result['labels'])
+
+            corrections = result['class_corrections']
+
             graph_results.append({
                 'graph_idx': idx,
                 'num_nodes': data.num_nodes,
                 'num_edges': data.num_edges,
                 'baseline_loss': result['baseline_loss'],
                 'optimized_loss': result['optimized_loss'],
-                'baseline_ap': result['baseline_ap'],
-                'optimized_ap': result['optimized_ap'],
-                'ap_improvement': result['ap_improvement'],
+                'loss_improvement': result['loss_improvement'],
                 'init_mmd': result['init_mmd'],
                 'final_mmd': result['final_mmd'],
+                'newly_correct': corrections['newly_correct'],
+                'newly_wrong': corrections['newly_wrong'],
+                'net_corrections': corrections['net_corrections'],
+                'baseline_correct': corrections['baseline_correct'],
+                'optimized_correct': corrections['optimized_correct'],
+                'total_classes': corrections['total_classes'],
             })
 
             if do_diagnostic:
@@ -247,49 +264,84 @@ def run_validation(config, checkpoint_path, device, M_values=(2, 4, 8, 16),
 
             if (i + 1) % 50 == 0:
                 elapsed = time.time() - start_time
-                mean_imp = np.mean([r['ap_improvement'] for r in graph_results])
+                # Report meaningful per-graph metrics: loss improvement + class corrections
+                mean_loss_imp = np.mean([r['loss_improvement'] for r in graph_results])
+                mean_net_corr = np.mean([r['net_corrections'] for r in graph_results])
+                # Also compute running aggregated AP
+                running_bl_probs = np.concatenate(all_baseline_probs, axis=0)
+                running_opt_probs = np.concatenate(all_optimized_probs, axis=0)
+                running_labels = np.concatenate(all_labels, axis=0)
+                running_bl_ap = compute_macro_ap(running_bl_probs, running_labels)
+                running_opt_ap = compute_macro_ap(running_opt_probs, running_labels)
                 print(f"  [{i+1}/{len(selected_indices)}] "
-                      f"Mean AP improvement: {mean_imp:.4f} | "
+                      f"Loss imp: {mean_loss_imp:.4f} | "
+                      f"Mean net corrections: {mean_net_corr:.2f} | "
+                      f"Aggregated AP: {running_bl_ap:.4f} → {running_opt_ap:.4f} | "
                       f"Time: {elapsed:.1f}s")
 
         # Final frozen verification
         verify_frozen(param_snapshot, model)
         elapsed_total = time.time() - start_time
 
-        # --- Aggregate results ---
-        baseline_aps = [r['baseline_ap'] for r in graph_results]
-        optimized_aps = [r['optimized_ap'] for r in graph_results]
-        improvements = [r['ap_improvement'] for r in graph_results]
+        # --- Aggregate predictions and compute AP over the full subset ---
+        agg_baseline_probs = np.concatenate(all_baseline_probs, axis=0)
+        agg_optimized_probs = np.concatenate(all_optimized_probs, axis=0)
+        agg_labels = np.concatenate(all_labels, axis=0)
+
+        aggregated_baseline_ap = compute_macro_ap(agg_baseline_probs, agg_labels)
+        aggregated_optimized_ap = compute_macro_ap(agg_optimized_probs, agg_labels)
+        aggregated_ap_improvement = aggregated_optimized_ap - aggregated_baseline_ap
+
+        # Per-class AP breakdown (aggregated)
+        from evaluation.metrics import compute_per_class_ap
+        baseline_per_class = compute_per_class_ap(agg_baseline_probs, agg_labels)
+        optimized_per_class = compute_per_class_ap(agg_optimized_probs, agg_labels)
+
+        # Per-graph correction stats
+        loss_improvements = [r['loss_improvement'] for r in graph_results]
+        net_corrections = [r['net_corrections'] for r in graph_results]
 
         summary = {
             'M': M,
             'num_graphs': len(graph_results),
-            'mean_baseline_ap': float(np.mean(baseline_aps)),
-            'mean_optimized_ap': float(np.mean(optimized_aps)),
-            'mean_ap_improvement': float(np.mean(improvements)),
-            'std_ap_improvement': float(np.std(improvements)),
-            'median_ap_improvement': float(np.median(improvements)),
-            'fraction_improved': float(np.mean([1 if imp > 0 else 0 for imp in improvements])),
-            'fraction_improved_5pt': float(np.mean([1 if imp >= 0.05 else 0 for imp in improvements])),
-            'max_improvement': float(np.max(improvements)),
-            'min_improvement': float(np.min(improvements)),
+            # Aggregated AP (computed over full subset — the meaningful metric)
+            'aggregated_baseline_ap': float(aggregated_baseline_ap),
+            'aggregated_optimized_ap': float(aggregated_optimized_ap),
+            'aggregated_ap_improvement': float(aggregated_ap_improvement),
+            'baseline_per_class_ap': baseline_per_class.tolist(),
+            'optimized_per_class_ap': optimized_per_class.tolist(),
+            # Loss improvement stats (per-graph, meaningful for single samples)
+            'mean_loss_improvement': float(np.mean(loss_improvements)),
+            'std_loss_improvement': float(np.std(loss_improvements)),
+            'fraction_loss_improved': float(np.mean([1 if imp > 0 else 0 for imp in loss_improvements])),
+            # Class correction stats (per-graph, meaningful for single samples)
+            'mean_net_corrections': float(np.mean(net_corrections)),
+            'total_newly_correct': int(sum(r['newly_correct'] for r in graph_results)),
+            'total_newly_wrong': int(sum(r['newly_wrong'] for r in graph_results)),
+            'total_net_corrections': int(sum(r['net_corrections'] for r in graph_results)),
+            'fraction_any_correction': float(np.mean([1 if r['net_corrections'] > 0 else 0 for r in graph_results])),
+            # MMD stats
             'mean_init_mmd': float(np.mean([r['init_mmd'] for r in graph_results])),
             'mean_final_mmd': float(np.mean([r['final_mmd'] for r in graph_results])),
             'total_time_seconds': elapsed_total,
-            # Histogram bins for improvement distribution
-            'improvement_histogram': {
-                'bins': np.histogram(improvements, bins=20)[1].tolist(),
-                'counts': np.histogram(improvements, bins=20)[0].tolist(),
+            # Histogram of loss improvements
+            'loss_improvement_histogram': {
+                'bins': np.histogram(loss_improvements, bins=20)[1].tolist(),
+                'counts': np.histogram(loss_improvements, bins=20)[0].tolist(),
             },
         }
 
         print(f"\n--- M={M} Summary ---")
-        print(f"  Mean Baseline AP:     {summary['mean_baseline_ap']:.4f}")
-        print(f"  Mean Optimized AP:    {summary['mean_optimized_ap']:.4f}")
-        print(f"  Mean AP Improvement:  {summary['mean_ap_improvement']:.4f} "
-              f"± {summary['std_ap_improvement']:.4f}")
-        print(f"  Fraction improved:    {summary['fraction_improved']:.2%}")
-        print(f"  Fraction ≥5pt gain:   {summary['fraction_improved_5pt']:.2%}")
+        print(f"  Aggregated Baseline AP:     {summary['aggregated_baseline_ap']:.4f}")
+        print(f"  Aggregated Optimized AP:    {summary['aggregated_optimized_ap']:.4f}")
+        print(f"  Aggregated AP Improvement:  {summary['aggregated_ap_improvement']:.4f}")
+        print(f"  Mean loss improvement:      {summary['mean_loss_improvement']:.4f} "
+              f"± {summary['std_loss_improvement']:.4f}")
+        print(f"  Fraction loss improved:     {summary['fraction_loss_improved']:.2%}")
+        print(f"  Total class corrections:    +{summary['total_newly_correct']} "
+              f"-{summary['total_newly_wrong']} "
+              f"(net {summary['total_net_corrections']:+d})")
+        print(f"  Fraction with net fix:      {summary['fraction_any_correction']:.2%}")
         print(f"  Time: {elapsed_total:.1f}s")
 
         all_results[f'M={M}'] = {
@@ -324,10 +376,7 @@ def main():
 
     config = Phase1Config()
 
-    if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.device)
+    device = get_device(args.device)
     print(f"Using device: {device}")
 
     results = run_validation(
@@ -356,32 +405,34 @@ def main():
     print(f"\nResults saved to: {output_path}")
 
     # --- Final Decision Table ---
-    print("\n" + "=" * 70)
-    print("PHASE 2 VALIDATION GATE — SUMMARY")
-    print("=" * 70)
+    print("\n" + "=" * 85)
+    print("PHASE 2 VALIDATION GATE — SUMMARY (Aggregated AP over full subset)")
+    print("=" * 85)
     print(f"{'M':<6} {'Baseline AP':<14} {'Optimized AP':<14} "
-          f"{'Improvement':<14} {'% Improved':<12}")
-    print("-" * 60)
+          f"{'AP Improve':<12} {'Loss Imp':<12} {'Net Corrections':<16} {'% Loss Imp':<10}")
+    print("-" * 85)
     for key, data in results.items():
         s = data['summary']
-        print(f"{s['M']:<6} {s['mean_baseline_ap']:<14.4f} "
-              f"{s['mean_optimized_ap']:<14.4f} "
-              f"{s['mean_ap_improvement']:<14.4f} "
-              f"{s['fraction_improved']:<12.1%}")
-    print("=" * 70)
+        print(f"{s['M']:<6} {s['aggregated_baseline_ap']:<14.4f} "
+              f"{s['aggregated_optimized_ap']:<14.4f} "
+              f"{s['aggregated_ap_improvement']:<12.4f} "
+              f"{s['mean_loss_improvement']:<12.4f} "
+              f"{s['total_net_corrections']:<+16d} "
+              f"{s['fraction_loss_improved']:<10.1%}")
+    print("=" * 85)
 
-    # Gate check
-    best_M_key = max(results.keys(), key=lambda k: results[k]['summary']['mean_ap_improvement'])
-    best_imp = results[best_M_key]['summary']['mean_ap_improvement']
+    # Gate check — now based on aggregated AP improvement
+    best_M_key = max(results.keys(), key=lambda k: results[k]['summary']['aggregated_ap_improvement'])
+    best_imp = results[best_M_key]['summary']['aggregated_ap_improvement']
 
     if best_imp >= 0.05:
-        print(f"\n✓ GATE PASSED: Best improvement = {best_imp:.4f} (≥0.05) at {best_M_key}")
+        print(f"\n✓ GATE PASSED: Best aggregated AP improvement = {best_imp:.4f} (≥0.05) at {best_M_key}")
         print("  → Proceed to Phase 3 (simple proxy baselines)")
     elif best_imp >= 0.02:
-        print(f"\n⚠ MARGINAL: Best improvement = {best_imp:.4f} (≥0.02 but <0.05)")
+        print(f"\n⚠ MARGINAL: Best aggregated AP improvement = {best_imp:.4f} (≥0.02 but <0.05)")
         print("  → Consider investigating further before proceeding")
     else:
-        print(f"\n✗ GATE FAILED: Best improvement = {best_imp:.4f} (<0.02)")
+        print(f"\n✗ GATE FAILED: Best aggregated AP improvement = {best_imp:.4f} (<0.02)")
         print("  → Proxy embeddings don't meaningfully help. Consider stopping.")
 
 
