@@ -76,7 +76,7 @@ def forward_with_proxies_ablation(model, batch, proxy_embs, insertion_point=0,
         for layer_idx, layer in enumerate(model.layers):
             if layer_idx < insert_at:
                 # Run layer without proxies (standard forward)
-                h, current_proxies, attn_w = _forward_layer_no_proxy(
+                h, _, attn_w = _forward_layer_no_proxy(
                     layer, h, batch.edge_index, batch.edge_attr, batch_idx
                 )
                 if return_attention:

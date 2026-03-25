@@ -36,7 +36,7 @@ class ModelConfig:
 class TrainingConfig:
     max_epochs: int = 300
     warmup_epochs: int = 10
-    patience: int = 25
+    patience: int = 5
     lr: float = 1e-3
     weight_decay: float = 1e-5
     min_lr: float = 1e-6

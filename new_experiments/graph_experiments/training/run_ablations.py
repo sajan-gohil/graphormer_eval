@@ -40,6 +40,7 @@ from training.validate_premise import (
     stratified_sample, set_seed,
 )
 from torch_geometric.loader import DataLoader
+from utils.device import get_device
 
 
 class AblationProxyOptimizer:
@@ -78,6 +79,21 @@ class AblationProxyOptimizer:
         B_param = nn.Parameter(B_param)
         return B_param, h, batch_idx
 
+    @staticmethod
+    def _count_class_corrections(baseline_probs, optimized_probs, labels, threshold=0.5):
+        """Count classes corrected by proxy optimization."""
+        baseline_pred = (baseline_probs >= threshold).astype(int)
+        optimized_pred = (optimized_probs >= threshold).astype(int)
+        baseline_correct = (baseline_pred == labels)
+        optimized_correct = (optimized_pred == labels)
+        newly_correct = (~baseline_correct & optimized_correct).sum()
+        newly_wrong = (baseline_correct & ~optimized_correct).sum()
+        return {
+            'newly_correct': int(newly_correct),
+            'newly_wrong': int(newly_wrong),
+            'net_corrections': int(newly_correct) - int(newly_wrong),
+        }
+
     def optimize(self, batch, device):
         """Run proxy optimization and return results."""
         batch = batch.to(device)
@@ -90,7 +106,6 @@ class AblationProxyOptimizer:
             baseline_loss = criterion(baseline_logits, batch.y.float()).item()
             baseline_probs = torch.sigmoid(baseline_logits).cpu().numpy()
             baseline_labels = batch.y.cpu().numpy()
-        baseline_ap = compute_macro_ap(baseline_probs, baseline_labels)
 
         best_result = None
         best_loss = float('inf')
@@ -136,7 +151,6 @@ class AblationProxyOptimizer:
                 )
                 final_loss = criterion(logits, batch.y.float()).item()
                 final_probs = torch.sigmoid(logits).cpu().numpy()
-                final_ap = compute_macro_ap(final_probs, baseline_labels)
 
                 B_flat = B.reshape(-1, self.d)
                 final_mmd = mmd_squared(B_flat, h_init.detach()).item()
@@ -145,12 +159,17 @@ class AblationProxyOptimizer:
 
             if final_loss < best_loss:
                 best_loss = final_loss
+                corrections = self._count_class_corrections(
+                    baseline_probs, final_probs, baseline_labels
+                )
                 best_result = {
-                    'baseline_ap': baseline_ap,
-                    'optimized_ap': final_ap,
-                    'ap_improvement': final_ap - baseline_ap,
+                    'baseline_probs': baseline_probs,
+                    'optimized_probs': final_probs,
+                    'labels': baseline_labels,
                     'baseline_loss': baseline_loss,
                     'optimized_loss': final_loss,
+                    'loss_improvement': baseline_loss - final_loss,
+                    'class_corrections': corrections,
                     'init_mmd': init_mmd,
                     'final_mmd': final_mmd,
                     'proxy_norms_mean': proxy_norms.mean().item(),
@@ -183,6 +202,8 @@ def run_ablation_sweep(model, train_data, selected_indices, device,
     for cfg in sweep_configs:
         label = cfg.pop('label')
         optimizer_kwargs = {**base_config, **cfg}
+        if label in ["insert_layer_0", "insert_layer_1", "insert_layer_2"]:
+            continue
 
         print(f"\n  [{sweep_name}] Config: {label}")
         print(f"    Params: {optimizer_kwargs}")
@@ -190,6 +211,9 @@ def run_ablation_sweep(model, train_data, selected_indices, device,
         opt = AblationProxyOptimizer(model, **optimizer_kwargs)
 
         graph_results = []
+        all_baseline_probs = []
+        all_optimized_probs = []
+        all_labels = []
         start = time.time()
 
         for i, idx in enumerate(selected_indices):
@@ -199,30 +223,47 @@ def run_ablation_sweep(model, train_data, selected_indices, device,
 
             result = opt.optimize(batch, device)
             graph_results.append(result)
+            all_baseline_probs.append(result['baseline_probs'])
+            all_optimized_probs.append(result['optimized_probs'])
+            all_labels.append(result['labels'])
 
             if (i + 1) % 25 == 0:
-                mean_imp = np.mean([r['ap_improvement'] for r in graph_results])
-                print(f"    [{i+1}/{len(selected_indices)}] Mean AP imp: {mean_imp:.4f}")
+                mean_loss_imp = np.mean([r['loss_improvement'] for r in graph_results])
+                mean_net_corr = np.mean([r['class_corrections']['net_corrections'] for r in graph_results])
+                print(f"    [{i+1}/{len(selected_indices)}] "
+                      f"Mean loss imp: {mean_loss_imp:.4f} | "
+                      f"Mean net corrections: {mean_net_corr:.2f}")
 
         elapsed = time.time() - start
 
-        improvements = [r['ap_improvement'] for r in graph_results]
+        # Compute aggregated AP over the full subset
+        agg_bl = np.concatenate(all_baseline_probs, axis=0)
+        agg_opt = np.concatenate(all_optimized_probs, axis=0)
+        agg_labels = np.concatenate(all_labels, axis=0)
+        agg_baseline_ap = compute_macro_ap(agg_bl, agg_labels)
+        agg_optimized_ap = compute_macro_ap(agg_opt, agg_labels)
+
+        loss_improvements = [r['loss_improvement'] for r in graph_results]
         summary = {
             'label': label,
             'config': {**base_config, **cfg, 'label': label},
-            'mean_baseline_ap': float(np.mean([r['baseline_ap'] for r in graph_results])),
-            'mean_optimized_ap': float(np.mean([r['optimized_ap'] for r in graph_results])),
-            'mean_ap_improvement': float(np.mean(improvements)),
-            'std_ap_improvement': float(np.std(improvements)),
-            'fraction_improved': float(np.mean([1 if imp > 0 else 0 for imp in improvements])),
+            'aggregated_baseline_ap': float(agg_baseline_ap),
+            'aggregated_optimized_ap': float(agg_optimized_ap),
+            'aggregated_ap_improvement': float(agg_optimized_ap - agg_baseline_ap),
+            'mean_loss_improvement': float(np.mean(loss_improvements)),
+            'std_loss_improvement': float(np.std(loss_improvements)),
+            'fraction_loss_improved': float(np.mean([1 if imp > 0 else 0 for imp in loss_improvements])),
+            'total_net_corrections': int(sum(r['class_corrections']['net_corrections'] for r in graph_results)),
             'mean_final_mmd': float(np.mean([r['final_mmd'] for r in graph_results])),
             'mean_proxy_norms': float(np.mean([r['proxy_norms_mean'] for r in graph_results])),
             'time_seconds': elapsed,
         }
 
-        print(f"    → Mean AP improvement: {summary['mean_ap_improvement']:.4f} "
-              f"± {summary['std_ap_improvement']:.4f} "
-              f"({summary['fraction_improved']:.0%} improved) "
+        print(f"    → Aggregated AP: {agg_baseline_ap:.4f} → {agg_optimized_ap:.4f} "
+              f"(Δ={agg_optimized_ap - agg_baseline_ap:+.4f}) | "
+              f"Loss imp: {summary['mean_loss_improvement']:.4f} "
+              f"± {summary['std_loss_improvement']:.4f} "
+              f"({summary['fraction_loss_improved']:.0%} improved) "
               f"[{elapsed:.0f}s]")
 
         sweep_results[label] = summary
@@ -339,30 +380,31 @@ def print_summary_tables(all_results):
     """Print formatted summary tables for all ablations."""
 
     for ablation_name, results in all_results.items():
-        print(f"\n{'='*70}")
+        print(f"\n{'='*85}")
         print(f"ABLATION: {ablation_name}")
-        print(f"{'='*70}")
+        print(f"{'='*85}")
         print(f"{'Config':<25} {'Baseline AP':>12} {'Optimized AP':>13} "
-              f"{'Improvement':>12} {'MMD':>8} {'% Imp':>7}")
-        print("-" * 77)
+              f"{'AP Improve':>11} {'Loss Imp':>10} {'Net Corr':>9} {'MMD':>8}")
+        print("-" * 88)
 
         for label, summary in results.items():
-            print(f"{label:<25} {summary['mean_baseline_ap']:>12.4f} "
-                  f"{summary['mean_optimized_ap']:>13.4f} "
-                  f"{summary['mean_ap_improvement']:>12.4f} "
-                  f"{summary['mean_final_mmd']:>8.4f} "
-                  f"{summary['fraction_improved']:>7.0%}")
+            print(f"{label:<25} {summary['aggregated_baseline_ap']:>12.4f} "
+                  f"{summary['aggregated_optimized_ap']:>13.4f} "
+                  f"{summary['aggregated_ap_improvement']:>11.4f} "
+                  f"{summary['mean_loss_improvement']:>10.4f} "
+                  f"{summary['total_net_corrections']:>+9d} "
+                  f"{summary['mean_final_mmd']:>8.4f}")
 
     # Best config recommendation
-    print(f"\n{'='*70}")
+    print(f"\n{'='*85}")
     print("RECOMMENDATION")
-    print(f"{'='*70}")
+    print(f"{'='*85}")
 
     for ablation_name, results in all_results.items():
-        best_label = max(results.keys(), key=lambda k: results[k]['mean_ap_improvement'])
+        best_label = max(results.keys(), key=lambda k: results[k]['aggregated_ap_improvement'])
         best = results[best_label]
         print(f"  {ablation_name}: Best = {best_label} "
-              f"(AP improvement = {best['mean_ap_improvement']:.4f})")
+              f"(Aggregated AP improvement = {best['aggregated_ap_improvement']:.4f})")
 
 
 def main():
@@ -379,10 +421,7 @@ def main():
     args = parser.parse_args()
 
     config = Phase1Config()
-    if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(args.device)
+    device = get_device(args.device)
     print(f"Using device: {device}")
 
     results = run_phase4(

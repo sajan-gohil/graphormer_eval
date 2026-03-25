@@ -27,7 +27,7 @@ from utils.mmd import mmd_squared, median_heuristic, gaussian_kernel
 def make_dummy_graph(num_nodes, num_classes=10, hidden_dim=64):
     """Create a dummy PyG Data object for testing."""
     # 9 atom features (int), matching OGB encoding
-    x = torch.randint(0, 10, (num_nodes, 9))
+    x = torch.randint(0, 2, (num_nodes, 9))
     # Simple chain graph
     if num_nodes > 1:
         row = torch.arange(num_nodes - 1)
@@ -42,7 +42,7 @@ def make_dummy_graph(num_nodes, num_classes=10, hidden_dim=64):
         num_edges = 0
 
     # 3 bond features (int), matching OGB encoding
-    edge_attr = torch.randint(0, 5, (num_edges, 3))
+    edge_attr = torch.randint(0, 2, (num_edges, 3))
 
     # Multi-label targets
     y = torch.zeros(1, num_classes)

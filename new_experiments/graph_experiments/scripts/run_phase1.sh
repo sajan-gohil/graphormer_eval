@@ -18,7 +18,7 @@ python -u training/pretrain.py \
     --batch_size 64 \
     --lr 1e-3 \
     --max_epochs 300 \
-    --patience 25 \
+    --patience 5 \
     --seed 42 \
     --device auto \
     "$@"
