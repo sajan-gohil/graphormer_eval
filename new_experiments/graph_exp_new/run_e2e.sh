@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euxo pipefail
+set -eux pipefail
 
 # =============================================================
 # End-to-End experiments (Pipeline B)

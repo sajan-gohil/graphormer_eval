@@ -27,27 +27,31 @@ echo "==============================="
 echo "Part A: Trainable Baselines"
 echo "==============================="
 
-echo ""
-echo "--- VN-Fixed ---"
-python -u training/train_baselines.py --model vn_fixed "$@"
+#echo ""
+#echo "--- VN-Fixed ---"
+#python -u training/train_baselines.py --model vn_fixed "$@"
+#
+#echo ""
+#echo "--- VN-Aggregated ---"
+#python -u training/train_baselines.py --model vn_aggregated "$@"#
+#
+#echo ""
+#echo "--- K-Fixed-VN (M=4) ---"
+#python -u training/train_baselines.py --model kvn --M 4 "$@"#
+
+#echo ""
+#echo "--- K-Fixed-VN (M=8) ---"
+#python -u training/train_baselines.py --model kvn --M 8 "$@"#
+
+#echo ""
+#echo "--- K-Fixed-VN (M=16) ---"
+#python -u training/train_baselines.py --model kvn --M 16 "$@"
 
 echo ""
-echo "--- VN-Aggregated ---"
-python -u training/train_baselines.py --model vn_aggregated "$@"
+echo "--- Set Transformer IP (M=64) ---"
+python -u training/train_baselines.py --model set_transformer_ip --M 512 "$@"
 
-echo ""
-echo "--- K-Fixed-VN (M=4) ---"
-python -u training/train_baselines.py --model kvn --M 4 "$@"
-
-echo ""
-echo "--- K-Fixed-VN (M=8) ---"
-python -u training/train_baselines.py --model kvn --M 8 "$@"
-
-echo ""
-echo "--- K-Fixed-VN (M=16) ---"
-python -u training/train_baselines.py --model kvn --M 16 "$@"
-
-
+#
 # =========================================================
 # Part B: Frozen-model baselines (no training)
 # =========================================================

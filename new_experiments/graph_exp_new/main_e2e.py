@@ -38,7 +38,7 @@ def build_parser():
     p.add_argument("--num_proxies", type=int, default=32)
 
     # Model
-    p.add_argument("--hidden_dim", type=int, default=64)
+    p.add_argument("--hidden_dim", type=int, default=128)
     p.add_argument("--num_layers", type=int, default=5)
     p.add_argument("--num_heads", type=int, default=8)
     p.add_argument("--output_dim", type=int, default=10)
@@ -70,7 +70,7 @@ def build_parser():
     p.add_argument("--num_workers", type=int, default=4)
 
     # E2E-specific
-    p.add_argument("--mmd_lambda", type=float, default=0.01,
+    p.add_argument("--mmd_lambda", type=float, default=0,
                    help="Weight for MMD regularization (0 to disable)")
     p.add_argument("--proxy_warmup_epochs", type=int, default=0,
                    help="Epochs to train transformer without proxies before activating generator")

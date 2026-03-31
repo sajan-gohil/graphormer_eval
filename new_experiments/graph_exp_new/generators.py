@@ -368,6 +368,7 @@ class GNNPoolingGenerator(BaseGenerator):
         self.pool_types = list(pool_types)
         self.decode_mode = decode_mode
         self.input_dim = input_dim
+        self.gnn_type = gnn_type
 
         # GNN layers
         self.gnn_layers = nn.ModuleList([
@@ -432,6 +433,36 @@ class GNNPoolingGenerator(BaseGenerator):
                 results.append(torch.sqrt(var + 1e-8))
         return torch.cat(results, dim=-1)  # (B, P*d)
 
+    def _prepare_gine_edge_attr(self, edge_attr, edge_index, ref_tensor):
+        """Convert/project edge attrs to float (E, input_dim) for GINEConv."""
+        num_edges = edge_index.size(1)
+
+        if edge_attr is None:
+            return torch.zeros(
+                num_edges,
+                self.input_dim,
+                device=ref_tensor.device,
+                dtype=ref_tensor.dtype,
+            )
+
+        if edge_attr.dim() == 1:
+            edge_attr = edge_attr.unsqueeze(-1)
+
+        edge_attr = edge_attr.to(device=ref_tensor.device)
+
+        if edge_attr.shape[-1] == self.input_dim and edge_attr.is_floating_point():
+            return edge_attr.to(dtype=ref_tensor.dtype)
+
+        edge_attr = edge_attr.to(dtype=ref_tensor.dtype)
+        feat_dim = edge_attr.shape[-1]
+        if feat_dim < self.input_dim:
+            # Zero-pad feature width to match GINE edge_dim.
+            edge_attr = F.pad(edge_attr, (0, self.input_dim - feat_dim))
+        elif feat_dim > self.input_dim:
+            # Truncate extra channels if edge feature width exceeds hidden dim.
+            edge_attr = edge_attr[:, :self.input_dim]
+        return edge_attr
+
     def forward(self, node_embeddings, mask, targets=None, **kwargs):
         """
         Args:
@@ -444,6 +475,9 @@ class GNNPoolingGenerator(BaseGenerator):
         batch_vec = kwargs["batch_vec"]
         edge_attr = kwargs.get("edge_attr", None)
         num_graphs = int(batch_vec.max().item()) + 1
+
+        if self.gnn_type == "GINE":
+            edge_attr = self._prepare_gine_edge_attr(edge_attr, edge_index, node_embeddings)
 
         # Step 1: Multi-hop GNN, collect H^0...H^K
         hop_representations = [node_embeddings]  # H^0

@@ -29,6 +29,7 @@ from configs.phase1_config import Phase1Config
 from data.peptides_func import get_peptides_func_loaders
 from models.virtual_node import GPSModelVN
 from models.k_virtual_nodes import GPSModelKVN
+from models.inducing_points import GPSModelISAB
 from evaluation.metrics import compute_macro_ap, compute_per_class_ap
 
 
@@ -61,6 +62,8 @@ def build_model(model_name, config, M=8):
         return GPSModelVN(config.model, vn_mode="aggregated")
     elif model_name == "kvn":
         return GPSModelKVN(config.model, M=M)
+    elif model_name == "set_transformer_ip":
+        return GPSModelISAB(config.model, M=M, shared_inducing=True)
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
@@ -125,7 +128,7 @@ def train(model_name, config, M=8, device=None):
     model = build_model(model_name, config, M).to(device)
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    model_label = f"{model_name}_M{M}" if model_name == "kvn" else model_name
+    model_label = f"{model_name}_M{M}" if model_name in ("kvn", "set_transformer_ip") else model_name
     print(f"\nTraining: {model_label}")
     print(f"Parameters: {num_params:,}")
 
@@ -267,7 +270,7 @@ def train(model_name, config, M=8, device=None):
 def main():
     parser = argparse.ArgumentParser(description="Phase 3: Train proxy baselines")
     parser.add_argument("--model", type=str, required=True,
-                        choices=["vn_fixed", "vn_aggregated", "kvn"],
+                        choices=["vn_fixed", "vn_aggregated", "kvn", "set_transformer_ip"],
                         help="Model variant to train")
     parser.add_argument("--M", type=int, default=8,
                         help="Number of virtual nodes (only for kvn)")
@@ -302,3 +305,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
