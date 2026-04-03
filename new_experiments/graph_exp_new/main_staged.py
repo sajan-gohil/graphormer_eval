@@ -16,6 +16,7 @@ import argparse
 import os
 import pickle
 import time
+from types import SimpleNamespace
 import yaml
 import numpy as np
 import torch
@@ -167,6 +168,11 @@ def _count_correct(logits, labels):
     """Per-sample count of correctly predicted classes (threshold 0.5)."""
     preds = (torch.sigmoid(logits) > 0.5).float()
     return (preds == labels).sum(dim=1)
+
+
+def _dense_mask_to_batch_vec(dense_mask):
+    counts = dense_mask.sum(dim=1).to(torch.long)
+    return torch.arange(dense_mask.size(0), device=dense_mask.device).repeat_interleave(counts)
 
 
 def build_generator(args):
@@ -370,7 +376,8 @@ def run_stage1(args):
 # STAGE 2 — OPTIMIZE PROXY EMBEDDINGS
 # ================================================================
 
-def _optimize_batch(model, batch, dense_x, dense_mask, args):
+def _optimize_batch(model, batch, dense_x, dense_mask, args,
+                    init_proxy=None):
     """
     Optimize proxy embeddings for a batch of graphs.
     Returns per-graph: best_proxy, base_loss, best_loss, base_correct,
@@ -379,9 +386,9 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args):
     B = batch.y.size(0)
     device = batch.y.device
 
-    proxy = nn.Parameter(
-        torch.randn(B, args.num_proxies, args.hidden_dim, device=device) * 0.02
-    )
+    if init_proxy is None:
+        init_proxy = torch.randn(B, args.num_proxies, args.hidden_dim, device=device) * 0.02
+    proxy = nn.Parameter(init_proxy.detach().clone())
     opt = torch.optim.Adam([proxy], lr=args.s2_proxy_lr)
 
     # Base predictions (no proxies)
@@ -414,8 +421,8 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args):
         opt.step()
 
         with torch.no_grad():
-            improved = task_loss < best_loss
-            if improved.any():
+            improved = (task_loss < best_loss) & (mmd_batch < best_mmd)
+            if (improved).any():
                 best_loss[improved] = task_loss[improved]
                 best_proxy[improved] = proxy.detach()[improved]
                 best_mmd[improved] = mmd_batch.detach()[improved]
@@ -482,38 +489,31 @@ def run_stage2(args, model_path):
 
             # If any graphs didn't meet criteria, run another round of optimization
             n_not_improved = not_improved_mask.sum().item()
-            if n_not_improved > 0 and n_not_improved < B:
-                # Re-run optimization for the full batch (simpler than subsetting)
-                # but only update best for non-improved graphs
-                proxy2 = nn.Parameter(
-                    torch.randn(B, args.num_proxies, args.hidden_dim,
-                                device=args.device) * 0.02
+            if n_not_improved > 0:
+                # Continue from the best proxy found so far, but only for the subset
+                # that still needs improvement.
+                subset_mask = not_improved_mask
+                subset_dense_x = dense_x[subset_mask]
+                subset_dense_mask = dense_mask[subset_mask]
+                subset_batch = SimpleNamespace(
+                    batch=_dense_mask_to_batch_vec(subset_dense_mask),
+                    y=batch.y[subset_mask],
                 )
-                opt2 = torch.optim.Adam([proxy2], lr=args.s2_proxy_lr)
 
-                for step in range(args.s2_num_steps):
-                    opt2.zero_grad()
-                    logits2, _ = model(batch, proxy_embeddings=proxy2,
-                                       precomputed_dense=(dense_x, dense_mask))
-                    task_loss2 = _per_sample_bce(logits2, batch.y)
-                    mmd_losses2 = []
-                    for i in range(B):
-                        nodes_i = dense_x[i][dense_mask[i]]
-                        mmd_losses2.append(mmd_squared(proxy2[i], nodes_i))
-                    mmd_batch2 = torch.stack(mmd_losses2)
-                    total2 = (task_loss2 + args.s2_mmd_lambda * mmd_batch2).mean()
-                    total2.backward()
-                    nn.utils.clip_grad_norm_([proxy2], args.s2_grad_clip)
-                    opt2.step()
+                (subset_best_proxy, _, subset_best_loss, _,
+                subset_best_correct, subset_best_mmd,) = _optimize_batch(
+                    model,
+                    subset_batch,
+                    subset_dense_x,
+                    subset_dense_mask,
+                    args,
+                    init_proxy=best_proxy[subset_mask],
+                )
 
-                    with torch.no_grad():
-                        improved2 = (task_loss2 < best_loss) & not_improved_mask
-                        if improved2.any():
-                            best_loss[improved2] = task_loss2[improved2]
-                            best_proxy[improved2] = proxy2.detach()[improved2]
-                            best_mmd[improved2] = mmd_batch2.detach()[improved2]
-                            cur_c2 = _count_correct(logits2, batch.y)
-                            best_correct[improved2] = cur_c2[improved2]
+                best_proxy[subset_mask] = subset_best_proxy
+                best_loss[subset_mask] = subset_best_loss
+                best_correct[subset_mask] = subset_best_correct
+                best_mmd[subset_mask] = subset_best_mmd
 
             # Collect predictions for AP logging (using best proxies)
             with torch.no_grad():
