@@ -35,7 +35,7 @@ def build_parser():
     p.add_argument("--generator", type=str, default="score_based",
                    choices=["score_based", "gnn_pooling"],
                    help="Generator architecture (flow_matching not supported in e2e)")
-    p.add_argument("--num_proxies", type=int, default=32)
+    p.add_argument("--num_proxies", type=int, default=64)
 
     # Model
     p.add_argument("--hidden_dim", type=int, default=128)
@@ -46,17 +46,17 @@ def build_parser():
 
     # Generator-specific
     p.add_argument("--gen_hidden_dim", type=int, default=128)
-    p.add_argument("--gen_num_layers", type=int, default=2)
-    p.add_argument("--gen_num_heads", type=int, default=4)
+    p.add_argument("--gen_num_layers", type=int, default=3)
+    p.add_argument("--gen_num_heads", type=int, default=8)
     p.add_argument("--gen_dropout", type=float, default=0.2)
     # GNN-specific
     p.add_argument("--gnn_layers", type=int, default=4)
     p.add_argument("--gnn_type", type=str, default="GINE",
                    choices=["GCN", "GIN", "GINE", "GAT"])
-    p.add_argument("--pool_types", type=str, nargs="+", default=["mean", "max", "std"])
+    p.add_argument("--pool_types", type=str, nargs="+", default=["mean"])
     p.add_argument("--decode_hidden", type=int, default=256)
     p.add_argument("--decode_layers", type=int, default=3)
-    p.add_argument("--idx_emb_dim", type=int, default=32)
+    p.add_argument("--idx_emb_dim", type=int, default=128)
     p.add_argument("--decode_mode", type=str, default="shared",
                    choices=["shared", "grouped"])
 
@@ -70,7 +70,7 @@ def build_parser():
     p.add_argument("--num_workers", type=int, default=4)
 
     # E2E-specific
-    p.add_argument("--mmd_lambda", type=float, default=0,
+    p.add_argument("--mmd_lambda", type=float, default=0.01,
                    help="Weight for MMD regularization (0 to disable)")
     p.add_argument("--proxy_warmup_epochs", type=int, default=0,
                    help="Epochs to train transformer without proxies before activating generator")
@@ -79,7 +79,7 @@ def build_parser():
                    help="Pool over N original nodes or all N+M tokens")
 
     # Paths
-    p.add_argument("--save_dir", type=str, default="checkpoints_e2e")
+    p.add_argument("--save_dir", type=str, default="checkpoints_e2e2")
     p.add_argument("--device", type=str, default=None)
 
     return p
