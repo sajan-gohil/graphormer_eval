@@ -564,6 +564,10 @@ def run_stage2(args, model_path):
                 ap_preds, ap_labels = [], []
                 samples_since_ap_log = 0
 
+        save_path = os.path.join(args.save_dir, "proxy_pairs_temp.pkl")
+        with open(save_path, "wb") as f:
+            pickle.dump(proxy_pairs, f)
+        
     # --- MMD-based filtering ---
     print("\nFiltering by MMD outliers...", flush=True)
     mmd_values = [p["mmd_loss"] for p in proxy_pairs]
