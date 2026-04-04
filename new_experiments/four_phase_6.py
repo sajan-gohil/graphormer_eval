@@ -5,8 +5,8 @@ Phase 1  : Pretrain Graph Transformer backbone (with early stopping)
 Phase 2  : Per-sample proxy embedding optimisation (frozen backbone, 5× samples,
            filtered to keep only significantly improved proxies)
 Phase 2.5: Oracle concept validation (full data, 5% relative AP threshold)
-Phase 3  : Train conditional DDPM denoiser  (T=50, consistent train/infer)
-Phase 4  : Train GT backbone with diffusion proxy nodes (init from P1 weights)
+Phase 3  : Train encoder-decoder proxy generator  (N→M attention)
+Phase 4  : Train GT backbone with proxy nodes (init from P1 weights)
 Phase 4.5: Hyperedge-routed attention N→M→N (optional, --run-phase-4-5 flag)
 Phase 5  : Train GNN backbone with proxy nodes added as explicit graph nodes
 """
@@ -19,7 +19,6 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.multiprocessing as mp
 
 import torch_geometric
 from torch_geometric.datasets import LRGBDataset
@@ -41,22 +40,9 @@ NUM_LAYERS  = 4
 NUM_PROXY   = 64
 BATCH_SIZE  = 256
 OUTPUT_DIM  = 10
-T_DIFF      = 10        # single source-of-truth for diffusion timesteps
 DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
-SAVE_DIR    = "./checkpoints7"
+SAVE_DIR    = "./checkpoints8"
 os.makedirs(SAVE_DIR, exist_ok=True)
-
-# DataLoader worker safety: default to single-process loading to avoid
-# intermittent shared-memory unlink errors in long runs.
-NUM_WORKERS = int(os.getenv("GRAPHORMER_NUM_WORKERS", "0"))
-
-# Work around multiprocessing shared-storage issues seen on some Linux/Python
-# combinations when transferring tensors between loader workers.
-try:
-    mp.set_sharing_strategy("file_system")
-except RuntimeError:
-    # Strategy may already be set by parent process.
-    pass
 
 print(f"Using device: {DEVICE}")
 
@@ -69,9 +55,9 @@ def get_loaders(batch_size=BATCH_SIZE):
     val_ds   = LRGBDataset(root="./data", name="Peptides-func", split="val")
     test_ds  = LRGBDataset(root="./data", name="Peptides-func", split="test")
     return (
-        DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=NUM_WORKERS),
-        DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=NUM_WORKERS),
-        DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=NUM_WORKERS),
+        DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=4),
+        DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=4),
+        DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=4),
         train_ds, val_ds, test_ds,
     )
 
@@ -172,7 +158,7 @@ class GraphTransformer(nn.Module):
 
     def forward(self, batch, proxy_embeddings=None, precomputed_dense=None):
         # Allow pre-computed encoder output to avoid double encoding in
-        # Phase 4 end-to-end training (encoder → denoiser → transformer).
+        # Phase 4 end-to-end training (encoder → proxy generator → transformer).
         if precomputed_dense is not None:
             dense_x, dense_mask = precomputed_dense
         else:
@@ -294,65 +280,40 @@ def phase1_train(epochs=500, lr=3e-5, weight_decay=1e-5, patience=50):
 # ================================================================
 
 def _count_correct_classes(logits, labels):
-    """Count number of correctly predicted classes per sample (threshold 0.5)."""
+    """Count number of classes where prediction matches label (threshold 0.5)."""
     preds = (torch.sigmoid(logits) > 0.5).float()
-    return (preds == labels).sum(dim=1)
+    return int((preds == labels).sum().item())
 
 
-def _per_sample_bce_loss(logits, labels):
-    """Per-sample BCE loss averaged over labels."""
-    return F.binary_cross_entropy_with_logits(logits, labels, reduction="none").mean(dim=1)
-
-
-def optimize_batch_graphs(model, batch, num_proxy=NUM_PROXY, max_steps=1000, lr=1e-3):
-    """
-    Jointly optimize one proxy tensor per graph in a mini-batch.
-
-    Returns per-sample best proxy and stats, so filtering remains sample-wise.
-    """
-    B = batch.y.size(0)
-    proxy = nn.Parameter(
-        torch.randn(B, num_proxy, model.hidden_dim, device=DEVICE) * 0.02
-    )
-    opt = torch.optim.Adam([proxy], lr=lr)
+def optimize_single_graph(model, batch, num_proxy=NUM_PROXY, max_steps=1000, lr=1e-3):
+    loss_fn = nn.BCEWithLogitsLoss()
+    proxy   = nn.Parameter(torch.randn(1, num_proxy, model.hidden_dim, device=DEVICE) * 0.02)
+    opt     = torch.optim.Adam([proxy], lr=lr)
 
     with torch.no_grad():
         base_logits = model(batch)[0]
-        base_loss = _per_sample_bce_loss(base_logits, batch.y)
+        base_loss = loss_fn(base_logits, batch.y).item()
         base_correct = _count_correct_classes(base_logits, batch.y)
 
-    best_loss = base_loss.clone()
-    best_proxy = proxy.detach().clone()
-    best_correct = base_correct.clone()
-
+    best_loss, best_proxy = base_loss, proxy.data.clone()
+    best_correct = base_correct
     for _ in range(max_steps):
         opt.zero_grad()
         logits, _ = model(batch, proxy_embeddings=proxy)
-        per_sample_loss = _per_sample_bce_loss(logits, batch.y)
-        loss = per_sample_loss.mean()
+        loss = loss_fn(logits, batch.y)
         loss.backward()
         opt.step()
+        if loss.item() < best_loss:
+            best_loss, best_proxy = loss.item(), proxy.data.clone()
+            with torch.no_grad():
+                best_correct = _count_correct_classes(logits, batch.y)
 
-        with torch.no_grad():
-            improved = per_sample_loss < best_loss
-            if improved.any():
-                best_loss[improved] = per_sample_loss[improved]
-                best_proxy[improved] = proxy.detach()[improved]
-                cur_correct = _count_correct_classes(logits, batch.y)
-                best_correct[improved] = cur_correct[improved]
-
-    return (
-        best_proxy.detach(),
-        base_loss.detach(),
-        best_loss.detach(),
-        base_correct.detach(),
-        best_correct.detach(),
-    )
+    return best_proxy.detach(), base_loss, best_loss, base_correct, best_correct
 
 
 def phase2_optimize_proxies(backbone, train_dataset,
                              subset_fraction=1.0, num_proxy=NUM_PROXY,
-                             max_steps=500, proxy_lr=1e-3, num_repeats=5,
+                             max_steps=1000, proxy_lr=1e-3, num_repeats=5,
                              save_path=None):
     """
     For each graph, run proxy optimisation `num_repeats` times (different random
@@ -362,12 +323,8 @@ def phase2_optimize_proxies(backbone, train_dataset,
     NOTE: proxy_pairs will have len = num_repeats * len(train_dataset).
           OracleProxyDataset only uses the first len(train_dataset) entries.
     """
-    opt_batch_size = BATCH_SIZE
     print("\n" + "=" * 60)
-    print(
-        f"PHASE 2: Per-Sample Proxy Optimisation  "
-        f"({num_repeats}× per graph, batch={opt_batch_size})"
-    )
+    print(f"PHASE 2: Per-Sample Proxy Optimisation  ({num_repeats}× per graph)")
     print("=" * 60)
 
     if save_path is None:
@@ -376,7 +333,7 @@ def phase2_optimize_proxies(backbone, train_dataset,
     _freeze(backbone)
     backbone.eval()
 
-    batch_loader = DataLoader(train_dataset, batch_size=opt_batch_size, shuffle=False)
+    single_loader = DataLoader(train_dataset, batch_size=1, shuffle=False)
     n_total       = int(len(train_dataset) * subset_fraction)
     proxy_pairs   = []
     improvements  = []
@@ -384,58 +341,44 @@ def phase2_optimize_proxies(backbone, train_dataset,
     sample_improved = [0] * n_total
 
     for rep in range(num_repeats):
-        processed = 0
-        pbar = tqdm(total=n_total//opt_batch_size, desc=f"Proxy opt rep {rep+1}/{num_repeats}")
-        for batch in batch_loader:
-            if processed >= n_total:
+        for idx, batch in enumerate(tqdm(single_loader, total=n_total,
+                                         desc=f"Proxy opt rep {rep+1}/{num_repeats}")):
+            if idx >= n_total:
                 break
             batch = batch.to(DEVICE)
             with torch.no_grad():
                 dense_x, dense_mask = backbone.encode_dense(batch)
 
             best_proxy, base_loss, opt_loss, base_correct, best_correct = \
-                optimize_batch_graphs(
+                optimize_single_graph(
                     backbone, batch, num_proxy=num_proxy,
                     max_steps=max_steps, lr=proxy_lr
                 )
             improvement = (base_loss - opt_loss) / (base_loss + 1e-8)
-            improvements.extend(improvement.cpu().tolist())
-            batch_size_cur = batch.y.size(0)
-            for j in range(len(batch.y)):
-                sample_idx = processed + j
-                base_loss_j = float(base_loss[j].item())
-                opt_loss_j = float(opt_loss[j].item())
-                base_correct_j = int(base_correct[j].item())
-                best_correct_j = int(best_correct[j].item())
+            improvements.append(improvement)
 
-                # Only keep sample if significant improvement:
-                #   opt_loss < 0.005  OR  number of correct classes increased
-                is_significant = (opt_loss_j < 0.005) or (best_correct_j > base_correct_j)
-                if is_significant:
-                    sample_improved[sample_idx] = 1
-                    proxy_pairs.append({
-                        "encoder_emb": dense_x[j].cpu(),
-                        "mask":        dense_mask[j].cpu(),
-                        "proxy_emb":   best_proxy[j].cpu(),
-                        "base_loss":   base_loss_j,
-                        "opt_loss":    opt_loss_j,
-                        "sample_idx":  sample_idx,
-                    })
+            # Only keep sample if significant improvement:
+            #   opt_loss < 0.005  OR  number of correct classes increased
+            is_significant = (opt_loss < 0.005) or (best_correct > base_correct)
+            if is_significant:
+                sample_improved[idx] = 1
+                proxy_pairs.append({
+                    "encoder_emb": dense_x.squeeze(0).cpu(),
+                    "mask":        dense_mask.squeeze(0).cpu(),
+                    "proxy_emb":   best_proxy.squeeze(0).cpu(),
+                    "base_loss":   base_loss,
+                    "opt_loss":    opt_loss,
+                    "sample_idx":  idx,
+                })
 
-            processed += batch_size_cur
-            pbar.update(batch_size_cur)
-
-            if processed % 200 == 0:
-                n_improved = sum(sample_improved)
-                recent = improvements[-200:] if len(improvements) >= 200 else improvements
+            if (idx + 1) % 200 == 0:
+                n_improved = sum(sample_improved[:idx+1])
                 print(
-                    f"  [rep {rep+1} | {processed}/{n_total}] "
-                    f"Avg improvement: {np.mean(recent):.4f}  "
-                    f"Improved: {sum(i > 0 for i in recent)}/{len(recent)}  "
-                    f"Kept (significant, unique): {n_improved}/{n_total}"
+                    f"  [rep {rep+1} | {idx+1}/{n_total}] "
+                    f"Avg improvement: {np.mean(improvements[-200:]):.4f}  "
+                    f"Improved: {sum(i>0 for i in improvements[-200:])}/200  "
+                    f"Kept (significant): {n_improved}/{idx+1}"
                 )
-
-        pbar.close()
 
     _unfreeze(backbone)
     with open(save_path, "wb") as f:
@@ -505,7 +448,7 @@ def eval_oracle_proxies(backbone, pyg_dataset, proxy_pairs, batch_size=BATCH_SIZ
     oracle_loader = torch.utils.data.DataLoader(
         OracleProxyDataset(pyg_dataset, proxy_pairs),
         batch_size=batch_size, shuffle=False,
-        collate_fn=collate_oracle, num_workers=NUM_WORKERS,
+        collate_fn=collate_oracle, num_workers=2,
     )
     loss_fn       = nn.BCEWithLogitsLoss()
     m_oracle      = MultilabelAveragePrecision(num_labels=OUTPUT_DIM).to(DEVICE)
@@ -541,127 +484,74 @@ def eval_oracle_proxies(backbone, pyg_dataset, proxy_pairs, batch_size=BATCH_SIZ
 
 
 # ================================================================
-# PHASE 3 — CONDITIONAL DIFFUSION  (T=T_DIFF throughout)
+# PHASE 3 — ENCODER-DECODER PROXY GENERATOR
 # ================================================================
 
-class DDPMScheduler:
+class ProxyEncoderDecoder(nn.Module):
     """
-    Linear-beta DDPM with DDIM deterministic sampling.
-    T_DIFF is used for BOTH training and inference — no schedule mismatch.
+    Multihead self-attention encoder-decoder that maps N node embeddings
+    to M proxy node embeddings.  Deterministic — no noise, no diffusion.
+
+    Encoder: stack of self-attention layers over N input node embeddings.
+    Decoder: M learned query tokens decoded via self-attention + cross-
+             attention to the encoded node representations.
+    Output:  [B, M, d] proxy embeddings.
     """
-    def __init__(self, T=T_DIFF, beta_start=1e-4, beta_end=0.02):
-        self.T     = T
-        betas      = torch.linspace(beta_start, beta_end, T)
-        alphas     = 1.0 - betas
-        alpha_bars = torch.cumprod(alphas, dim=0)
-        # index 0 = clean (prepend 1.0)
-        self.alpha_bars     = torch.cat([torch.ones(1), alpha_bars])
-        self.sqrt_ab        = self.alpha_bars.sqrt()
-        self.sqrt_one_minus = (1 - self.alpha_bars).sqrt()
-
-    def to(self, device):
-        self.alpha_bars     = self.alpha_bars.to(device)
-        self.sqrt_ab        = self.sqrt_ab.to(device)
-        self.sqrt_one_minus = self.sqrt_one_minus.to(device)
-        return self
-
-    def q_sample(self, x0, t):
-        t_idx = t + 1
-        sab   = self.sqrt_ab[t_idx].view(-1, 1, 1)
-        s1m   = self.sqrt_one_minus[t_idx].view(-1, 1, 1)
-        eps   = torch.randn_like(x0)
-        return sab * x0 + s1m * eps, eps
-
-    @torch.no_grad()
-    def ddim_sample(self, denoiser, x_enc, x_mask,
-                    num_proxy=NUM_PROXY, hidden_dim=HIDDEN_DIM):
-        """
-        DDIM reverse pass with x0-prediction parameterisation.
-        Denoiser directly predicts x0; noise is derived for the DDIM step.
-        """
-        B      = x_enc.shape[0]
-        device = x_enc.device
-        x_t    = torch.randn(B, num_proxy, hidden_dim, device=device)
-
-        ts = torch.linspace(self.T - 1, 0, self.T, dtype=torch.long)
-        for i, t_val in enumerate(ts):
-            t_batch = torch.full((B,), t_val.item(), device=device, dtype=torch.long)
-            # Denoiser directly predicts x0
-            x0_pred = denoiser(x_t, t_batch, x_enc, x_mask)
-            x0_pred = x0_pred.clamp(-10, 10)
-            t_cur   = t_val.item() + 1
-            t_prev  = int(ts[i + 1].item()) + 1 if i + 1 < len(ts) else 0
-            # Derive noise for DDIM step
-            eps_derived = (x_t - self.sqrt_ab[t_cur] * x0_pred) / (self.sqrt_one_minus[t_cur] + 1e-8)
-            x_t = self.sqrt_ab[t_prev] * x0_pred + self.sqrt_one_minus[t_prev] * eps_derived
-
-        return x_t
-
-    def single_step_denoise(self, denoiser, x_enc, x_mask,
-                            num_proxy=NUM_PROXY, hidden_dim=HIDDEN_DIM):
-        """
-        Single-step x0 prediction from pure noise.  Fully differentiable —
-        gradients flow through denoiser back to x_enc (and thus the encoder).
-        Used in Phase 4 end-to-end training.
-        """
-        B      = x_enc.shape[0]
-        device = x_enc.device
-        x_T    = torch.randn(B, num_proxy, hidden_dim, device=device)
-        t      = torch.full((B,), self.T - 1, device=device, dtype=torch.long)
-        x0_pred = denoiser(x_T, t, x_enc, x_mask)
-        return x0_pred
-
-
-class TimestepEmbedding(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, hidden_dim=HIDDEN_DIM, num_heads=NUM_HEADS,
+                 num_proxy=NUM_PROXY, num_encoder_layers=2,
+                 num_decoder_layers=4):
         super().__init__()
-        self.dim  = dim
-        self.proj = nn.Sequential(nn.Linear(dim, dim * 4), nn.SiLU(), nn.Linear(dim * 4, dim))
+        self.num_proxy  = num_proxy
+        self.hidden_dim = hidden_dim
 
-    def forward(self, t):
-        half   = self.dim // 2
-        freqs  = torch.exp(-np.log(10000) * torch.arange(half, device=t.device, dtype=torch.float) / half)
-        angles = t[:, None].float() * freqs[None]
-        return self.proj(torch.cat([angles.sin(), angles.cos()], -1))
-
-
-class DenoiserBlock(nn.Module):
-    def __init__(self, hidden_dim=HIDDEN_DIM, num_heads=NUM_HEADS):
-        super().__init__()
-        self.self_attn  = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
-        self.cross_attn = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
-        self.ff    = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 4), nn.GELU(),
-            nn.Linear(hidden_dim * 4, hidden_dim)
+        # Learned query tokens — one per proxy node
+        self.proxy_queries = nn.Parameter(
+            torch.randn(1, num_proxy, hidden_dim) * 0.02
         )
-        self.norm1 = nn.LayerNorm(hidden_dim)
-        self.norm2 = nn.LayerNorm(hidden_dim)
-        self.norm3 = nn.LayerNorm(hidden_dim)
 
-    def forward(self, b, x_enc, x_mask=None):
-        b2, _ = self.self_attn(self.norm1(b), self.norm1(b), self.norm1(b))
-        b = b + b2
-        kp    = (~x_mask) if x_mask is not None else None
-        b2, _ = self.cross_attn(self.norm2(b), x_enc, x_enc, key_padding_mask=kp)
-        b = b + b2
-        return b + self.ff(self.norm3(b))
+        # Encoder: self-attention over input nodes
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim, nhead=num_heads,
+            dim_feedforward=hidden_dim * 4,
+            dropout=0.1, activation="gelu",
+            batch_first=True, norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(
+            enc_layer, num_layers=num_encoder_layers
+        )
 
+        # Decoder: self-attn on queries + cross-attn to encoded nodes
+        dec_layer = nn.TransformerDecoderLayer(
+            d_model=hidden_dim, nhead=num_heads,
+            dim_feedforward=hidden_dim * 4,
+            dropout=0.1, activation="gelu",
+            batch_first=True, norm_first=True,
+        )
+        self.decoder = nn.TransformerDecoder(
+            dec_layer, num_layers=num_decoder_layers
+        )
 
-class ProxyDenoiser(nn.Module):
-    def __init__(self, hidden_dim=HIDDEN_DIM, num_heads=NUM_HEADS, num_blocks=4):
-        super().__init__()
-        self.time_emb = TimestepEmbedding(hidden_dim)
-        self.t_proj   = nn.Linear(hidden_dim, hidden_dim)
-        self.blocks   = nn.ModuleList([DenoiserBlock(hidden_dim, num_heads) for _ in range(num_blocks)])
         self.out_norm = nn.LayerNorm(hidden_dim)
         self.out_proj = nn.Linear(hidden_dim, hidden_dim)
 
-    def forward(self, b_noisy, t, x_enc, x_mask=None):
-        t_emb = self.t_proj(self.time_emb(t)).unsqueeze(1)
-        b     = b_noisy + t_emb
-        for block in self.blocks:
-            b = block(b, x_enc, x_mask)
-        return self.out_proj(self.out_norm(b))
+    def forward(self, x_enc, x_mask=None):
+        """
+        x_enc  : [B, N, d] padded node embeddings
+        x_mask : [B, N] bool — True = real node
+        Returns: [B, M, d] proxy embeddings
+        """
+        B = x_enc.shape[0]
+        # PyTorch transformer: key_padding_mask True = IGNORE
+        src_kpm = (~x_mask) if x_mask is not None else None
+
+        memory = self.encoder(x_enc, src_key_padding_mask=src_kpm)
+
+        queries   = self.proxy_queries.expand(B, -1, -1)
+        proxy_emb = self.decoder(
+            queries, memory, memory_key_padding_mask=src_kpm
+        )
+
+        return self.out_proj(self.out_norm(proxy_emb))
 
 
 class ProxyPairDataset(torch.utils.data.Dataset):
@@ -689,47 +579,38 @@ def collate_proxy_pairs(batch):
     return enc_pad, mask_pad, torch.stack(proxy_list)
 
 
-def phase3_train_diffusion(proxy_pairs, epochs=500, lr=1e-4,
-                            batch_size=64, save_path=None):
-    """
-    T is read from T_DIFF (global constant) — single source of truth.
-    Training and inference both use the same T-step schedule.
-    """
+def phase3_train_proxy_generator(proxy_pairs, epochs=500, lr=1e-4,
+                                  batch_size=64, save_path=None):
+    """Train the encoder-decoder proxy generator with MSE reconstruction loss."""
     print("\n" + "=" * 60)
-    print(f"PHASE 3: Training Conditional Diffusion (T={T_DIFF})")
+    print("PHASE 3: Training Encoder-Decoder Proxy Generator")
     print("=" * 60)
 
     if save_path is None:
-        save_path = f"{SAVE_DIR}/phase3_diffusion_best.pt"
+        save_path = f"{SAVE_DIR}/phase3_proxy_gen_best.pt"
 
-    sched    = DDPMScheduler(T=T_DIFF).to(DEVICE)
-    denoiser = ProxyDenoiser().to(DEVICE)
-    opt      = torch.optim.AdamW(denoiser.parameters(), lr=lr, weight_decay=1e-5)
-    lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+    proxy_gen = ProxyEncoderDecoder().to(DEVICE)
+    opt       = torch.optim.AdamW(proxy_gen.parameters(), lr=lr, weight_decay=1e-5)
+    lr_sched  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
 
     loader = torch.utils.data.DataLoader(
         ProxyPairDataset(proxy_pairs), batch_size=batch_size, shuffle=True,
-        collate_fn=collate_proxy_pairs,
-        num_workers=NUM_WORKERS,
-        pin_memory=(DEVICE == "cuda"),
+        collate_fn=collate_proxy_pairs, num_workers=2, pin_memory=True,
     )
 
     best_loss = float("inf")
     history   = {"loss": []}
 
     for epoch in range(epochs):
-        denoiser.train()
+        proxy_gen.train()
         ep_losses = []
-        for x_enc, x_mask, b0 in tqdm(loader, desc=f"Diffusion ep {epoch+1}", leave=False):
+        for x_enc, x_mask, b0 in tqdm(loader, desc=f"ProxyGen ep {epoch+1}", leave=False):
             x_enc, x_mask, b0 = x_enc.to(DEVICE), x_mask.to(DEVICE), b0.to(DEVICE)
-            t            = torch.randint(0, T_DIFF, (b0.shape[0],), device=DEVICE)
-            b_noisy, _   = sched.q_sample(b0, t)
-            # x0-prediction: denoiser directly predicts the clean proxy
-            x0_pred      = denoiser(b_noisy, t, x_enc, x_mask)
-            loss         = F.mse_loss(x0_pred, b0)
+            pred = proxy_gen(x_enc, x_mask)
+            loss = F.mse_loss(pred, b0)
             opt.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(denoiser.parameters(), 1.0)
+            nn.utils.clip_grad_norm_(proxy_gen.parameters(), 1.0)
             opt.step()
             ep_losses.append(loss.item())
 
@@ -738,31 +619,30 @@ def phase3_train_diffusion(proxy_pairs, epochs=500, lr=1e-4,
         history["loss"].append(mean_loss)
         if mean_loss < best_loss:
             best_loss = mean_loss
-            torch.save(denoiser.state_dict(), save_path)
+            torch.save(proxy_gen.state_dict(), save_path)
         if (epoch + 1) % 10 == 0:
             print(f"Epoch {epoch+1:3d} | MSE: {mean_loss:.6f}")
 
-    denoiser.load_state_dict(torch.load(save_path))
+    proxy_gen.load_state_dict(torch.load(save_path))
     print(f"\nPhase 3 done. Best loss: {best_loss:.6f}")
-    return denoiser, sched, history
+    return proxy_gen, history
 
 
 # ================================================================
-# PHASE 4 — FRESH GT BACKBONE + DIFFUSION PROXIES
+# PHASE 4 — GT BACKBONE + PROXY NODES
 # ================================================================
 
-def _make_proxy_fn(backbone, denoiser, sched):
+def _make_proxy_fn(backbone, proxy_gen):
     """Returns a callable(batch) -> [B, M, d] that generates proxies."""
     @torch.no_grad()
     def proxy_fn(batch):
         backbone.eval()
         dense_x, dense_mask = backbone.encode_dense(batch)
-        return sched.ddim_sample(denoiser, dense_x, dense_mask,
-                                 num_proxy=NUM_PROXY, hidden_dim=HIDDEN_DIM)
+        return proxy_gen(dense_x, dense_mask)
     return proxy_fn
 
 
-def phase4_train_with_proxies(denoiser, sched, train_loader, val_loader, test_loader,
+def phase4_train_with_proxies(proxy_gen, train_loader, val_loader, test_loader,
                                p1_state_dict=None,
                                epochs=500, lr=3e-5, weight_decay=1e-5,
                                warmup_epochs=50):
@@ -773,47 +653,47 @@ def phase4_train_with_proxies(denoiser, sched, train_loader, val_loader, test_lo
         Atom+Bond Encoder
             |              |
             v              v
-        Denoiser           |
+        ProxyGen           |
             |              |
             v     +        v
               Transformer → task head → loss
 
-    The encoder output feeds into both the denoiser (conditioning) and the
-    transformer (node embeddings).  The denoiser generates proxy tokens via
-    single-step x0 prediction.  Task loss backpropagates through everything:
-    transformer → proxy nodes → denoiser → encoder.
+    The encoder output feeds into both the proxy generator (conditioning)
+    and the transformer (node embeddings).  The proxy generator produces M
+    proxy tokens via cross-attention decoding.  Task loss backpropagates
+    through everything: transformer → proxy nodes → proxy_gen → encoder.
     """
     print("\n" + "=" * 60)
-    print("PHASE 4: End-to-End Pipeline Finetuning (encoder + denoiser + GT)")
+    print("PHASE 4: End-to-End Pipeline Finetuning (encoder + proxy_gen + GT)")
     print("=" * 60)
 
     # Unfreeze everything — full pipeline finetuning
-    _unfreeze(denoiser)
+    _unfreeze(proxy_gen)
 
     backbone = GraphTransformer().to(DEVICE)
     if p1_state_dict is not None:
         backbone.load_state_dict(p1_state_dict)
         print("  Loaded Phase 1 pretrained weights into Phase 4 backbone")
 
-    # All parameters in a single optimizer: encoder + transformer + head + denoiser
-    all_params = list(backbone.parameters()) + list(denoiser.parameters())
+    # All parameters in a single optimizer: encoder + transformer + head + proxy_gen
+    all_params = list(backbone.parameters()) + list(proxy_gen.parameters())
     optimizer = torch.optim.AdamW(all_params, lr=lr, weight_decay=weight_decay)
     lr_sched  = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     loss_fn   = nn.BCEWithLogitsLoss()
     # Non-differentiable proxy fn for evaluation
-    get_proxies = _make_proxy_fn(backbone, denoiser, sched)
+    get_proxies = _make_proxy_fn(backbone, proxy_gen)
 
-    n_backbone = sum(p.numel() for p in backbone.parameters())
-    n_denoiser = sum(p.numel() for p in denoiser.parameters())
-    print(f"  Backbone params: {n_backbone:,}  Denoiser params: {n_denoiser:,}")
-    print(f"  Total trainable: {n_backbone + n_denoiser:,}  Warmup: {warmup_epochs} epochs")
+    n_backbone  = sum(p.numel() for p in backbone.parameters())
+    n_proxy_gen = sum(p.numel() for p in proxy_gen.parameters())
+    print(f"  Backbone params: {n_backbone:,}  ProxyGen params: {n_proxy_gen:,}")
+    print(f"  Total trainable: {n_backbone + n_proxy_gen:,}  Warmup: {warmup_epochs} epochs")
 
     best_val = 0.0
     history  = dict(train_ap=[], val_ap=[], test_ap=[], train_loss=[], val_loss=[])
 
     for epoch in range(epochs):
         backbone.train()
-        denoiser.train()
+        proxy_gen.train()
         use_proxies = (epoch >= warmup_epochs)
         metric, ep_loss = MultilabelAveragePrecision(num_labels=OUTPUT_DIM).to(DEVICE), []
 
@@ -824,13 +704,10 @@ def phase4_train_with_proxies(denoiser, sched, train_loader, val_loader, test_lo
 
             if use_proxies:
                 # ── Differentiable end-to-end path ──────────────
-                # 1. Encode once — shared between denoiser & transformer
+                # 1. Encode once — shared between proxy_gen & transformer
                 dense_x, dense_mask = backbone.encode_dense(batch)
-                # 2. Single-step x0 prediction (differentiable through denoiser)
-                proxies = sched.single_step_denoise(
-                    denoiser, dense_x, dense_mask,
-                    num_proxy=NUM_PROXY, hidden_dim=HIDDEN_DIM
-                )
+                # 2. Generate proxy embeddings (differentiable through proxy_gen)
+                proxies = proxy_gen(dense_x, dense_mask)
                 # 3. Transformer forward with pre-computed encoding
                 logits, _ = backbone(
                     batch, proxy_embeddings=proxies,
@@ -861,7 +738,7 @@ def phase4_train_with_proxies(denoiser, sched, train_loader, val_loader, test_lo
         if val_ap > best_val:
             best_val = val_ap
             torch.save(backbone.state_dict(), f"{SAVE_DIR}/phase4_best_backbone.pt")
-            torch.save(denoiser.state_dict(), f"{SAVE_DIR}/phase4_best_denoiser.pt")
+            torch.save(proxy_gen.state_dict(), f"{SAVE_DIR}/phase4_best_proxy_gen.pt")
 
         if (epoch + 1) % 10 == 0:
             test_ap, _ = evaluate(backbone, test_loader, proxy_fn=pfn)
@@ -871,11 +748,11 @@ def phase4_train_with_proxies(denoiser, sched, train_loader, val_loader, test_lo
                   f"| Val {val_ap:.4f} {val_loss:.4f} | Test {test_ap:.4f}")
 
     backbone.load_state_dict(torch.load(f"{SAVE_DIR}/phase4_best_backbone.pt"))
-    denoiser.load_state_dict(torch.load(f"{SAVE_DIR}/phase4_best_denoiser.pt"))
-    pfn_final = _make_proxy_fn(backbone, denoiser, sched)
+    proxy_gen.load_state_dict(torch.load(f"{SAVE_DIR}/phase4_best_proxy_gen.pt"))
+    pfn_final = _make_proxy_fn(backbone, proxy_gen)
     final_test_ap, _ = evaluate(backbone, test_loader, proxy_fn=pfn_final)
     print(f"\nPhase 4 done. Best Val AP: {best_val:.4f}  Test AP: {final_test_ap:.4f}")
-    return backbone, denoiser, history
+    return backbone, proxy_gen, history
 
 
 # ================================================================
@@ -1008,7 +885,7 @@ class HypergraphGraphTransformer(nn.Module):
         return self.head(pooled), node_emb
 
 
-def phase4_5_train_hypergraph(denoiser, sched, train_loader, val_loader, test_loader,
+def phase4_5_train_hypergraph(proxy_gen, train_loader, val_loader, test_loader,
                                p1_state_dict=None,
                                epochs=500, lr=3e-5, weight_decay=1e-5,
                                warmup_epochs=50):
@@ -1020,15 +897,14 @@ def phase4_5_train_hypergraph(denoiser, sched, train_loader, val_loader, test_lo
     print("PHASE 4.5: Hyperedge-Routed Attention (N→M→N)")
     print("=" * 60)
 
-    _freeze(denoiser)
-    denoiser.eval()
+    _freeze(proxy_gen)
+    proxy_gen.eval()
 
     backbone = HypergraphGraphTransformer().to(DEVICE)
     # Initialize encoder from Phase 1 weights if available
     if p1_state_dict is not None:
-        prefix = "encoder."
-        enc_state = {k[len(prefix):]: v for k, v in p1_state_dict.items()
-                     if k.startswith(prefix)}
+        enc_state = {k.replace("encoder.", ""): v for k, v in p1_state_dict.items()
+                     if k.startswith("encoder.")}
         backbone.encoder.load_state_dict(enc_state)
         print("  Loaded Phase 1 encoder weights")
     # Freeze encoder
@@ -1039,7 +915,7 @@ def phase4_5_train_hypergraph(denoiser, sched, train_loader, val_loader, test_lo
     optimizer = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=weight_decay)
     lr_sched  = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     loss_fn   = nn.BCEWithLogitsLoss()
-    get_proxies = _make_proxy_fn(backbone, denoiser, sched)
+    get_proxies = _make_proxy_fn(backbone, proxy_gen)
 
     print(f"Total params: {sum(p.numel() for p in backbone.parameters()):,}  "
           f"Trainable: {sum(p.numel() for p in trainable_params):,}  "
@@ -1097,8 +973,8 @@ def phase4_5_train_hypergraph(denoiser, sched, train_loader, val_loader, test_lo
                   f"| Val {val_ap:.4f} {val_loss:.4f} | Test {test_ap:.4f}")
 
     backbone.load_state_dict(torch.load(f"{SAVE_DIR}/phase4_5_best_backbone.pt"))
-    _unfreeze(denoiser)
-    pfn_final = _make_proxy_fn(backbone, denoiser, sched)
+    _unfreeze(proxy_gen)
+    pfn_final = _make_proxy_fn(backbone, proxy_gen)
     final_test_ap, _ = evaluate(backbone, test_loader, proxy_fn=pfn_final)
     print(f"\nPhase 4.5 done. Best Val AP: {best_val:.4f}  Test AP: {final_test_ap:.4f}")
     return backbone, history
@@ -1316,7 +1192,7 @@ def evaluate_gnn(model, loader, proxy_fn=None):
 # 5d. Training loop
 # ----------------------------------------------------------------
 
-def phase5_train_gnn_with_proxies(denoiser, sched,
+def phase5_train_gnn_with_proxies(proxy_gen,
                                    train_loader, val_loader, test_loader,
                                    p1_state_dict=None,
                                    epochs=500, lr=3e-4, weight_decay=1e-5,
@@ -1325,17 +1201,17 @@ def phase5_train_gnn_with_proxies(denoiser, sched,
     Trains a ProxyGNN, initializing the node encoder from Phase 1 weights.
 
     During warmup: standard GNN on original graph (no proxies).
-    After warmup : diffusion generates M proxy nodes which are inserted as
+    After warmup : proxy generator produces M proxy nodes which are inserted as
                    real graph nodes with all-to-all edges to original nodes.
 
-    The denoiser is frozen throughout.  Gradients only flow through the GNN.
+    The proxy generator is frozen throughout.  Gradients only flow through the GNN.
 
     Key design choices
     ------------------
     * Proxy generation uses the GNN's encode_nodes() as conditioning signal
       (same as Phase 4 used encode_dense()).  For Phase 5 we don't have a
-      dense representation, so we pool original node embeddings per graph
-      to form a sequence of length N for the denoiser cross-attention.
+      dense representation, so we pack original node embeddings per graph
+      to form a sequence of length N for the proxy generator cross-attention.
     * Null bond features (zeros) are used for proxy edges. The GINLayer's
       edge_proj maps these to zero, so proxy messages are purely the source
       node's current embedding — which is exactly what we want (the proxy
@@ -1347,15 +1223,14 @@ def phase5_train_gnn_with_proxies(denoiser, sched,
     print("PHASE 5: GNN Backbone + Proxy Nodes as Explicit Graph Nodes")
     print("=" * 60)
 
-    _freeze(denoiser)
-    denoiser.eval()
+    _freeze(proxy_gen)
+    proxy_gen.eval()
 
     backbone = ProxyGNN().to(DEVICE)
     # Initialize node encoder from Phase 1 pretrained weights
     if p1_state_dict is not None:
-        prefix = "encoder."
-        enc_state = {k[len(prefix):]: v for k, v in p1_state_dict.items()
-                     if k.startswith(prefix)}
+        enc_state = {k.replace("encoder.", ""): v for k, v in p1_state_dict.items()
+                     if k.startswith("encoder.")}
         backbone.node_encoder.load_state_dict(enc_state)
         print("  Loaded Phase 1 encoder weights into Phase 5 GNN node_encoder")
     # Freeze encoder — only finetune GNN layers + head
@@ -1375,15 +1250,13 @@ def phase5_train_gnn_with_proxies(denoiser, sched,
     @torch.no_grad()
     def get_proxies_gnn(batch):
         """
-        Conditioning signal for the denoiser: use the GNN's node encoder
-        output packed into a dense [B, max_N, d] tensor (same format the
-        denoiser expects from Phase 4).
+        Use the GNN's node encoder output packed into a dense [B, max_N, d]
+        tensor as input to the proxy generator.
         """
         backbone.eval()
         h = backbone.encode_nodes(batch)                 # [total_N, d]
         dense_x, dense_mask = to_dense_batch(h, batch.batch)  # [B, max_N, d]
-        return sched.ddim_sample(denoiser, dense_x, dense_mask,
-                                 num_proxy=NUM_PROXY, hidden_dim=HIDDEN_DIM)
+        return proxy_gen(dense_x, dense_mask)
 
     best_val = 0.0
     history  = dict(train_ap=[], val_ap=[], test_ap=[], train_loss=[], val_loss=[])
@@ -1438,7 +1311,7 @@ def phase5_train_gnn_with_proxies(denoiser, sched,
                   f"| Val {val_ap:.4f} {val_loss:.4f} | Test {test_ap:.4f}")
 
     backbone.load_state_dict(torch.load(f"{SAVE_DIR}/phase5_best_gnn.pt"))
-    _unfreeze(denoiser)
+    _unfreeze(proxy_gen)
     final_test_ap, _ = evaluate_gnn(backbone, test_loader, proxy_fn=get_proxies_gnn)
     print(f"\nPhase 5 done. Best Val AP: {best_val:.4f}  Test AP: {final_test_ap:.4f}")
     return backbone, history
@@ -1448,38 +1321,45 @@ def phase5_train_gnn_with_proxies(denoiser, sched,
 # ABLATION HELPERS
 # ================================================================
 
-def run_ablation_num_proxy_gt(backbone, denoiser, sched, val_loader,
+def run_ablation_num_proxy_gt(backbone, proxy_gen, val_loader,
                                proxy_counts=(1, 4, 8, 16, 32, 64, 128, 256)):
-    """Ablation for Graph Transformer (Phase 4) backbone."""
+    """Ablation for Graph Transformer (Phase 4) backbone.
+    Generates full NUM_PROXY proxies and slices to M."""
     print("\n[Ablation GT] Number of proxy nodes M:")
     results = {}
     for M in proxy_counts:
-        # Temporarily override NUM_PROXY inside the closure via a wrapper
+        if M > proxy_gen.num_proxy:
+            print(f"  M={M:4d}  Skipped (> trained {proxy_gen.num_proxy})")
+            continue
         @torch.no_grad()
         def pfn_m(batch, _M=M):
             backbone.eval()
             dense_x, dense_mask = backbone.encode_dense(batch)
-            return sched.ddim_sample(denoiser, dense_x, dense_mask,
-                                     num_proxy=_M, hidden_dim=HIDDEN_DIM)
+            full_proxies = proxy_gen(dense_x, dense_mask)
+            return full_proxies[:, :_M, :]
         val_ap, _ = evaluate(backbone, val_loader, proxy_fn=pfn_m)
         results[M] = val_ap
         print(f"  M={M:4d}  Val AP: {val_ap:.4f}")
     return results
 
 
-def run_ablation_num_proxy_gnn(backbone, denoiser, sched, val_loader,
+def run_ablation_num_proxy_gnn(backbone, proxy_gen, val_loader,
                                 proxy_counts=(1, 4, 8, 16, 32, 64, 128, 256)):
-    """Ablation for GNN (Phase 5) backbone."""
+    """Ablation for GNN (Phase 5) backbone.
+    Generates full NUM_PROXY proxies and slices to M."""
     print("\n[Ablation GNN] Number of proxy nodes M:")
     results = {}
     for M in proxy_counts:
+        if M > proxy_gen.num_proxy:
+            print(f"  M={M:4d}  Skipped (> trained {proxy_gen.num_proxy})")
+            continue
         @torch.no_grad()
         def pfn_m(batch, _M=M):
             backbone.eval()
             h = backbone.encode_nodes(batch)
             dense_x, dense_mask = to_dense_batch(h, batch.batch)
-            return sched.ddim_sample(denoiser, dense_x, dense_mask,
-                                     num_proxy=_M, hidden_dim=HIDDEN_DIM)
+            full_proxies = proxy_gen(dense_x, dense_mask)
+            return full_proxies[:, :_M, :]
         val_ap, _ = evaluate_gnn(backbone, val_loader, proxy_fn=pfn_m)
         results[M] = val_ap
         print(f"  M={M:4d}  Val AP: {val_ap:.4f}")
@@ -1516,7 +1396,7 @@ if __name__ == "__main__":
     else:
         proxy_pairs, sample_improved = phase2_optimize_proxies(
             p1_backbone, train_ds, subset_fraction=1.0,
-            num_proxy=NUM_PROXY, max_steps=500, proxy_lr=1e-3, num_repeats=30,
+            num_proxy=NUM_PROXY, max_steps=1000, proxy_lr=1e-3, num_repeats=2,
         )
 
     # ── Phase 2.5 ────────────────────────────────────────────────
@@ -1527,30 +1407,29 @@ if __name__ == "__main__":
         print("  WARNING: Oracle gain below 5% threshold. Continuing anyway.")
 
     # ── Phase 3 ──────────────────────────────────────────────────
-    DIFF_CKPT = f"{SAVE_DIR}/phase3_diffusion_best.pt"
-    if os.path.exists(DIFF_CKPT):
-        print(f"\nLoading denoiser from {DIFF_CKPT}")
-        denoiser   = ProxyDenoiser().to(DEVICE)
-        denoiser.load_state_dict(torch.load(DIFF_CKPT, map_location=DEVICE))
-        ddpm_sched = DDPMScheduler(T=T_DIFF).to(DEVICE)
+    P3_CKPT = f"{SAVE_DIR}/phase3_proxy_gen_best.pt"
+    if os.path.exists(P3_CKPT):
+        print(f"\nLoading proxy generator from {P3_CKPT}")
+        proxy_gen = ProxyEncoderDecoder().to(DEVICE)
+        proxy_gen.load_state_dict(torch.load(P3_CKPT, map_location=DEVICE))
     else:
-        denoiser, ddpm_sched, p3_hist = phase3_train_diffusion(
-            proxy_pairs, epochs=500, lr=1e-3, batch_size=64,
+        proxy_gen, p3_hist = phase3_train_proxy_generator(
+            proxy_pairs, epochs=500, lr=1e-4, batch_size=64,
         )
 
     # ── Phase 4 (end-to-end finetuning with proxies) ────────────
     P4_CKPT = f"{SAVE_DIR}/phase4_best_backbone.pt"
-    P4_DEN_CKPT = f"{SAVE_DIR}/phase4_best_denoiser.pt"
+    P4_GEN_CKPT = f"{SAVE_DIR}/phase4_best_proxy_gen.pt"
     if os.path.exists(P4_CKPT):
         print(f"\nLoading Phase 4 backbone from {P4_CKPT}")
         p4_backbone = GraphTransformer().to(DEVICE)
         p4_backbone.load_state_dict(torch.load(P4_CKPT, map_location=DEVICE))
-        if os.path.exists(P4_DEN_CKPT):
-            denoiser.load_state_dict(torch.load(P4_DEN_CKPT, map_location=DEVICE))
-            print(f"  Also loaded Phase 4 finetuned denoiser from {P4_DEN_CKPT}")
+        if os.path.exists(P4_GEN_CKPT):
+            proxy_gen.load_state_dict(torch.load(P4_GEN_CKPT, map_location=DEVICE))
+            print(f"  Also loaded Phase 4 finetuned proxy_gen from {P4_GEN_CKPT}")
     else:
-        p4_backbone, denoiser, p4_hist = phase4_train_with_proxies(
-            denoiser, ddpm_sched, train_loader, val_loader, test_loader,
+        p4_backbone, proxy_gen, p4_hist = phase4_train_with_proxies(
+            proxy_gen, train_loader, val_loader, test_loader,
             p1_state_dict=p1_state_dict,
             epochs=500, lr=3e-5, weight_decay=1e-5, warmup_epochs=50,
         )
@@ -1564,7 +1443,7 @@ if __name__ == "__main__":
         p4_5_backbone.load_state_dict(torch.load(P4_5_CKPT, map_location=DEVICE))
     else:
         p4_5_backbone, p4_5_hist = phase4_5_train_hypergraph(
-            denoiser, ddpm_sched, train_loader, val_loader, test_loader,
+            proxy_gen, train_loader, val_loader, test_loader,
             p1_state_dict=p1_state_dict,
             epochs=500, lr=3e-5, weight_decay=1e-5, warmup_epochs=50,
         )
@@ -1577,7 +1456,7 @@ if __name__ == "__main__":
         p5_backbone.load_state_dict(torch.load(P5_CKPT, map_location=DEVICE))
     else:
         p5_backbone, p5_hist = phase5_train_gnn_with_proxies(
-            denoiser, ddpm_sched, train_loader, val_loader, test_loader,
+            proxy_gen, train_loader, val_loader, test_loader,
             p1_state_dict=p1_state_dict,
             epochs=500, lr=3e-4, weight_decay=1e-5, warmup_epochs=50,
         )
@@ -1590,30 +1469,29 @@ if __name__ == "__main__":
         print(f"Phase 1  (vanilla GT)         — Best Val AP: {p1_best_val:.4f}")
     print(f"Phase 2.5 oracle delta         — ΔAP: {oracle_ap - base_ap:+.4f}")
     p4_val_ap, _ = evaluate(p4_backbone, val_loader,
-                             proxy_fn=_make_proxy_fn(p4_backbone, denoiser, ddpm_sched))
-    print(f"Phase 4  (GT + diff proxies)   — Val AP: {p4_val_ap:.4f}")
+                             proxy_fn=_make_proxy_fn(p4_backbone, proxy_gen))
+    print(f"Phase 4  (GT + proxies)        — Val AP: {p4_val_ap:.4f}")
     if p4_5_backbone is not None:
         p4_5_val_ap, _ = evaluate(
             p4_5_backbone, val_loader,
-            proxy_fn=_make_proxy_fn(p4_5_backbone, denoiser, ddpm_sched))
+            proxy_fn=_make_proxy_fn(p4_5_backbone, proxy_gen))
         print(f"Phase 4.5 (hyperedge routing)  — Val AP: {p4_5_val_ap:.4f}")
     @torch.no_grad()
     def _p5_proxy_fn(batch):
         p5_backbone.eval()
         h = p5_backbone.encode_nodes(batch)
         dense_x, dense_mask = to_dense_batch(h, batch.batch)
-        return ddpm_sched.ddim_sample(denoiser, dense_x, dense_mask,
-                                       num_proxy=NUM_PROXY, hidden_dim=HIDDEN_DIM)
+        return proxy_gen(dense_x, dense_mask)
     p5_val_ap, _ = evaluate_gnn(p5_backbone, val_loader, proxy_fn=_p5_proxy_fn)
-    print(f"Phase 5  (GNN + diff proxies)  — Val AP: {p5_val_ap:.4f}")
+    print(f"Phase 5  (GNN + proxies)       — Val AP: {p5_val_ap:.4f}")
 
     # Ablations
-    run_ablation_num_proxy_gt(p4_backbone, denoiser, ddpm_sched, val_loader)
-    run_ablation_num_proxy_gnn(p5_backbone, denoiser, ddpm_sched, val_loader)
+    run_ablation_num_proxy_gt(p4_backbone, proxy_gen, val_loader)
+    run_ablation_num_proxy_gnn(p5_backbone, proxy_gen, val_loader)
 
 
 """
-When we use the trained denoiser model to dynamically generate embeddings, 
+When we use the trained proxy generator model to dynamically generate embeddings,
 generate for train data when doing full M+N retraining,
 add edge prediction layer -> pass to GNN -> Get task loss -> optimize main GNN and also optimize the edge predictor
 -> Gives a better graph that incorporates both structural and global features
