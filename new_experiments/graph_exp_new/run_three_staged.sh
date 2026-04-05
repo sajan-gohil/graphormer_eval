@@ -12,7 +12,7 @@ SHARED_DIR="${BASE_DIR}/shared"
 
 # --- Stage 1: Pretrain transformer (shared) ---
 echo "=== Three-Staged: Stage 1 (shared pretrain) ==="
-python main_three_staged.py \
+python3 main_three_staged.py \
     --stage 1 \
     --save_dir "${SHARED_DIR}"
 
@@ -24,14 +24,14 @@ MODEL_PATH="${SHARED_DIR}/stage1_best.pt"
 
 # --- Score-based generator (highest priority) ---
 echo "=== Three-Staged: score_based (stage 2) ==="
-python main_three_staged.py \
+python3 main_three_staged.py \
     --stage 2 \
     --generator score_based \
     --model_path "${MODEL_PATH}" \
     --save_dir "${BASE_DIR}/score_based"
 
 echo "=== Three-Staged: score_based (stage 3) ==="
-python main_three_staged.py \
+python3 main_three_staged.py \
     --stage 3 \
     --generator score_based \
     --model_path "${MODEL_PATH}" \
@@ -40,7 +40,7 @@ python main_three_staged.py \
 
 # --- PMA generator (farthest_point queries) ---
 echo "=== Three-Staged: pma/farthest_point (stage 2) ==="
-python main_three_staged.py \
+python3 main_three_staged.py \
     --stage 2 \
     --generator pma \
     --pma_query_mode farthest_point \
@@ -48,7 +48,7 @@ python main_three_staged.py \
     --save_dir "${BASE_DIR}/pma_fp"
 
 echo "=== Three-Staged: pma/farthest_point (stage 3) ==="
-python main_three_staged.py \
+python3 main_three_staged.py \
     --stage 3 \
     --generator pma \
     --pma_query_mode farthest_point \
@@ -58,7 +58,7 @@ python main_three_staged.py \
 
 # --- PMA generator (soft_kmeans queries) ---
 echo "=== Three-Staged: pma/soft_kmeans (stage 2) ==="
-python main_three_staged.py \
+python3 main_three_staged.py \
     --stage 2 \
     --generator pma \
     --pma_query_mode soft_kmeans \
@@ -66,7 +66,7 @@ python main_three_staged.py \
     --save_dir "${BASE_DIR}/pma_sk"
 
 echo "=== Three-Staged: pma/soft_kmeans (stage 3) ==="
-python main_three_staged.py \
+python3 main_three_staged.py \
     --stage 3 \
     --generator pma \
     --pma_query_mode soft_kmeans \
@@ -76,14 +76,14 @@ python main_three_staged.py \
 
 # --- Graph coarsening generator ---
 echo "=== Three-Staged: graph_coarsening (stage 2) ==="
-python main_three_staged.py \
+python3 main_three_staged.py \
     --stage 2 \
     --generator graph_coarsening \
     --model_path "${MODEL_PATH}" \
     --save_dir "${BASE_DIR}/graph_coarsening"
 
 echo "=== Three-Staged: graph_coarsening (stage 3) ==="
-python main_three_staged.py \
+python3 main_three_staged.py \
     --stage 3 \
     --generator graph_coarsening \
     --model_path "${MODEL_PATH}" \
@@ -92,14 +92,14 @@ python main_three_staged.py \
 
 # --- GNN pooling (ablation baseline) ---
 echo "=== Three-Staged: gnn_pooling (stage 2) ==="
-python main_three_staged.py \
+python3 main_three_staged.py \
     --stage 2 \
     --generator gnn_pooling \
     --model_path "${MODEL_PATH}" \
     --save_dir "${BASE_DIR}/gnn_pooling"
 
 echo "=== Three-Staged: gnn_pooling (stage 3) ==="
-python main_three_staged.py \
+python3 main_three_staged.py \
     --stage 3 \
     --generator gnn_pooling \
     --model_path "${MODEL_PATH}" \

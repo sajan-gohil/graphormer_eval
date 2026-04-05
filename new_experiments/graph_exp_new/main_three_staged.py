@@ -1,7 +1,7 @@
 """
-Three-Staged Pipeline — generator trained directly on task loss.
+Three-Staged Pipeline  generator trained directly on task loss.
 
-Stage 1: Pretrain GraphTransformer → freeze (identical to main_staged.py)
+Stage 1: Pretrain GraphTransformer  freeze (identical to main_staged.py)
 Stage 2: Train generator on task loss through frozen transformer (NEW)
 Stage 3: End-to-end fine-tune with Phase A (frozen transformer, reduced LR)
          + Phase B (unfreeze transformer at 0.1x gen LR) + proxy dropout
@@ -56,14 +56,14 @@ def build_parser():
     p.add_argument("--dropout", type=float, default=0.3)
     p.add_argument("--num_proxies", type=int, default=32)
 
-    # Stage 1 — Pretrain transformer
+    # Stage 1  Pretrain transformer
     p.add_argument("--s1_lr", type=float, default=1e-3)
     p.add_argument("--s1_weight_decay", type=float, default=3e-4)
     p.add_argument("--s1_max_epochs", type=int, default=500)
     p.add_argument("--s1_patience", type=int, default=5)
     p.add_argument("--s1_grad_clip", type=float, default=1.0)
 
-    # Stage 2 — Train generator on task loss
+    # Stage 2 - Train generator on task loss
     p.add_argument("--s2_lr", type=float, default=5e-4)
     p.add_argument("--s2_weight_decay", type=float, default=1e-4)
     p.add_argument("--s2_max_epochs", type=int, default=500)
@@ -71,7 +71,7 @@ def build_parser():
     p.add_argument("--s2_eval_every", type=int, default=1)
     p.add_argument("--s2_grad_clip", type=float, default=1.0)
 
-    # Stage 3 — End-to-end finetune
+    # Stage 3 - End-to-end finetune
     p.add_argument("--s3_phase_a_epochs", type=int, default=20,
                    help="Epochs to keep transformer frozen before Phase B")
     p.add_argument("--s3_lr_gen", type=float, default=None,
@@ -110,7 +110,7 @@ def build_parser():
                    choices=["shared", "grouped"])
 
     # Common
-    p.add_argument("--batch_size", type=int, default=256)
+    p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--save_dir", type=str, default="checkpoints_three_staged")
     p.add_argument("--device", type=str, default=None)
@@ -285,7 +285,7 @@ def mean_proxy_eval(model, generator, loader, device, args):
 
 
 # ================================================================
-# STAGE 1 — PRETRAIN TRANSFORMER (identical to main_staged.py)
+# STAGE 1 - PRETRAIN TRANSFORMER (identical to main_staged.py)
 # ================================================================
 
 def run_stage1(args):
@@ -393,7 +393,7 @@ def run_stage1(args):
 
 
 # ================================================================
-# STAGE 2 — TRAIN GENERATOR ON TASK LOSS (NEW)
+# STAGE 2 - TRAIN GENERATOR ON TASK LOSS (NEW)
 # ================================================================
 
 def _proxy_cosine_sim(proxies):
@@ -590,7 +590,7 @@ def run_stage2(args, model_path):
 
 
 # ================================================================
-# STAGE 3 — END-TO-END FINETUNE (Phase A + Phase B + proxy dropout)
+# STAGE 3 - END-TO-END FINETUNE (Phase A + Phase B + proxy dropout)
 # ================================================================
 
 def run_stage3(args, model_path, generator_path):
