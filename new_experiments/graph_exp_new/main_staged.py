@@ -31,7 +31,7 @@ from generators import (
     PMAGenerator, GraphCoarseningGenerator,
 )
 from metrics import compute_macro_ap
-from mmd import mmd_squared
+from mmd import mmd_squared, cross_sample_moment_loss, prior_moment_loss
 
 
 # ================================================================
@@ -74,6 +74,12 @@ def build_parser():
     p.add_argument("--s2_proxy_lr", type=float, default=1e-2)
     p.add_argument("--s2_num_steps", type=int, default=700)
     p.add_argument("--s2_mmd_lambda", type=float, default=0.05)
+    p.add_argument("--s2_cross_moment_lambda", type=float, default=0.0,
+                   help="Weight for intra-batch cross-sample moment matching")
+    p.add_argument("--s2_prior_moment_lambda", type=float, default=0.0,
+                   help="Weight for fixed-prior moment regularization")
+    p.add_argument("--s2_prior_target_var", type=float, default=-1.0,
+                   help="Target variance for prior loss; <=0 estimates from train embeddings")
     p.add_argument("--s2_num_restarts", type=int, default=5)
     p.add_argument("--s2_grad_clip", type=float, default=1.0)
     p.add_argument("--s2_loss_threshold", type=float, default=0.005,
@@ -183,6 +189,39 @@ def _count_correct(logits, labels):
 def _dense_mask_to_batch_vec(dense_mask):
     counts = dense_mask.sum(dim=1).to(torch.long)
     return torch.arange(dense_mask.size(0), device=dense_mask.device).repeat_interleave(counts)
+
+
+@torch.no_grad()
+def _estimate_empirical_proxy_prior_var(model, loader, device):
+    """
+    Estimate a scalar target variance from encoder node embeddings on train set.
+    """
+    was_training = model.training
+    model.eval()
+
+    total_elems = 0
+    sum_x = torch.zeros((), device=device)
+    sum_x2 = torch.zeros((), device=device)
+
+    for batch in loader:
+        batch = batch.to(device)
+        dense_x, dense_mask = model.encode_dense(batch)
+        nodes = dense_x[dense_mask]
+        if nodes.numel() == 0:
+            continue
+        sum_x += nodes.sum()
+        sum_x2 += nodes.pow(2).sum()
+        total_elems += nodes.numel()
+
+    if was_training:
+        model.train()
+
+    if total_elems == 0:
+        return 1.0
+
+    mean = sum_x / total_elems
+    var = (sum_x2 / total_elems) - mean.pow(2)
+    return float(torch.clamp(var, min=1e-6).item())
 
 
 def build_generator(args):
@@ -412,7 +451,7 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
     """
     Optimize proxy embeddings for a batch of graphs.
     Returns per-graph: best_proxy, base_loss, best_loss, base_correct,
-                       best_correct, best_mmd.
+                       best_correct, best_mmd, best_cross, best_prior.
     """
     B = batch.y.size(0)
     device = batch.y.device
@@ -432,6 +471,8 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
     best_proxy = proxy.detach().clone()
     best_correct = base_correct.clone()
     best_mmd = torch.full((B,), float("inf"), device=device)
+    best_cross = torch.full((B,), float("inf"), device=device)
+    best_prior = torch.full((B,), float("inf"), device=device)
 
     for step in range(args.s2_num_steps):
         opt.zero_grad()
@@ -446,7 +487,17 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
             mmd_losses.append(mmd_squared(proxy[i], nodes_i))
         mmd_batch = torch.stack(mmd_losses)
 
-        total = (task_loss + args.s2_mmd_lambda * mmd_batch).mean()
+        # Intra-batch and fixed-prior moment regularization
+        cross_batch = cross_sample_moment_loss(proxy)
+        prior_batch = prior_moment_loss(
+            proxy, target_variance=args.s2_prior_target_var)
+
+        total = (
+            task_loss
+            + args.s2_mmd_lambda * mmd_batch
+            + args.s2_cross_moment_lambda * cross_batch
+            + args.s2_prior_moment_lambda * prior_batch
+        ).mean()
         total.backward()
         nn.utils.clip_grad_norm_([proxy], args.s2_grad_clip)
         opt.step()
@@ -457,17 +508,30 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
                 best_loss[improved] = task_loss[improved]
                 best_proxy[improved] = proxy.detach()[improved]
                 best_mmd[improved] = mmd_batch.detach()[improved]
+                best_cross[improved] = cross_batch.detach()[improved]
+                best_prior[improved] = prior_batch.detach()[improved]
                 cur_correct = _count_correct(logits, batch.y)
                 best_correct[improved] = cur_correct[improved]
 
-    return best_proxy, base_loss, best_loss, base_correct, best_correct, best_mmd
+    return (
+        best_proxy,
+        base_loss,
+        best_loss,
+        base_correct,
+        best_correct,
+        best_mmd,
+        best_cross,
+        best_prior,
+    )
 
 
 def run_stage2(args, model_path):
     print("\n" + "=" * 60, flush=True)
     print("STAGE 2: Per-Graph Proxy Optimization", flush=True)
     print(f"  Restarts: {args.s2_num_restarts}, Steps: {args.s2_num_steps}, "
-          f"MMD lambda: {args.s2_mmd_lambda}", flush=True)
+        f"MMD lambda: {args.s2_mmd_lambda}", flush=True)
+    print(f"  Cross moment lambda: {args.s2_cross_moment_lambda}, "
+        f"Prior moment lambda: {args.s2_prior_moment_lambda}", flush=True)
     print("=" * 60, flush=True)
 
     train_loader, _, _, train_ds, _, _ = get_loaders(
@@ -484,6 +548,15 @@ def run_stage2(args, model_path):
     model.load_state_dict(ckpt["model_state"])
     _freeze(model)
     model.eval()
+
+    if args.s2_prior_target_var <= 0:
+        args.s2_prior_target_var = _estimate_empirical_proxy_prior_var(
+            model, train_loader, args.device)
+        print(f"  Estimated prior target variance from train embeddings: "
+              f"{args.s2_prior_target_var:.6f}", flush=True)
+    else:
+        print(f"  Using provided prior target variance: "
+              f"{args.s2_prior_target_var:.6f}", flush=True)
 
     proxy_pairs = []
     # Track which samples ever got a valid pair (across restarts)
@@ -504,7 +577,8 @@ def run_stage2(args, model_path):
                 dense_x, dense_mask = model.encode_dense(batch)
 
             (best_proxy, base_loss, best_loss,
-             base_correct, best_correct, best_mmd) = _optimize_batch(
+             base_correct, best_correct, best_mmd,
+             best_cross, best_prior) = _optimize_batch(
                 model, batch, dense_x, dense_mask, args)
 
             # Extended optimization for non-improved graphs
@@ -532,7 +606,8 @@ def run_stage2(args, model_path):
                 )
 
                 (subset_best_proxy, _, subset_best_loss, _,
-                subset_best_correct, subset_best_mmd,) = _optimize_batch(
+                 subset_best_correct, subset_best_mmd,
+                 subset_best_cross, subset_best_prior) = _optimize_batch(
                     model,
                     subset_batch,
                     subset_dense_x,
@@ -545,6 +620,8 @@ def run_stage2(args, model_path):
                 best_loss[subset_mask] = subset_best_loss
                 best_correct[subset_mask] = subset_best_correct
                 best_mmd[subset_mask] = subset_best_mmd
+                best_cross[subset_mask] = subset_best_cross
+                best_prior[subset_mask] = subset_best_prior
 
             # Collect predictions for AP logging (using best proxies)
             with torch.no_grad():
@@ -573,6 +650,8 @@ def run_stage2(args, model_path):
                         "base_loss": bl,
                         "opt_loss": ol,
                         "mmd_loss": float(best_mmd[j]),
+                        "cross_moment_loss": float(best_cross[j]),
+                        "prior_moment_loss": float(best_prior[j]),
                         "base_correct": bc,
                         "best_correct": oc,
                         "sample_idx": sid,
