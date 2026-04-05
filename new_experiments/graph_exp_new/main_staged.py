@@ -28,6 +28,7 @@ from data import get_loaders, ProxyTargetDataset, collate_with_proxies
 from models import GraphTransformer
 from generators import (
     ScoreBasedGenerator, FlowMatchingGenerator, GNNPoolingGenerator,
+    PMAGenerator, GraphCoarseningGenerator,
 )
 from metrics import compute_macro_ap
 from mmd import mmd_squared
@@ -43,7 +44,8 @@ def build_parser():
     p.add_argument("--stage", type=str, default="all",
                    choices=["1", "2", "3", "4", "all"])
     p.add_argument("--generator", type=str, default="score_based",
-                   choices=["flow_matching", "score_based", "gnn_pooling"])
+                   choices=["flow_matching", "score_based", "gnn_pooling",
+                            "pma", "graph_coarsening"])
 
     # Paths (for resuming individual stages)
     p.add_argument("--model_path", type=str, default=None,
@@ -104,6 +106,14 @@ def build_parser():
     p.add_argument("--idx_emb_dim", type=int, default=32)
     p.add_argument("--decode_mode", type=str, default="shared",
                    choices=["shared", "grouped"])
+    # PMA specific
+    p.add_argument("--pma_query_mode", type=str, default="farthest_point",
+                   choices=["farthest_point", "soft_kmeans"])
+    # Graph coarsening specific
+    p.add_argument("--coarsen_gnn_type", type=str, default="GIN",
+                   choices=["GIN", "GCN"])
+    p.add_argument("--coarsen_reg_weight", type=float, default=0.1)
+    p.add_argument("--coarsen_reg_type", type=str, default="mincut")
 
     # Stage 4 — Finetune
     p.add_argument("--s4_lr_transformer", type=float, default=1e-5)
@@ -208,6 +218,27 @@ def build_generator(args):
             dropout=args.gen_dropout,
             decode_mode=args.decode_mode,
         )
+    elif args.generator == "pma":
+        return PMAGenerator(
+            num_proxies=args.num_proxies,
+            input_dim=args.hidden_dim,
+            num_heads=args.gen_num_heads,
+            num_layers=args.gen_num_layers,
+            dropout=args.gen_dropout,
+            query_mode=args.pma_query_mode,
+        )
+    elif args.generator == "graph_coarsening":
+        return GraphCoarseningGenerator(
+            num_proxies=args.num_proxies,
+            input_dim=args.hidden_dim,
+            gnn_layers=args.gen_num_layers,
+            gnn_type=args.coarsen_gnn_type,
+            dropout=args.gen_dropout,
+            reg_type=args.coarsen_reg_type,
+            reg_weight=args.coarsen_reg_weight,
+            num_refine_layers=1,
+            num_heads=args.gen_num_heads,
+        )
     else:
         raise ValueError(f"Unknown generator: {args.generator}")
 
@@ -215,7 +246,7 @@ def build_generator(args):
 def generate_proxies(model, generator, batch, args):
     """Generate proxies for a batch. Returns (proxy_emb (B,M,d), dense_x, dense_mask)."""
     dense_x, dense_mask = model.encode_dense(batch)
-    if args.generator == "gnn_pooling":
+    if args.generator in ("gnn_pooling", "graph_coarsening"):
         flat_emb = model.encode_nodes(batch)
         proxy_emb = generator.generate(
             flat_emb, mask=None,
@@ -567,7 +598,7 @@ def run_stage2(args, model_path):
         save_path = os.path.join(args.save_dir, "proxy_pairs_temp.pkl")
         with open(save_path, "wb") as f:
             pickle.dump(proxy_pairs, f)
-        
+
     # --- MMD-based filtering ---
     print("\nFiltering by MMD outliers...", flush=True)
     mmd_values = [p["mmd_loss"] for p in proxy_pairs]
@@ -661,24 +692,34 @@ def run_stage3(args, model_path, proxy_pairs_path):
 
             optimizer.zero_grad()
 
-            if args.generator == "gnn_pooling":
-                # GNN needs flat embeddings + graph structure
+            if args.generator in ("gnn_pooling", "graph_coarsening"):
+                # GNN-based generators need flat embeddings + graph structure
                 with torch.no_grad():
                     flat_emb = model.encode_nodes(pyg_batch)
-                _, aux_loss = generator(
+                proxy_emb, aux_loss = generator(
                     flat_emb, mask=None, targets=targets,
                     edge_index=pyg_batch.edge_index,
                     batch_vec=pyg_batch.batch,
                     edge_attr=pyg_batch.edge_attr,
                 )
             else:
-                # Score-based and flow matching use dense embeddings
-                _, aux_loss = generator(encoder_embs, emb_masks, targets=targets)
+                # Dense-interface generators (score_based, flow_matching, pma)
+                proxy_emb, aux_loss = generator(encoder_embs, emb_masks, targets=targets)
 
-            aux_loss.backward()
+            if aux_loss is not None:
+                # Reconstruction / regularization loss (MMD, CFM, ortho)
+                train_loss = aux_loss
+            else:
+                # PMA has no reconstruction loss — fall back to downstream task loss
+                logits, _ = model(pyg_batch, proxy_embeddings=proxy_emb,
+                                  precomputed_dense=(encoder_embs, emb_masks))
+                train_loss = nn.functional.binary_cross_entropy_with_logits(
+                    logits, pyg_batch.y)
+
+            train_loss.backward()
             nn.utils.clip_grad_norm_(generator.parameters(), args.s3_grad_clip)
             optimizer.step()
-            train_losses.append(aux_loss.item())
+            train_losses.append(train_loss.item())
 
         mean_train_loss = float(np.mean(train_losses))
 
@@ -819,7 +860,7 @@ def run_stage4(args, model_path, generator_path):
             dense_x, dense_mask = model.encode_dense(batch)
 
             # Generate proxies (differentiable)
-            if args.generator == "gnn_pooling":
+            if args.generator in ("gnn_pooling", "graph_coarsening"):
                 flat_emb = model.encode_nodes(batch)
                 proxy_emb, _ = generator(
                     flat_emb, mask=None,

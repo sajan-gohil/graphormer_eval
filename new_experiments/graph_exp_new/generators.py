@@ -351,6 +351,229 @@ class _GNNLayer(nn.Module):
         return self.norm(x + h)  # residual + LayerNorm
 
 
+# ================================================================
+# PMA GENERATOR (Per-Graph Query Cross-Attention)
+# ================================================================
+
+class PMAGenerator(BaseGenerator):
+    """
+    Pooling by Multihead Attention with per-graph query generation.
+
+    Step 1: Generate M diverse per-graph query seeds (detached) via FPS or soft k-means.
+    Step 2: Cross-attention from queries to node embeddings (learnable).
+    Step 3: FFN per cross-attention layer.
+
+    Gradients flow through cross-attention parameters, not through the seed selection.
+    """
+    def __init__(self, num_proxies, input_dim, num_heads=4, num_layers=2,
+                 dropout=0.2, query_mode="farthest_point"):
+        super().__init__(num_proxies, input_dim)
+        self.query_mode = query_mode
+
+        self.cross_attn_layers = nn.ModuleList()
+        for _ in range(num_layers):
+            self.cross_attn_layers.append(nn.ModuleDict({
+                "norm_q": nn.LayerNorm(input_dim),
+                "norm_kv": nn.LayerNorm(input_dim),
+                "cross_attn": nn.MultiheadAttention(
+                    input_dim, num_heads, dropout=dropout, batch_first=True
+                ),
+                "norm_ff": nn.LayerNorm(input_dim),
+                "ffn": nn.Sequential(
+                    nn.Linear(input_dim, input_dim * 4),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(input_dim * 4, input_dim),
+                ),
+            }))
+
+    def _get_query_seeds(self, node_embeddings, mask):
+        """Per-graph diverse query seeds (detached). Returns (B, M, d)."""
+        B, N, d = node_embeddings.shape
+        M = self.num_proxies
+
+        with torch.no_grad():
+            seeds = []
+            for b in range(B):
+                valid = node_embeddings[b][mask[b]]  # (n_valid, d)
+                n_valid = valid.shape[0]
+                if n_valid == 0:
+                    seeds.append(torch.zeros(M, d, device=valid.device))
+                    continue
+                if n_valid <= M:
+                    idx = torch.arange(n_valid, device=valid.device)
+                    idx = idx.repeat(M // n_valid + 1)[:M]
+                    seeds.append(valid[idx])
+                    continue
+                if self.query_mode == "farthest_point":
+                    idx = [torch.randint(n_valid, (1,)).item()]
+                    for _ in range(M - 1):
+                        dists = torch.cdist(valid[idx], valid).min(dim=0).values
+                        idx.append(dists.argmax().item())
+                    idx = torch.tensor(idx, device=valid.device)
+                    seeds.append(valid[idx])
+                elif self.query_mode == "soft_kmeans":
+                    seeds.append(self._soft_kmeans(valid, M))
+                else:
+                    raise ValueError(f"Unknown query_mode: {self.query_mode}")
+            return torch.stack(seeds).detach()  # (B, M, d)
+
+    @staticmethod
+    def _soft_kmeans(X, K, n_iters=3, temp=1.0):
+        n = X.shape[0]
+        if n <= K:
+            idx = torch.arange(n, device=X.device).repeat(K // n + 1)[:K]
+            return X[idx]
+        idx = [torch.randint(n, (1,)).item()]
+        for _ in range(K - 1):
+            dists = torch.cdist(X[idx], X).min(dim=0).values
+            idx.append(dists.argmax().item())
+        centers = X[torch.tensor(idx, device=X.device)]
+        for _ in range(n_iters):
+            dists = torch.cdist(X, centers)
+            weights = F.softmax(-dists / temp, dim=1)
+            centers = (weights.T @ X) / (weights.sum(0, keepdim=True).T + 1e-8)
+        return centers
+
+    def forward(self, node_embeddings, mask, targets=None, **kwargs):
+        queries = self._get_query_seeds(node_embeddings, mask)  # (B, M, d)
+        key_padding_mask = ~mask  # True = padding for MHA
+        x = queries
+        for layer in self.cross_attn_layers:
+            q_normed = layer["norm_q"](x)
+            kv_normed = layer["norm_kv"](node_embeddings)
+            attn_out, _ = layer["cross_attn"](
+                q_normed, kv_normed, kv_normed,
+                key_padding_mask=key_padding_mask
+            )
+            x = x + attn_out
+            x = x + layer["ffn"](layer["norm_ff"](x))
+        return x, None  # No aux_loss — task loss is the only signal
+
+
+# ================================================================
+# GRAPH COARSENING GENERATOR
+# ================================================================
+
+class GraphCoarseningGenerator(BaseGenerator):
+    """
+    Generates proxies via learnt graph coarsening (DiffPool/MinCutPool style).
+
+    Uses a GNN to compute soft assignment of N nodes to M clusters,
+    then aggregates node features per cluster to produce proxy embeddings.
+    Optionally applies orthogonality regularization to encourage non-degenerate clusters.
+
+    Input: flat node embeddings (total_N, d) + edge_index + batch_vec
+    Output: (B, M, d) proxy embeddings
+    """
+    def __init__(self, num_proxies, input_dim, gnn_layers=2,
+                 gnn_type="GIN", dropout=0.2, reg_type="mincut",
+                 reg_weight=0.1, num_refine_layers=1, num_heads=4):
+        super().__init__(num_proxies, input_dim)
+        self.reg_type = reg_type
+        self.reg_weight = reg_weight
+
+        # GNN layers for assignment logits
+        self.assign_gnn_layers = nn.ModuleList()
+        for _ in range(gnn_layers):
+            if gnn_type == "GIN":
+                from torch_geometric.nn import GINConv
+                gin_nn = nn.Sequential(
+                    nn.Linear(input_dim, input_dim),
+                    nn.ReLU(),
+                    nn.Linear(input_dim, input_dim),
+                )
+                self.assign_gnn_layers.append(GINConv(gin_nn))
+            elif gnn_type == "GCN":
+                from torch_geometric.nn import GCNConv
+                self.assign_gnn_layers.append(GCNConv(input_dim, input_dim))
+            else:
+                raise ValueError(f"GraphCoarseningGenerator: unsupported gnn_type={gnn_type}")
+
+        self.assign_norms = nn.ModuleList([
+            nn.LayerNorm(input_dim) for _ in range(gnn_layers)
+        ])
+        self.assign_proj = nn.Linear(input_dim, num_proxies)
+
+        # Optional self-attention refinement among proxies
+        self.refinement_layers = nn.ModuleList()
+        for _ in range(num_refine_layers):
+            self.refinement_layers.append(nn.ModuleDict({
+                "norm1": nn.LayerNorm(input_dim),
+                "attn": nn.MultiheadAttention(
+                    input_dim, num_heads, dropout=dropout, batch_first=True
+                ),
+                "norm2": nn.LayerNorm(input_dim),
+                "ffn": nn.Sequential(
+                    nn.Linear(input_dim, input_dim * 4),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(input_dim * 4, input_dim),
+                ),
+            }))
+
+    def forward(self, node_embeddings, mask, targets=None, **kwargs):
+        """
+        Args:
+            node_embeddings: (total_N, d) FLAT node embeddings (not dense-batched).
+            mask: ignored (GNN uses batch_vec instead).
+            targets: optional (B, M, d) — unused; aux_loss is orthogonality only.
+            **kwargs: must contain 'edge_index' and 'batch_vec'.
+        Returns:
+            proxy_embeddings: (B, M, d)
+            aux_loss: orthogonality regularization loss or None
+        """
+        edge_index = kwargs["edge_index"]
+        batch_vec = kwargs["batch_vec"]
+        num_graphs = int(batch_vec.max().item()) + 1
+
+        # GNN for assignment
+        h = node_embeddings
+        for gnn_layer, norm in zip(self.assign_gnn_layers, self.assign_norms):
+            h = norm(h + F.relu(gnn_layer(h, edge_index)))
+
+        assign_logits = self.assign_proj(h)       # (total_N, M)
+        S = F.softmax(assign_logits, dim=-1)       # (total_N, M)
+
+        # Aggregate per cluster per graph
+        proxies_list = []
+        for g in range(num_graphs):
+            g_mask = (batch_vec == g)
+            S_g = S[g_mask]                                        # (n_g, M)
+            X_g = node_embeddings[g_mask]                          # (n_g, d)
+            S_g_norm = S_g / (S_g.sum(dim=0, keepdim=True) + 1e-8)
+            proxies_list.append(S_g_norm.T @ X_g)                  # (M, d)
+
+        proxy_embeddings = torch.stack(proxies_list)  # (B, M, d)
+
+        # Refinement layers
+        x = proxy_embeddings
+        for layer in self.refinement_layers:
+            normed = layer["norm1"](x)
+            attn_out, _ = layer["attn"](normed, normed, normed)
+            x = x + attn_out
+            x = x + layer["ffn"](layer["norm2"](x))
+        proxy_embeddings = x
+
+        # Orthogonality regularization
+        aux_loss = None
+        if self.reg_type == "mincut" and self.reg_weight > 0:
+            ortho_losses = []
+            for g in range(num_graphs):
+                g_mask = (batch_vec == g)
+                S_g = S[g_mask]
+                StS = (S_g.T @ S_g) / S_g.shape[0]
+                I_M = torch.eye(self.num_proxies, device=S_g.device) / self.num_proxies
+                ortho_losses.append(torch.norm(StS - I_M))
+            aux_loss = self.reg_weight * torch.stack(ortho_losses).mean()
+
+        return proxy_embeddings, aux_loss
+
+
+# ================================================================
+# GNN POOLING GENERATOR
+# ================================================================
+
 class GNNPoolingGenerator(BaseGenerator):
     """
     GNN-based proxy generator: multi-hop GNN + multi-scale pooling + shared MLP decode.
