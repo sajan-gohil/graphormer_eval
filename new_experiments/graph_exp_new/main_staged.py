@@ -86,14 +86,14 @@ def build_parser():
                    help="Save proxy if opt_loss < threshold")
 
     # Stage 3 — Generator training
-    p.add_argument("--gen_hidden_dim", type=int, default=128)
-    p.add_argument("--gen_num_layers", type=int, default=2)
-    p.add_argument("--gen_num_heads", type=int, default=4)
+    p.add_argument("--gen_hidden_dim", type=int, default=256)
+    p.add_argument("--gen_num_layers", type=int, default=4)
+    p.add_argument("--gen_num_heads", type=int, default=8)
     p.add_argument("--gen_dropout", type=float, default=0.2)
     p.add_argument("--s3_lr", type=float, default=5e-4)
     p.add_argument("--s3_weight_decay", type=float, default=1e-4)
     p.add_argument("--s3_max_epochs", type=int, default=1000)
-    p.add_argument("--s3_patience", type=int, default=20)
+    p.add_argument("--s3_patience", type=int, default=50)
     p.add_argument("--s3_eval_every", type=int, default=1)
     p.add_argument("--s3_grad_clip", type=float, default=1.0)
     p.add_argument("--target_noise_std", type=float, default=0.02)
@@ -112,7 +112,7 @@ def build_parser():
     p.add_argument("--idx_emb_dim", type=int, default=32)
     p.add_argument("--decode_mode", type=str, default="shared",
                    choices=["shared", "grouped"])
-    # PMA specific
+    # PMA specif
     p.add_argument("--pma_query_mode", type=str, default="farthest_point",
                    choices=["farthest_point", "soft_kmeans"])
     # Graph coarsening specific
