@@ -72,12 +72,12 @@ def mmd_squared(P: torch.Tensor, Q: torch.Tensor, sigma: torch.Tensor = None) ->
 
     # Unbiased estimator (exclude diagonal for same-sample terms)
     if n > 1:
-        term_pp = (K_pp.sum() - K_pp.diagonal().sum()) / (n * (n - 1))
+        term_pp = K_pp.mean()  # (K_pp.sum() - K_pp.diagonal().sum()) / (n * (n - 1))
     else:
         term_pp = torch.tensor(0.0, device=P.device)
 
     if m > 1:
-        term_qq = (K_qq.sum() - K_qq.diagonal().sum()) / (m * (m - 1))
+        term_qq = K_qq.mean()  # (K_qq.sum() - K_qq.diagonal().sum()) / (m * (m - 1))
     else:
         term_qq = torch.tensor(0.0, device=Q.device)
 
