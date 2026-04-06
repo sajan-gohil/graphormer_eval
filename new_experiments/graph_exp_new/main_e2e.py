@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 
 from data import get_loaders
-from models import GraphTransformer
+from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
 from generators import ScoreBasedGenerator, GNNPoolingGenerator
 from metrics import compute_macro_ap
 from mmd import mmd_squared
@@ -31,18 +31,54 @@ def build_parser():
     p = argparse.ArgumentParser(description="Pipeline B: End-to-End Proxy Training")
     p.add_argument("--config", type=str, default=None, help="Path to yaml config (CLI overrides yaml)")
 
+    # Backbone
+    p.add_argument("--backbone", type=str, default="vanilla_gt",
+                   choices=["vanilla_gt", "gred", "hybrid"],
+                   help="Backbone architecture: vanilla_gt (transformer only), "
+                        "gred (GRED distance filtering only), "
+                        "hybrid (GRED encoder + transformer layers for proxy integration)")
+
     # Generator
     p.add_argument("--generator", type=str, default="score_based",
                    choices=["score_based", "gnn_pooling"],
                    help="Generator architecture (flow_matching not supported in e2e)")
     p.add_argument("--num_proxies", type=int, default=64)
 
-    # Model
+    # Model (shared)
     p.add_argument("--hidden_dim", type=int, default=128)
     p.add_argument("--num_layers", type=int, default=5)
     p.add_argument("--num_heads", type=int, default=8)
     p.add_argument("--output_dim", type=int, default=10)
     p.add_argument("--dropout", type=float, default=0.3)
+
+    # Laplacian positional encoding
+    p.add_argument("--use_lap_pe", action="store_true", default=False,
+                   help="Add Laplacian eigenvector positional encodings to node features")
+    p.add_argument("--lap_pe_dim", type=int, default=8,
+                   help="Number of Laplacian eigenvectors for positional encoding")
+
+    # GRED-specific
+    p.add_argument("--state_dim", type=int, default=88,
+                   help="LRU complex state dimension (GRED/hybrid only)")
+    p.add_argument("--num_gred_layers", type=int, default=8,
+                   help="Number of GRED layers (GRED/hybrid only)")
+    p.add_argument("--num_transformer_layers", type=int, default=2,
+                   help="Number of transformer layers for proxy integration (hybrid only)")
+    p.add_argument("--gred_expand", type=int, default=1,
+                   help="FFN expansion factor for GRED DeepSets MLP")
+    p.add_argument("--r_min", type=float, default=0.0,
+                   help="Min eigenvalue magnitude for LRU init")
+    p.add_argument("--r_max", type=float, default=1.0,
+                   help="Max eigenvalue magnitude for LRU init")
+    p.add_argument("--max_phase", type=float, default=6.28,
+                   help="Max eigenvalue phase for LRU init")
+    p.add_argument("--gred_act", type=str, default="full-glu",
+                   choices=["full-glu", "half-glu"],
+                   help="GLU activation variant for GRED")
+    p.add_argument("--max_hops", type=int, default=40,
+                   help="Maximum number of hop levels for distance masks")
+    p.add_argument("--dist_mask_workers", type=int, default=8,
+                   help="Number of workers for distance mask computation")
 
     # Generator-specific
     p.add_argument("--gen_hidden_dim", type=int, default=128)
@@ -106,6 +142,51 @@ def parse_args():
 # MODEL BUILDING
 # ================================================================
 
+def build_model(args):
+    """Build backbone model based on --backbone arg."""
+    if args.backbone == "vanilla_gt":
+        return GraphTransformer(
+            num_layers=args.num_layers,
+            num_heads=args.num_heads,
+            hidden_dim=args.hidden_dim,
+            output_dim=args.output_dim,
+            dropout=args.dropout,
+            lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
+        )
+    elif args.backbone == "gred":
+        return GREDEncoder(
+            hidden_dim=args.hidden_dim,
+            state_dim=args.state_dim,
+            num_layers=args.num_gred_layers,
+            expand=args.gred_expand,
+            r_min=args.r_min,
+            r_max=args.r_max,
+            max_phase=args.max_phase,
+            dropout=args.dropout,
+            act=args.gred_act,
+            output_dim=args.output_dim,
+            lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
+        )
+    elif args.backbone == "hybrid":
+        return GREDHybridTransformer(
+            hidden_dim=args.hidden_dim,
+            state_dim=args.state_dim,
+            num_gred_layers=args.num_gred_layers,
+            num_transformer_layers=args.num_transformer_layers,
+            num_heads=args.num_heads,
+            expand=args.gred_expand,
+            r_min=args.r_min,
+            r_max=args.r_max,
+            max_phase=args.max_phase,
+            dropout=args.dropout,
+            act=args.gred_act,
+            output_dim=args.output_dim,
+            lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
+        )
+    else:
+        raise ValueError(f"Unknown backbone: {args.backbone}")
+
+
 def build_generator(args):
     if args.generator == "score_based":
         return ScoreBasedGenerator(
@@ -137,26 +218,57 @@ def build_generator(args):
 # FORWARD PASS
 # ================================================================
 
-def forward_e2e(model, generator, batch, args, use_proxies=True):
+def forward_e2e(model, generator, batch, args, use_proxies=True,
+                dist_masks=None, node_masks=None):
     """
-    Compose: encode -> generate proxies -> transformer with proxies -> classify.
+    Compose: encode -> generate proxies -> model with proxies -> classify.
+
+    Supports vanilla_gt, gred, and hybrid backbones.
+
+    Args:
+        model: backbone model (GraphTransformer, GREDEncoder, or GREDHybridTransformer).
+        generator: proxy generator module.
+        batch: PyG Batch object.
+        args: parsed CLI args.
+        use_proxies: whether to generate and use proxies.
+        dist_masks: (B, K, max_N, max_N) distance masks (required for gred/hybrid).
+        node_masks: (B, max_N) boolean node masks (required for gred/hybrid).
 
     Returns:
         logits: (B, output_dim)
         mmd_loss: scalar tensor (0 if mmd_lambda == 0 or no proxies)
         node_emb: (total_N, d)
     """
+    is_gred = args.backbone in ("gred", "hybrid")
+
+    # --- No-proxy path ---
     if not use_proxies:
-        logits, node_emb = model(batch, readout_scope=args.readout_scope)
+        if args.backbone == "vanilla_gt":
+            logits, node_emb = model(batch, readout_scope=args.readout_scope)
+        elif args.backbone == "gred":
+            logits, node_emb = model(batch, dist_masks, node_masks)
+        elif args.backbone == "hybrid":
+            logits, node_emb = model(batch, dist_masks, node_masks,
+                                     readout_scope=args.readout_scope)
         return logits, torch.tensor(0.0, device=batch.x.device), node_emb
 
-    # Step 1: Encode nodes
+    # --- Proxy path ---
+    # Step 1: Encode nodes (dense)
     dense_x, dense_mask = model.encode_dense(batch)
+
+    # For hybrid: run GRED encoding to produce topology-aware embeddings
+    # Generators receive GRED-encoded features, not raw encoder features
+    if args.backbone == "hybrid":
+        gred_h = model.encode_gred(dense_x, dist_masks, node_masks)
+        gen_input = gred_h
+        gen_mask = dense_mask
+    else:
+        gen_input = dense_x
+        gen_mask = dense_mask
 
     # Step 2: Generate proxies
     if args.generator == "gnn_pooling":
-        # GNN generator needs flat node embeddings + graph structure
-        flat_node_emb = model.encode_nodes(batch)
+        flat_node_emb = gen_input[gen_mask]  # flatten from dense
         proxy_emb, _ = generator(
             flat_node_emb, mask=None,
             edge_index=batch.edge_index,
@@ -164,27 +276,37 @@ def forward_e2e(model, generator, batch, args, use_proxies=True):
             edge_attr=batch.edge_attr,
         )
     else:
-        # Score-based generator takes dense (B, N, d)
-        proxy_emb, _ = generator(dense_x, dense_mask)
+        proxy_emb, _ = generator(gen_input, gen_mask)
 
-    # Step 3: Compute MMD loss (proxies vs node embeddings)
+    # Step 3: Compute MMD loss
     mmd_loss = torch.tensor(0.0, device=batch.x.device)
     if args.mmd_lambda > 0:
-        B = dense_x.shape[0]
+        B = gen_input.shape[0]
         mmd_losses = []
         for i in range(B):
-            nodes_i = dense_x[i][dense_mask[i]]  # (N_i, d)
-            proxies_i = proxy_emb[i]  # (M, d)
+            nodes_i = gen_input[i][gen_mask[i]]
+            proxies_i = proxy_emb[i]
             mmd_losses.append(mmd_squared(proxies_i, nodes_i))
         mmd_loss = torch.stack(mmd_losses).mean()
 
-    # Step 4: Transformer forward with proxies (skip re-encoding via precomputed_dense)
-    logits, node_emb = model(
-        batch,
-        proxy_embeddings=proxy_emb,
-        precomputed_dense=(dense_x, dense_mask),
-        readout_scope=args.readout_scope,
-    )
+    # Step 4: Forward through model with proxies
+    if args.backbone == "vanilla_gt":
+        logits, node_emb = model(
+            batch, proxy_embeddings=proxy_emb,
+            precomputed_dense=(dense_x, dense_mask),
+            readout_scope=args.readout_scope,
+        )
+    elif args.backbone == "gred":
+        # Standalone GRED doesn't support proxies — shouldn't reach here
+        raise ValueError("GRED backbone does not support proxy integration. Use 'hybrid'.")
+    elif args.backbone == "hybrid":
+        logits, node_emb = model(
+            batch, dist_masks, node_masks,
+            proxy_embeddings=proxy_emb,
+            precomputed_dense=(dense_x, dense_mask),
+            precomputed_gred=gred_h,
+            readout_scope=args.readout_scope,
+        )
 
     return logits, mmd_loss, node_emb
 
@@ -199,14 +321,28 @@ def evaluate(model, generator, loader, device, args, use_proxies=True):
     model.eval()
     generator.eval()
     loss_fn = nn.BCEWithLogitsLoss()
+    is_gred = args.backbone in ("gred", "hybrid")
 
     all_preds, all_labels = [], []
     task_losses, mmd_losses = [], []
 
-    for batch in loader:
-        batch = batch.to(device)
-        logits, mmd_loss, _ = forward_e2e(model, generator, batch, args,
-                                          use_proxies=use_proxies)
+    for batch_data in loader:
+        if is_gred:
+            batch, dist_masks_batch, node_masks_batch = batch_data
+            batch = batch.to(device)
+            dist_masks_batch = dist_masks_batch.to(device)
+            node_masks_batch = node_masks_batch.to(device)
+        else:
+            batch = batch_data.to(device)
+            dist_masks_batch = None
+            node_masks_batch = None
+
+        logits, mmd_loss, _ = forward_e2e(
+            model, generator, batch, args,
+            use_proxies=use_proxies,
+            dist_masks=dist_masks_batch,
+            node_masks=node_masks_batch,
+        )
         task_loss = loss_fn(logits, batch.y)
         task_losses.append(task_loss.item())
         mmd_losses.append(mmd_loss.item())
@@ -224,33 +360,44 @@ def evaluate(model, generator, loader, device, args, use_proxies=True):
 # ================================================================
 
 def run_e2e(args):
+    is_gred = args.backbone in ("gred", "hybrid")
+
     print(f"Pipeline B — End-to-End Training", flush=True)
+    print(f"  Backbone: {args.backbone}", flush=True)
     print(f"  Generator: {args.generator}", flush=True)
     print(f"  Proxies: {args.num_proxies}, Warmup: {args.proxy_warmup_epochs} epochs", flush=True)
     print(f"  Readout: {args.readout_scope}, MMD lambda: {args.mmd_lambda}", flush=True)
+    if args.use_lap_pe:
+        print(f"  Laplacian PE: dim={args.lap_pe_dim}", flush=True)
+    if is_gred:
+        print(f"  GRED: layers={args.num_gred_layers}, state_dim={args.state_dim}, "
+              f"max_hops={args.max_hops}, act={args.gred_act}", flush=True)
+        if args.backbone == "hybrid":
+            print(f"  Hybrid: transformer_layers={args.num_transformer_layers}", flush=True)
     print(f"  Device: {args.device}", flush=True)
+
+    # Validate backbone+generator compatibility
+    if args.backbone == "gred" and args.num_proxies > 0:
+        print("  WARNING: GRED backbone ignores proxies. Use --backbone hybrid for proxy support.",
+              flush=True)
 
     # Data
     train_loader, val_loader, test_loader, _, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
+        use_dist_masks=is_gred, max_hops=args.max_hops,
+        dist_mask_workers=args.dist_mask_workers,
+        use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
     # Model
-    model = GraphTransformer(
-        num_layers=args.num_layers,
-        num_heads=args.num_heads,
-        hidden_dim=args.hidden_dim,
-        output_dim=args.output_dim,
-        dropout=args.dropout,
-    ).to(args.device)
-
+    model = build_model(args).to(args.device)
     generator = build_generator(args).to(args.device)
 
     total_params = sum(p.numel() for p in model.parameters()) + \
                    sum(p.numel() for p in generator.parameters())
     print(f"  Total parameters: {total_params:,}", flush=True)
-    print(f"    Transformer: {sum(p.numel() for p in model.parameters()):,}", flush=True)
-    print(f"    Generator:   {sum(p.numel() for p in generator.parameters()):,}", flush=True)
+    print(f"    Model:     {sum(p.numel() for p in model.parameters()):,}", flush=True)
+    print(f"    Generator: {sum(p.numel() for p in generator.parameters()):,}", flush=True)
 
     # Single optimizer for everything
     optimizer = torch.optim.AdamW(
@@ -278,12 +425,25 @@ def run_e2e(args):
         train_task_losses, train_mmd_losses = [], []
         all_train_preds, all_train_labels = [], []
 
-        for batch in train_loader:
-            batch = batch.to(args.device)
+        for batch_data in train_loader:
+            if is_gred:
+                batch, dist_masks_batch, node_masks_batch = batch_data
+                batch = batch.to(args.device)
+                dist_masks_batch = dist_masks_batch.to(args.device)
+                node_masks_batch = node_masks_batch.to(args.device)
+            else:
+                batch = batch_data.to(args.device)
+                dist_masks_batch = None
+                node_masks_batch = None
+
             optimizer.zero_grad()
 
-            logits, mmd_loss, _ = forward_e2e(model, generator, batch, args,
-                                              use_proxies=use_proxies)
+            logits, mmd_loss, _ = forward_e2e(
+                model, generator, batch, args,
+                use_proxies=use_proxies,
+                dist_masks=dist_masks_batch,
+                node_masks=node_masks_batch,
+            )
             task_loss = loss_fn(logits, batch.y)
             total_loss = task_loss + args.mmd_lambda * mmd_loss
 

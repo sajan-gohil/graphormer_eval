@@ -62,6 +62,12 @@ def build_parser():
     p.add_argument("--output_dim", type=int, default=10)
     p.add_argument("--dropout", type=float, default=0.3)
 
+    # Laplacian positional encoding
+    p.add_argument("--use_lap_pe", action="store_true", default=False,
+                   help="Add Laplacian eigenvector positional encodings to node features")
+    p.add_argument("--lap_pe_dim", type=int, default=8,
+                   help="Number of Laplacian eigenvectors for positional encoding")
+
     # Stage 1
     p.add_argument("--s1_lr", type=float, default=1e-3)
     p.add_argument("--s1_weight_decay", type=float, default=3e-4)
@@ -335,12 +341,14 @@ def run_stage1(args):
 
     train_loader, val_loader, test_loader, _, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
+        use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
     model = GraphTransformer(
         num_layers=args.num_layers, num_heads=args.num_heads,
         hidden_dim=args.hidden_dim, output_dim=args.output_dim,
         dropout=args.dropout,
+        lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
     ).to(args.device)
 
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
@@ -536,6 +544,7 @@ def run_stage2(args, model_path):
 
     train_loader, _, _, train_ds, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
+        use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
     # Load and freeze transformer
@@ -543,6 +552,7 @@ def run_stage2(args, model_path):
         num_layers=args.num_layers, num_heads=args.num_heads,
         hidden_dim=args.hidden_dim, output_dim=args.output_dim,
         dropout=args.dropout,
+        lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
     ).to(args.device)
     ckpt = torch.load(model_path, map_location=args.device, weights_only=True)
     model.load_state_dict(ckpt["model_state"])
@@ -715,6 +725,7 @@ def run_stage3(args, model_path, proxy_pairs_path):
 
     _, val_loader, test_loader, train_ds, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
+        use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
     # Load and freeze transformer
@@ -722,6 +733,7 @@ def run_stage3(args, model_path, proxy_pairs_path):
         num_layers=args.num_layers, num_heads=args.num_heads,
         hidden_dim=args.hidden_dim, output_dim=args.output_dim,
         dropout=args.dropout,
+        lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
     ).to(args.device)
     ckpt = torch.load(model_path, map_location=args.device, weights_only=True)
     model.load_state_dict(ckpt["model_state"])
@@ -887,6 +899,7 @@ def run_stage4(args, model_path, generator_path):
 
     train_loader, val_loader, test_loader, _, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
+        use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
     # Load transformer from stage 1
@@ -894,6 +907,7 @@ def run_stage4(args, model_path, generator_path):
         num_layers=args.num_layers, num_heads=args.num_heads,
         hidden_dim=args.hidden_dim, output_dim=args.output_dim,
         dropout=args.dropout,
+        lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
     ).to(args.device)
     model_ckpt = torch.load(model_path, map_location=args.device, weights_only=True)
     model.load_state_dict(model_ckpt["model_state"])
