@@ -664,8 +664,13 @@ def run_stage3(args, model_path, generator_path):
 
             dense_x, dense_mask = model.encode_dense(batch)
 
-            # Proxy dropout: randomly skip proxies for a fraction of batches
-            use_proxy = torch.rand(1).item() > args.s3_proxy_dropout
+            # In Phase A the transformer is frozen, so proxies must be used
+            # to keep a valid gradient path to the generator.
+            if phase == "A":
+                use_proxy = True
+            else:
+                # Phase B: randomly skip proxies for a fraction of batches.
+                use_proxy = torch.rand(1).item() > args.s3_proxy_dropout
 
             if use_proxy:
                 proxies, aux_loss = _generate_proxies(
