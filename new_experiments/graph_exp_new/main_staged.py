@@ -692,16 +692,24 @@ def run_stage2(args, model_path):
     print("\nFiltering by MMD outliers...", flush=True)
     mmd_values = [p["mmd_loss"] for p in proxy_pairs]
     if len(mmd_values) > 0:
-        mmd_mean = float(np.mean(mmd_values))
-        mmd_std = float(np.std(mmd_values))
-        threshold = mmd_mean + 3 * mmd_std
-        before = len(proxy_pairs)
-        proxy_pairs = [p for p in proxy_pairs if p["mmd_loss"] <= threshold]
-        after = len(proxy_pairs)
-        print(f"  MMD mean={mmd_mean:.6f} std={mmd_std:.6f} threshold={threshold:.6f}",
-              flush=True)
-        print(f"  Filtered: {before} -> {after} pairs ({before - after} removed)",
-              flush=True)
+        finite_mmd_values = [v for v in mmd_values if np.isfinite(v)]
+        if len(finite_mmd_values) == 0:
+            print("  All MMD values were NaN or infinite; skipping outlier filtering.",
+                flush=True)
+        else:
+            mmd_mean = float(np.mean(finite_mmd_values))
+            mmd_std = float(np.std(finite_mmd_values))
+            threshold = mmd_mean + 3 * mmd_std
+            before = len(proxy_pairs)
+            proxy_pairs = [
+                p for p in proxy_pairs
+                if np.isfinite(p["mmd_loss"]) and p["mmd_loss"] <= threshold
+            ]
+            after = len(proxy_pairs)
+            print(f"  MMD mean={mmd_mean:.6f} std={mmd_std:.6f} threshold={threshold:.6f}",
+                flush=True)
+            print(f"  Filtered: {before} -> {after} pairs ({before - after} removed)",
+                flush=True)
 
     # Save
     save_path = os.path.join(args.save_dir, "proxy_pairs.pkl")

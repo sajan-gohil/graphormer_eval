@@ -7,7 +7,7 @@ set -eux pipefail
 # Stage 1+2 are shared — train once, reuse for all generators.
 # =============================================================
 
-BASE_DIR="checkpoints_staged"
+BASE_DIR="checkpoints_staged_2"
 SHARED_DIR="${BASE_DIR}/shared"
 
 # --- Stage 1: Pretrain transformer (shared) ---
@@ -23,7 +23,8 @@ echo "=== Staged: Stage 2 (shared proxy optimization) ==="
 python main_staged.py \
     --stage 2 \
     --model_path "${MODEL_PATH}" \
-    --save_dir "${SHARED_DIR}"
+    --save_dir "${SHARED_DIR}" \
+    --s2_num_restarts 20
 
 PROXY_PATH="${SHARED_DIR}/proxy_pairs.pkl"
 
