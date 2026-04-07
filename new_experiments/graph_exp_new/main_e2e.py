@@ -45,16 +45,16 @@ def build_parser():
     p.add_argument("--num_proxies", type=int, default=64)
 
     # Model (shared)
-    p.add_argument("--hidden_dim", type=int, default=128)
-    p.add_argument("--num_layers", type=int, default=5)
+    p.add_argument("--hidden_dim", type=int, default=256)
+    p.add_argument("--num_layers", type=int, default=6)
     p.add_argument("--num_heads", type=int, default=8)
     p.add_argument("--output_dim", type=int, default=10)
-    p.add_argument("--dropout", type=float, default=0.3)
+    p.add_argument("--dropout", type=float, default=0.1)
 
     # Laplacian positional encoding
     p.add_argument("--use_lap_pe", action="store_true", default=False,
                    help="Add Laplacian eigenvector positional encodings to node features")
-    p.add_argument("--lap_pe_dim", type=int, default=8,
+    p.add_argument("--lap_pe_dim", type=int, default=32,
                    help="Number of Laplacian eigenvectors for positional encoding")
 
     # GRED-specific
@@ -81,7 +81,7 @@ def build_parser():
                    help="Number of workers for distance mask computation")
 
     # Generator-specific
-    p.add_argument("--gen_hidden_dim", type=int, default=128)
+    p.add_argument("--gen_hidden_dim", type=int, default=256)
     p.add_argument("--gen_num_layers", type=int, default=3)
     p.add_argument("--gen_num_heads", type=int, default=8)
     p.add_argument("--gen_dropout", type=float, default=0.2)
@@ -99,14 +99,14 @@ def build_parser():
     # Training
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=3e-4)
-    p.add_argument("--batch_size", type=int, default=256)
+    p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--max_epochs", type=int, default=500)
     p.add_argument("--patience", type=int, default=30)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--num_workers", type=int, default=4)
 
     # E2E-specific
-    p.add_argument("--mmd_lambda", type=float, default=0.01,
+    p.add_argument("--mmd_lambda", type=float, default=0.0,
                    help="Weight for MMD regularization (0 to disable)")
     p.add_argument("--proxy_warmup_epochs", type=int, default=0,
                    help="Epochs to train transformer without proxies before activating generator")
