@@ -56,11 +56,11 @@ def build_parser():
                    help="Trained generator checkpoint (skip stage 3)")
 
     # Model
-    p.add_argument("--hidden_dim", type=int, default=64)
+    p.add_argument("--hidden_dim", type=int, default=256)
     p.add_argument("--num_layers", type=int, default=5)
     p.add_argument("--num_heads", type=int, default=8)
     p.add_argument("--output_dim", type=int, default=10)
-    p.add_argument("--dropout", type=float, default=0.3)
+    p.add_argument("--dropout", type=float, default=0.1)
 
     # Laplacian positional encoding
     p.add_argument("--use_lap_pe", action="store_true", default=False,
@@ -72,23 +72,23 @@ def build_parser():
     p.add_argument("--s1_lr", type=float, default=1e-3)
     p.add_argument("--s1_weight_decay", type=float, default=3e-4)
     p.add_argument("--s1_max_epochs", type=int, default=500)
-    p.add_argument("--s1_patience", type=int, default=5)
+    p.add_argument("--s1_patience", type=int, default=30)
     p.add_argument("--s1_grad_clip", type=float, default=1.0)
 
     # Stage 2
-    p.add_argument("--num_proxies", type=int, default=32)
-    p.add_argument("--s2_proxy_lr", type=float, default=1e-2)
-    p.add_argument("--s2_num_steps", type=int, default=700)
-    p.add_argument("--s2_mmd_lambda", type=float, default=0.05)
-    p.add_argument("--s2_cross_moment_lambda", type=float, default=0.0,
+    p.add_argument("--num_proxies", type=int, default=4)
+    p.add_argument("--s2_proxy_lr", type=float, default=5e-2)
+    p.add_argument("--s2_num_steps", type=int, default=75)
+    p.add_argument("--s2_mmd_lambda", type=float, default=1)
+    p.add_argument("--s2_cross_moment_lambda", type=float, default=0.5,
                    help="Weight for intra-batch cross-sample moment matching")
-    p.add_argument("--s2_prior_moment_lambda", type=float, default=0.0,
+    p.add_argument("--s2_prior_moment_lambda", type=float, default=0.5,
                    help="Weight for fixed-prior moment regularization")
     p.add_argument("--s2_prior_target_var", type=float, default=-1.0,
                    help="Target variance for prior loss; <=0 estimates from train embeddings")
-    p.add_argument("--s2_num_restarts", type=int, default=5)
+    p.add_argument("--s2_num_restarts", type=int, default=50)
     p.add_argument("--s2_grad_clip", type=float, default=1.0)
-    p.add_argument("--s2_loss_threshold", type=float, default=0.005,
+    p.add_argument("--s2_loss_threshold", type=float, default=0.01,
                    help="Save proxy if opt_loss < threshold")
 
     # Stage 3 — Generator training
@@ -104,7 +104,7 @@ def build_parser():
     p.add_argument("--s3_grad_clip", type=float, default=1.0)
     p.add_argument("--target_noise_std", type=float, default=0.02)
     # Flow matching specific
-    p.add_argument("--denoiser_dim", type=int, default=128)
+    p.add_argument("--denoiser_dim", type=int, default=256)
     p.add_argument("--denoiser_layers", type=int, default=4)
     p.add_argument("--denoiser_heads", type=int, default=8)
     p.add_argument("--euler_steps", type=int, default=1)
@@ -112,10 +112,10 @@ def build_parser():
     p.add_argument("--gnn_layers", type=int, default=4)
     p.add_argument("--gnn_type", type=str, default="GINE",
                    choices=["GCN", "GIN", "GINE", "GAT"])
-    p.add_argument("--pool_types", type=str, nargs="+", default=["mean", "max", "std"])
+    p.add_argument("--pool_types", type=str, nargs="+", default=["mean", "max"])
     p.add_argument("--decode_hidden", type=int, default=256)
-    p.add_argument("--decode_layers", type=int, default=3)
-    p.add_argument("--idx_emb_dim", type=int, default=32)
+    p.add_argument("--decode_layers", type=int, default=4)
+    p.add_argument("--idx_emb_dim", type=int, default=64)
     p.add_argument("--decode_mode", type=str, default="shared",
                    choices=["shared", "grouped"])
     # PMA specif
@@ -692,16 +692,24 @@ def run_stage2(args, model_path):
     print("\nFiltering by MMD outliers...", flush=True)
     mmd_values = [p["mmd_loss"] for p in proxy_pairs]
     if len(mmd_values) > 0:
-        mmd_mean = float(np.mean(mmd_values))
-        mmd_std = float(np.std(mmd_values))
-        threshold = mmd_mean + 3 * mmd_std
-        before = len(proxy_pairs)
-        proxy_pairs = [p for p in proxy_pairs if p["mmd_loss"] <= threshold]
-        after = len(proxy_pairs)
-        print(f"  MMD mean={mmd_mean:.6f} std={mmd_std:.6f} threshold={threshold:.6f}",
-              flush=True)
-        print(f"  Filtered: {before} -> {after} pairs ({before - after} removed)",
-              flush=True)
+        finite_mmd_values = [v for v in mmd_values if np.isfinite(v)]
+        if len(finite_mmd_values) == 0:
+            print("  All MMD values were NaN or infinite; skipping outlier filtering.",
+                flush=True)
+        else:
+            mmd_mean = float(np.mean(finite_mmd_values))
+            mmd_std = float(np.std(finite_mmd_values))
+            threshold = mmd_mean + 3 * mmd_std
+            before = len(proxy_pairs)
+            proxy_pairs = [
+                p for p in proxy_pairs
+                if np.isfinite(p["mmd_loss"]) and p["mmd_loss"] <= threshold
+            ]
+            after = len(proxy_pairs)
+            print(f"  MMD mean={mmd_mean:.6f} std={mmd_std:.6f} threshold={threshold:.6f}",
+                flush=True)
+            print(f"  Filtered: {before} -> {after} pairs ({before - after} removed)",
+                flush=True)
 
     # Save
     save_path = os.path.join(args.save_dir, "proxy_pairs.pkl")

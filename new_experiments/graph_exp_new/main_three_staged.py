@@ -54,11 +54,11 @@ def build_parser():
                    help="Trained generator checkpoint (skip stage 2)")
 
     # Transformer model
-    p.add_argument("--hidden_dim", type=int, default=64)
+    p.add_argument("--hidden_dim", type=int, default=256)
     p.add_argument("--num_layers", type=int, default=5)
     p.add_argument("--num_heads", type=int, default=8)
     p.add_argument("--output_dim", type=int, default=10)
-    p.add_argument("--dropout", type=float, default=0.3)
+    p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--num_proxies", type=int, default=32)
 
     # Laplacian positional encoding
@@ -88,14 +88,14 @@ def build_parser():
     p.add_argument("--s1_lr", type=float, default=1e-3)
     p.add_argument("--s1_weight_decay", type=float, default=3e-4)
     p.add_argument("--s1_max_epochs", type=int, default=500)
-    p.add_argument("--s1_patience", type=int, default=5)
+    p.add_argument("--s1_patience", type=int, default=50)
     p.add_argument("--s1_grad_clip", type=float, default=1.0)
 
     # Stage 2 - Train generator on task loss
-    p.add_argument("--s2_lr", type=float, default=5e-4)
-    p.add_argument("--s2_weight_decay", type=float, default=1e-4)
-    p.add_argument("--s2_max_epochs", type=int, default=500)
-    p.add_argument("--s2_patience", type=int, default=30)
+    p.add_argument("--s2_lr", type=float, default=1e-3)
+    p.add_argument("--s2_weight_decay", type=float, default=3e-4)
+    p.add_argument("--s2_max_epochs", type=int, default=1000)
+    p.add_argument("--s2_patience", type=int, default=49)
     p.add_argument("--s2_eval_every", type=int, default=1)
     p.add_argument("--s2_grad_clip", type=float, default=1.0)
 
@@ -104,19 +104,19 @@ def build_parser():
                    help="Epochs to keep transformer frozen before Phase B")
     p.add_argument("--s3_lr_gen", type=float, default=None,
                    help="Generator LR for stage 3 (default: 0.1 * s2_lr)")
-    p.add_argument("--s3_lr_transformer", type=float, default=None,
+    p.add_argument("--s3_lr_transformer", type=float, default=5e-4,
                    help="Transformer LR for Phase B (default: 0.1 * s3_lr_gen)")
-    p.add_argument("--s3_proxy_dropout", type=float, default=0.3,
+    p.add_argument("--s3_proxy_dropout", type=float, default=0.1,
                    help="Fraction of batches that train without proxies")
-    p.add_argument("--s3_max_epochs", type=int, default=200)
-    p.add_argument("--s3_patience", type=int, default=20)
+    p.add_argument("--s3_max_epochs", type=int, default=500)
+    p.add_argument("--s3_patience", type=int, default=40)
     p.add_argument("--s3_grad_clip", type=float, default=1.0)
     p.add_argument("--s3_weight_decay", type=float, default=1e-4)
 
     # Generator architecture
-    p.add_argument("--gen_hidden_dim", type=int, default=128)
-    p.add_argument("--gen_num_layers", type=int, default=2)
-    p.add_argument("--gen_num_heads", type=int, default=4)
+    p.add_argument("--gen_hidden_dim", type=int, default=256)
+    p.add_argument("--gen_num_layers", type=int, default=4)
+    p.add_argument("--gen_num_heads", type=int, default=8)
     p.add_argument("--gen_dropout", type=float, default=0.2)
     # PMA specific
     p.add_argument("--pma_query_mode", type=str, default="farthest_point",
@@ -130,15 +130,15 @@ def build_parser():
     p.add_argument("--gnn_layers", type=int, default=4)
     p.add_argument("--gnn_type", type=str, default="GINE",
                    choices=["GCN", "GIN", "GINE", "GAT"])
-    p.add_argument("--pool_types", type=str, nargs="+", default=["mean", "max", "std"])
-    p.add_argument("--decode_hidden", type=int, default=256)
+    p.add_argument("--pool_types", type=str, nargs="+", default=["max"])
+    p.add_argument("--decode_hidden", type=int, default=128)
     p.add_argument("--decode_layers", type=int, default=3)
-    p.add_argument("--idx_emb_dim", type=int, default=32)
+    p.add_argument("--idx_emb_dim", type=int, default=128)
     p.add_argument("--decode_mode", type=str, default="shared",
                    choices=["shared", "grouped"])
 
     # Common
-    p.add_argument("--batch_size", type=int, default=64)
+    p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--save_dir", type=str, default="checkpoints_three_staged")
     p.add_argument("--device", type=str, default=None)
@@ -996,3 +996,4 @@ if __name__ == "__main__":
             run_stage3(args, model_path, generator_path)
 
     print("\nAll requested stages complete.", flush=True)
+
