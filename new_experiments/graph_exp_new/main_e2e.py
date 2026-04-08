@@ -417,7 +417,7 @@ def run_e2e(args):
 
     for epoch in range(1, args.max_epochs + 1):
         epoch_start = time.time()
-        use_proxies = epoch > args.proxy_warmup_epochs
+        use_proxies = (epoch > args.proxy_warmup_epochs and args.num_proxies>0 and args.backbone!="gred")
 
         # --- Train ---
         model.train()

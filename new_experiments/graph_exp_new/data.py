@@ -200,13 +200,17 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
 
         collate_fn = partial(collate_with_dist_masks, max_hops=max_hops)
 
+        # Use standard PyTorch DataLoader (not PyG's) because our custom
+        # collate_fn handles batching and PyG's Collater cannot handle the
+        # numpy arrays returned by DistMaskDataset.
+        from torch.utils.data import DataLoader as TorchDataLoader
         return (
-            DataLoader(train_wrapped, batch_size=batch_size, shuffle=True,
-                       num_workers=num_workers, collate_fn=collate_fn),
-            DataLoader(val_wrapped, batch_size=batch_size, shuffle=False,
-                       num_workers=num_workers, collate_fn=collate_fn),
-            DataLoader(test_wrapped, batch_size=batch_size, shuffle=False,
-                       num_workers=num_workers, collate_fn=collate_fn),
+            TorchDataLoader(train_wrapped, batch_size=batch_size, shuffle=True,
+                            num_workers=num_workers, collate_fn=collate_fn),
+            TorchDataLoader(val_wrapped, batch_size=batch_size, shuffle=False,
+                            num_workers=num_workers, collate_fn=collate_fn),
+            TorchDataLoader(test_wrapped, batch_size=batch_size, shuffle=False,
+                            num_workers=num_workers, collate_fn=collate_fn),
             train_ds, val_ds, test_ds,
         )
 
