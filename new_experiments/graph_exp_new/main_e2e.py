@@ -18,7 +18,9 @@ import torch.nn as nn
 
 from data import get_loaders
 from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
-from generators import ScoreBasedGenerator, GNNPoolingGenerator
+from generators import (
+    ScoreBasedGenerator, GNNPoolingGenerator, PMAGenerator, GraphCoarseningGenerator,
+)
 from metrics import compute_macro_ap
 from mmd import mmd_squared
 
@@ -40,7 +42,7 @@ def build_parser():
 
     # Generator
     p.add_argument("--generator", type=str, default="score_based",
-                   choices=["score_based", "gnn_pooling"],
+                   choices=["score_based", "gnn_pooling", "pma", "graph_coarsening"],
                    help="Generator architecture (flow_matching not supported in e2e)")
     p.add_argument("--num_proxies", type=int, default=64)
 
@@ -49,7 +51,7 @@ def build_parser():
     p.add_argument("--num_layers", type=int, default=6)
     p.add_argument("--num_heads", type=int, default=8)
     p.add_argument("--output_dim", type=int, default=10)
-    p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--dropout", type=float, default=0.3)
 
     # Laplacian positional encoding
     p.add_argument("--use_lap_pe", action="store_true", default=False,
@@ -81,32 +83,40 @@ def build_parser():
                    help="Number of workers for distance mask computation")
 
     # Generator-specific
-    p.add_argument("--gen_hidden_dim", type=int, default=256)
+    p.add_argument("--gen_hidden_dim", type=int, default=64)
     p.add_argument("--gen_num_layers", type=int, default=3)
     p.add_argument("--gen_num_heads", type=int, default=8)
     p.add_argument("--gen_dropout", type=float, default=0.2)
     # GNN-specific
-    p.add_argument("--gnn_layers", type=int, default=4)
+    p.add_argument("--gnn_layers", type=int, default=3)
     p.add_argument("--gnn_type", type=str, default="GINE",
                    choices=["GCN", "GIN", "GINE", "GAT"])
     p.add_argument("--pool_types", type=str, nargs="+", default=["mean"])
-    p.add_argument("--decode_hidden", type=int, default=256)
+    p.add_argument("--decode_hidden", type=int, default=64)
     p.add_argument("--decode_layers", type=int, default=3)
-    p.add_argument("--idx_emb_dim", type=int, default=128)
+    p.add_argument("--idx_emb_dim", type=int, default=64)
     p.add_argument("--decode_mode", type=str, default="shared",
                    choices=["shared", "grouped"])
+    # PMA-specific
+    p.add_argument("--pma_query_mode", type=str, default="farthest_point",
+                   choices=["farthest_point", "soft_kmeans"])
+    # Graph coarsening-specific
+    p.add_argument("--coarsen_gnn_type", type=str, default="GIN",
+                   choices=["GIN", "GCN"])
+    p.add_argument("--coarsen_reg_weight", type=float, default=0.1)
+    p.add_argument("--coarsen_reg_type", type=str, default="mincut")
 
     # Training
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=3e-4)
-    p.add_argument("--batch_size", type=int, default=128)
+    p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--max_epochs", type=int, default=500)
     p.add_argument("--patience", type=int, default=30)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--num_workers", type=int, default=4)
 
     # E2E-specific
-    p.add_argument("--mmd_lambda", type=float, default=0.0,
+    p.add_argument("--mmd_lambda", type=float, default=0.01,
                    help="Weight for MMD regularization (0 to disable)")
     p.add_argument("--proxy_warmup_epochs", type=int, default=0,
                    help="Epochs to train transformer without proxies before activating generator")
@@ -197,6 +207,27 @@ def build_generator(args):
             num_heads=args.gen_num_heads,
             dropout=args.gen_dropout,
         )
+    elif args.generator == "pma":
+        return PMAGenerator(
+            num_proxies=args.num_proxies,
+            input_dim=args.hidden_dim,
+            num_heads=args.gen_num_heads,
+            num_layers=args.gen_num_layers,
+            dropout=args.gen_dropout,
+            query_mode=args.pma_query_mode,
+        )
+    elif args.generator == "graph_coarsening":
+        return GraphCoarseningGenerator(
+            num_proxies=args.num_proxies,
+            input_dim=args.hidden_dim,
+            gnn_layers=args.gen_num_layers,
+            gnn_type=args.coarsen_gnn_type,
+            dropout=args.gen_dropout,
+            reg_type=args.coarsen_reg_type,
+            reg_weight=args.coarsen_reg_weight,
+            num_refine_layers=1,
+            num_heads=args.gen_num_heads,
+        )
     elif args.generator == "gnn_pooling":
         return GNNPoolingGenerator(
             num_proxies=args.num_proxies,
@@ -237,6 +268,7 @@ def forward_e2e(model, generator, batch, args, use_proxies=True,
     Returns:
         logits: (B, output_dim)
         mmd_loss: scalar tensor (0 if mmd_lambda == 0 or no proxies)
+        aux_loss: scalar tensor from generator regularization (e.g. graph coarsening)
         node_emb: (total_N, d)
     """
     is_gred = args.backbone in ("gred", "hybrid")
@@ -250,7 +282,8 @@ def forward_e2e(model, generator, batch, args, use_proxies=True,
         elif args.backbone == "hybrid":
             logits, node_emb = model(batch, dist_masks, node_masks,
                                      readout_scope=args.readout_scope)
-        return logits, torch.tensor(0.0, device=batch.x.device), node_emb
+        _zero = torch.tensor(0.0, device=batch.x.device)
+        return logits, _zero, _zero, node_emb
 
     # --- Proxy path ---
     # Step 1: Encode nodes (dense)
@@ -267,16 +300,16 @@ def forward_e2e(model, generator, batch, args, use_proxies=True,
         gen_mask = dense_mask
 
     # Step 2: Generate proxies
-    if args.generator == "gnn_pooling":
+    if args.generator in ("gnn_pooling", "graph_coarsening"):
         flat_node_emb = gen_input[gen_mask]  # flatten from dense
-        proxy_emb, _ = generator(
+        proxy_emb, aux_loss = generator(
             flat_node_emb, mask=None,
             edge_index=batch.edge_index,
             batch_vec=batch.batch,
-            edge_attr=batch.edge_attr,
+            edge_attr=getattr(batch, "edge_attr", None),
         )
     else:
-        proxy_emb, _ = generator(gen_input, gen_mask)
+        proxy_emb, aux_loss = generator(gen_input, gen_mask)
 
     # Step 3: Compute MMD loss
     mmd_loss = torch.tensor(0.0, device=batch.x.device)
@@ -308,7 +341,11 @@ def forward_e2e(model, generator, batch, args, use_proxies=True,
             readout_scope=args.readout_scope,
         )
 
-    return logits, mmd_loss, node_emb
+    # aux_loss from generator (e.g. graph_coarsening regularization)
+    if aux_loss is None:
+        aux_loss = torch.tensor(0.0, device=batch.x.device)
+
+    return logits, mmd_loss, aux_loss, node_emb
 
 
 # ================================================================
@@ -337,7 +374,7 @@ def evaluate(model, generator, loader, device, args, use_proxies=True):
             dist_masks_batch = None
             node_masks_batch = None
 
-        logits, mmd_loss, _ = forward_e2e(
+        logits, mmd_loss, aux_loss, _ = forward_e2e(
             model, generator, batch, args,
             use_proxies=use_proxies,
             dist_masks=dist_masks_batch,
@@ -438,14 +475,14 @@ def run_e2e(args):
 
             optimizer.zero_grad()
 
-            logits, mmd_loss, _ = forward_e2e(
+            logits, mmd_loss, aux_loss, _ = forward_e2e(
                 model, generator, batch, args,
                 use_proxies=use_proxies,
                 dist_masks=dist_masks_batch,
                 node_masks=node_masks_batch,
             )
             task_loss = loss_fn(logits, batch.y)
-            total_loss = task_loss + args.mmd_lambda * mmd_loss
+            total_loss = task_loss + args.mmd_lambda * mmd_loss + aux_loss
 
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(
@@ -555,3 +592,4 @@ def run_e2e(args):
 if __name__ == "__main__":
     args = parse_args()
     run_e2e(args)
+
