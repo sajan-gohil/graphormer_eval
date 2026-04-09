@@ -629,7 +629,7 @@ def run_phase2(args, model_path):
 
     # Load Phase 1 model
     model = build_model(args).to(args.device)
-    ckpt = torch.load(model_path, map_location=args.device, weights_only=True)
+    ckpt = torch.load(model_path, map_location=args.device, weights_only=False)
     model.load_state_dict(ckpt["model_state"])
 
     # Freeze the encoder — keep embedding space consistent with Phase 1
