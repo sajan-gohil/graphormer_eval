@@ -32,6 +32,10 @@ from generators import (
 )
 from metrics import compute_macro_ap
 from mmd import mmd_squared, cross_sample_moment_loss, prior_moment_loss
+from optim_utils import (
+    build_grouped_optimizer_and_scheduler,
+    build_warmup_cosine_scheduler,
+)
 
 
 # ================================================================
@@ -63,7 +67,7 @@ def build_parser():
     p.add_argument("--dropout", type=float, default=0.1)
 
     # Laplacian positional encoding
-    p.add_argument("--use_lap_pe", action="store_true", default=False,
+    p.add_argument("--use_lap_pe", action=argparse.BooleanOptionalAction, default=True,
                    help="Add Laplacian eigenvector positional encodings to node features")
     p.add_argument("--lap_pe_dim", type=int, default=8,
                    help="Number of Laplacian eigenvectors for positional encoding")
@@ -71,8 +75,8 @@ def build_parser():
     # Stage 1
     p.add_argument("--s1_lr", type=float, default=1e-3)
     p.add_argument("--s1_weight_decay", type=float, default=3e-4)
-    p.add_argument("--s1_max_epochs", type=int, default=500)
-    p.add_argument("--s1_patience", type=int, default=30)
+    p.add_argument("--s1_max_epochs", type=int, default=200)
+    p.add_argument("--s1_patience", type=int, default=50)
     p.add_argument("--s1_grad_clip", type=float, default=1.0)
 
     # Stage 2
@@ -98,7 +102,7 @@ def build_parser():
     p.add_argument("--gen_dropout", type=float, default=0.2)
     p.add_argument("--s3_lr", type=float, default=5e-4)
     p.add_argument("--s3_weight_decay", type=float, default=1e-4)
-    p.add_argument("--s3_max_epochs", type=int, default=1000)
+    p.add_argument("--s3_max_epochs", type=int, default=200)
     p.add_argument("--s3_patience", type=int, default=50)
     p.add_argument("--s3_eval_every", type=int, default=1)
     p.add_argument("--s3_grad_clip", type=float, default=1.0)
@@ -131,13 +135,19 @@ def build_parser():
     p.add_argument("--s4_lr_transformer", type=float, default=1e-5)
     p.add_argument("--s4_lr_generator", type=float, default=1e-4)
     p.add_argument("--s4_max_epochs", type=int, default=200)
-    p.add_argument("--s4_patience", type=int, default=10)
+    p.add_argument("--s4_patience", type=int, default=50)
     p.add_argument("--s4_grad_clip", type=float, default=1.0)
     p.add_argument("--s4_weight_decay", type=float, default=1e-4)
 
     # Common
-    p.add_argument("--batch_size", type=int, default=256)
+    p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--lr_min", type=float, default=1e-7,
+                   help="Minimum LR floor for warmup-cosine schedule")
+    p.add_argument("--warmup_ratio", type=float, default=0.05,
+                   help="Warmup fraction of total optimization steps")
+    p.add_argument("--recurrent_lr_factor", type=float, default=1.0,
+                   help="LR multiplier for recurrent GRED parameters")
     p.add_argument("--save_dir", type=str, default="checkpoints_staged")
     p.add_argument("--device", type=str, default=None)
 
@@ -353,8 +363,16 @@ def run_stage1(args):
 
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.s1_lr,
-                                  weight_decay=args.s1_weight_decay)
+    total_steps = max(1, len(train_loader) * args.s1_max_epochs)
+    optimizer, scheduler = build_grouped_optimizer_and_scheduler(
+        named_parameters=[(f"model.{name}", param) for name, param in model.named_parameters()],
+        lr_max=args.s1_lr,
+        lr_min=args.lr_min,
+        weight_decay=args.s1_weight_decay,
+        total_steps=total_steps,
+        warmup_ratio=args.warmup_ratio,
+        recurrent_lr_factor=args.recurrent_lr_factor,
+    )
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
@@ -378,6 +396,7 @@ def run_stage1(args):
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.s1_grad_clip)
             optimizer.step()
+            scheduler.step()
             train_losses.append(loss.item())
             all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
             all_labels.append(batch.y.cpu().numpy())
@@ -761,8 +780,16 @@ def run_stage3(args, model_path, proxy_pairs_path):
     gen_params = sum(p.numel() for p in generator.parameters())
     print(f"  Generator parameters: {gen_params:,}", flush=True)
 
-    optimizer = torch.optim.AdamW(generator.parameters(), lr=args.s3_lr,
-                                  weight_decay=args.s3_weight_decay)
+    total_steps = max(1, len(proxy_train_loader) * args.s3_max_epochs)
+    optimizer, scheduler = build_grouped_optimizer_and_scheduler(
+        named_parameters=[(f"generator.{name}", param) for name, param in generator.named_parameters()],
+        lr_max=args.s3_lr,
+        lr_min=args.lr_min,
+        weight_decay=args.s3_weight_decay,
+        total_steps=total_steps,
+        warmup_ratio=args.warmup_ratio,
+        recurrent_lr_factor=1.0,
+    )
 
     best_val_ap = 0.0
     best_epoch = -1
@@ -818,6 +845,7 @@ def run_stage3(args, model_path, proxy_pairs_path):
             train_loss.backward()
             nn.utils.clip_grad_norm_(generator.parameters(), args.s3_grad_clip)
             optimizer.step()
+            scheduler.step()
             train_losses.append(train_loss.item())
 
         mean_train_loss = float(np.mean(train_losses))
@@ -936,6 +964,12 @@ def run_stage4(args, model_path, generator_path):
         {"params": model.head.parameters(), "lr": args.s4_lr_transformer},
         {"params": generator.parameters(), "lr": args.s4_lr_generator},
     ], weight_decay=args.s4_weight_decay)
+    scheduler = build_warmup_cosine_scheduler(
+        optimizer=optimizer,
+        total_steps=max(1, len(train_loader) * args.s4_max_epochs),
+        lr_min=args.lr_min,
+        warmup_ratio=args.warmup_ratio,
+    )
 
     loss_fn = nn.BCEWithLogitsLoss()
 
@@ -988,6 +1022,7 @@ def run_stage4(args, model_path, generator_path):
                 args.s4_grad_clip,
             )
             optimizer.step()
+            scheduler.step()
 
             train_losses.append(loss.item())
             all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())

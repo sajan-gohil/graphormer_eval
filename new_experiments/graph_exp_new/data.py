@@ -115,8 +115,8 @@ class AddLaplacianPE:
 
     Stores ``data.lap_pe`` of shape ``(num_nodes, k)`` on each graph.
     Uses the *k* smallest non-trivial eigenvectors of the symmetric
-    normalized graph Laplacian.  A random sign flip is applied to each
-    eigenvector to handle the sign-ambiguity of eigenvectors.
+    normalized graph Laplacian. Sign ambiguity is resolved deterministically
+    per eigenvector to keep train/val/test evaluation stable.
     """
 
     def __init__(self, k: int = 8):
@@ -153,9 +153,13 @@ class AddLaplacianPE:
         else:
             eigenvectors = eigenvectors[:, :k]
 
-        # Random sign flip for sign ambiguity
-        sign = 2.0 * (np.random.rand(k) > 0.5).astype(np.float32) - 1.0
-        eigenvectors = eigenvectors * sign
+        # Deterministic sign disambiguation:
+        # make the max-abs entry in each eigenvector non-negative.
+        if eigenvectors.shape[1] > 0:
+            anchor_idx = np.argmax(np.abs(eigenvectors), axis=0)
+            signs = np.sign(eigenvectors[anchor_idx, np.arange(eigenvectors.shape[1])])
+            signs[signs == 0] = 1.0
+            eigenvectors = eigenvectors * signs
 
         data.lap_pe = torch.from_numpy(eigenvectors.astype(np.float32))
         return data

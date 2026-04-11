@@ -28,6 +28,10 @@ from generators import (
     ScoreBasedGenerator, GNNPoolingGenerator, PMAGenerator, GraphCoarseningGenerator,
 )
 from metrics import compute_macro_ap
+from optim_utils import (
+    build_grouped_optimizer_and_scheduler,
+    build_warmup_cosine_scheduler,
+)
 
 
 # ================================================================
@@ -62,7 +66,7 @@ def build_parser():
     p.add_argument("--num_proxies", type=int, default=32)
 
     # Laplacian positional encoding
-    p.add_argument("--use_lap_pe", action="store_true", default=False,
+    p.add_argument("--use_lap_pe", action=argparse.BooleanOptionalAction, default=True,
                    help="Add Laplacian eigenvector positional encodings to node features")
     p.add_argument("--lap_pe_dim", type=int, default=8,
                    help="Number of Laplacian eigenvectors for positional encoding")
@@ -87,15 +91,15 @@ def build_parser():
     # Stage 1  Pretrain transformer
     p.add_argument("--s1_lr", type=float, default=1e-3)
     p.add_argument("--s1_weight_decay", type=float, default=3e-4)
-    p.add_argument("--s1_max_epochs", type=int, default=500)
+    p.add_argument("--s1_max_epochs", type=int, default=200)
     p.add_argument("--s1_patience", type=int, default=50)
     p.add_argument("--s1_grad_clip", type=float, default=1.0)
 
     # Stage 2 - Train generator on task loss
     p.add_argument("--s2_lr", type=float, default=1e-3)
     p.add_argument("--s2_weight_decay", type=float, default=3e-4)
-    p.add_argument("--s2_max_epochs", type=int, default=1000)
-    p.add_argument("--s2_patience", type=int, default=49)
+    p.add_argument("--s2_max_epochs", type=int, default=200)
+    p.add_argument("--s2_patience", type=int, default=50)
     p.add_argument("--s2_eval_every", type=int, default=1)
     p.add_argument("--s2_grad_clip", type=float, default=1.0)
 
@@ -108,8 +112,8 @@ def build_parser():
                    help="Transformer LR for Phase B (default: 0.1 * s3_lr_gen)")
     p.add_argument("--s3_proxy_dropout", type=float, default=0.1,
                    help="Fraction of batches that train without proxies")
-    p.add_argument("--s3_max_epochs", type=int, default=500)
-    p.add_argument("--s3_patience", type=int, default=40)
+    p.add_argument("--s3_max_epochs", type=int, default=200)
+    p.add_argument("--s3_patience", type=int, default=50)
     p.add_argument("--s3_grad_clip", type=float, default=1.0)
     p.add_argument("--s3_weight_decay", type=float, default=1e-4)
 
@@ -138,8 +142,14 @@ def build_parser():
                    choices=["shared", "grouped"])
 
     # Common
-    p.add_argument("--batch_size", type=int, default=128)
+    p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--lr_min", type=float, default=1e-7,
+                   help="Minimum LR floor for warmup-cosine schedule")
+    p.add_argument("--warmup_ratio", type=float, default=0.05,
+                   help="Warmup fraction of total optimization steps")
+    p.add_argument("--recurrent_lr_factor", type=float, default=1.0,
+                   help="LR multiplier for recurrent GRED parameters")
     p.add_argument("--save_dir", type=str, default="checkpoints_three_staged")
     p.add_argument("--device", type=str, default=None)
 
@@ -424,8 +434,16 @@ def run_stage1(args):
 
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.s1_lr,
-                                  weight_decay=args.s1_weight_decay)
+    total_steps = max(1, len(train_loader) * args.s1_max_epochs)
+    optimizer, scheduler = build_grouped_optimizer_and_scheduler(
+        named_parameters=[(f"model.{name}", param) for name, param in model.named_parameters()],
+        lr_max=args.s1_lr,
+        lr_min=args.lr_min,
+        weight_decay=args.s1_weight_decay,
+        total_steps=total_steps,
+        warmup_ratio=args.warmup_ratio,
+        recurrent_lr_factor=args.recurrent_lr_factor,
+    )
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
@@ -461,6 +479,7 @@ def run_stage1(args):
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.s1_grad_clip)
             optimizer.step()
+            scheduler.step()
             train_losses.append(loss.item())
             all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
             all_labels.append(batch.y.cpu().numpy())
@@ -608,8 +627,16 @@ def run_stage2(args, model_path):
     print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}",
           flush=True)
 
-    optimizer = torch.optim.AdamW(generator.parameters(), lr=args.s2_lr,
-                                  weight_decay=args.s2_weight_decay)
+    total_steps = max(1, len(train_loader) * args.s2_max_epochs)
+    optimizer, scheduler = build_grouped_optimizer_and_scheduler(
+        named_parameters=[(f"generator.{name}", param) for name, param in generator.named_parameters()],
+        lr_max=args.s2_lr,
+        lr_min=args.lr_min,
+        weight_decay=args.s2_weight_decay,
+        total_steps=total_steps,
+        warmup_ratio=args.warmup_ratio,
+        recurrent_lr_factor=1.0,
+    )
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
@@ -679,6 +706,7 @@ def run_stage2(args, model_path):
 
             nn.utils.clip_grad_norm_(generator.parameters(), args.s2_grad_clip)
             optimizer.step()
+            scheduler.step()
 
             train_losses.append(loss.item())
             epoch_cos_sims.append(_proxy_cosine_sim(proxies))
@@ -803,11 +831,22 @@ def run_stage3(args, model_path, generator_path):
 
     # Phase A optimizer: generator only, transformer frozen
     _freeze(model)
-    opt_a = torch.optim.AdamW(generator.parameters(), lr=args.s3_lr_gen,
-                               weight_decay=args.s3_weight_decay)
+    phase_a_epochs = min(args.s3_phase_a_epochs, args.s3_max_epochs)
+    phase_a_total_steps = max(1, len(train_loader) * max(phase_a_epochs, 1))
+    phase_b_total_steps = max(1, len(train_loader) * max(args.s3_max_epochs - phase_a_epochs, 1))
+    opt_a, sched_a = build_grouped_optimizer_and_scheduler(
+        named_parameters=[(f"generator.{name}", param) for name, param in generator.named_parameters()],
+        lr_max=args.s3_lr_gen,
+        lr_min=args.lr_min,
+        weight_decay=args.s3_weight_decay,
+        total_steps=phase_a_total_steps,
+        warmup_ratio=args.warmup_ratio,
+        recurrent_lr_factor=1.0,
+    )
 
     # Phase B optimizer: built once Phase B starts
     opt_b = None
+    sched_b = None
 
     best_val_ap = 0.0
     best_epoch = -1
@@ -846,9 +885,16 @@ def run_stage3(args, model_path, generator_path):
                 model_param_groups + [{"params": generator.parameters(), "lr": args.s3_lr_gen}],
                 weight_decay=args.s3_weight_decay,
             )
+            sched_b = build_warmup_cosine_scheduler(
+                optimizer=opt_b,
+                total_steps=phase_b_total_steps,
+                lr_min=args.lr_min,
+                warmup_ratio=args.warmup_ratio,
+            )
             print(f"  [Epoch {epoch}] Switching to Phase B — model unfrozen.", flush=True)
 
         optimizer = opt_a if phase == "A" else opt_b
+        scheduler = sched_a if phase == "A" else sched_b
 
         model.train()
         generator.train()
@@ -913,6 +959,7 @@ def run_stage3(args, model_path, generator_path):
                 params_to_clip += list(model.parameters())
             nn.utils.clip_grad_norm_(params_to_clip, args.s3_grad_clip)
             optimizer.step()
+            scheduler.step()
 
             train_losses.append(loss.item())
             all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())

@@ -21,8 +21,8 @@ BASE_DIR="checkpoints_indist"
 NUM_PROXIES=64
 
 # Common model args per backbone
-VANILLA_ARGS="--backbone vanilla_gt --hidden_dim 256 --num_layers 5 --num_heads 8 --dropout 0.1 --batch_size 128"
-HYBRID_ARGS="--backbone hybrid --hidden_dim 88 --state_dim 88 --num_gred_layers 8 --num_transformer_layers 2 --num_heads 8 --gred_expand 1 --r_min 0.95 --r_max 1.0 --max_phase_lru 6.28 --gred_act full-glu --max_hops 40 --dropout 0.2 --batch_size 64"
+VANILLA_ARGS="--backbone vanilla_gt --hidden_dim 256 --num_layers 5 --num_heads 8 --dropout 0.1 --batch_size 32 --use_lap_pe"
+HYBRID_ARGS="--backbone hybrid --hidden_dim 88 --state_dim 88 --num_gred_layers 8 --num_transformer_layers 2 --num_heads 8 --gred_expand 1 --r_min 0.95 --r_max 1.0 --max_phase_lru 6.28 --gred_act full-glu --max_hops 40 --dropout 0.2 --batch_size 32 --use_lap_pe"
 
 # Generator-specific args
 SCORE_ARGS="--generator score_based --gen_num_layers 4 --gen_num_heads 8 --gen_dropout 0.2"
@@ -58,7 +58,7 @@ run_generator_phases() {
         --model_path "${P1_MODEL}" \
         --phase2_model_path "${P2_MODEL}" \
         --p3_lr 1e-3 \
-        --p3_max_epochs 1000 \
+        --p3_max_epochs 200 \
         --p3_patience 50 \
         --p3_recon_weight 1.0 \
         --p3_recon_anneal_to 0.1 \
@@ -92,8 +92,8 @@ run_generator_phases() {
         --model_path "${P1_MODEL}" \
         --generator_path "${GEN_PATH}" \
         --p5_phase_a_epochs 20 \
-        --p5_max_epochs 500 \
-        --p5_patience 40 \
+        --p5_max_epochs 200 \
+        --p5_patience 50 \
         --p5_proxy_dropout 0.1 \
         --save_dir "${EXP_DIR}"
 }
@@ -115,7 +115,7 @@ python3 main_indist.py \
     ${VANILLA_ARGS} \
     --num_proxies ${NUM_PROXIES} \
     --p1_lr 1e-3 \
-    --p1_max_epochs 500 \
+    --p1_max_epochs 200 \
     --p1_patience 50 \
     --save_dir "${VT_SHARED}"
 
@@ -131,7 +131,7 @@ python3 main_indist.py \
     --num_proxies ${NUM_PROXIES} \
     --model_path "${VT_P1}" \
     --p2_lr 1e-3 \
-    --p2_max_epochs 500 \
+    --p2_max_epochs 200 \
     --p2_patience 50 \
     --save_dir "${VT_SHARED}"
 
@@ -163,7 +163,7 @@ python3 main_indist.py \
     --num_proxies ${NUM_PROXIES} \
     --p1_lr 1e-3 \
     --p1_weight_decay 3e-4 \
-    --p1_max_epochs 500 \
+    --p1_max_epochs 200 \
     --p1_patience 50 \
     --save_dir "${HY_SHARED}"
 
@@ -180,7 +180,7 @@ python3 main_indist.py \
     --model_path "${HY_P1}" \
     --p2_lr 1e-3 \
     --p2_weight_decay 3e-4 \
-    --p2_max_epochs 500 \
+    --p2_max_epochs 200 \
     --p2_patience 50 \
     --save_dir "${HY_SHARED}"
 
