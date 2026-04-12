@@ -17,18 +17,18 @@ set -eux pipefail
 # Generators: score_based, pma, graph_coarsening, gnn_pooling
 # =============================================================
 
-BASE_DIR="checkpoints_indist"
+BASE_DIR="checkpoints_indist2"
 NUM_PROXIES=64
 
 # Common model args per backbone
-VANILLA_ARGS="--backbone vanilla_gt --hidden_dim 256 --num_layers 5 --num_heads 8 --dropout 0.1 --batch_size 128"
-HYBRID_ARGS="--backbone hybrid --hidden_dim 88 --state_dim 88 --num_gred_layers 8 --num_transformer_layers 2 --num_heads 8 --gred_expand 1 --r_min 0.95 --r_max 1.0 --max_phase_lru 6.28 --gred_act full-glu --max_hops 40 --dropout 0.2 --batch_size 64"
+VANILLA_ARGS="--backbone vanilla_gt --hidden_dim 256 --num_layers 8 --num_heads 8 --dropout 0.1 --batch_size 512"
+HYBRID_ARGS="--backbone hybrid --hidden_dim 88 --state_dim 88 --num_gred_layers 8 --num_transformer_layers 2 --num_heads 8 --gred_expand 1 --r_min 0.95 --r_max 1.0 --max_phase_lru 6.28 --gred_act full-glu --max_hops 40 --dropout 0.2 --batch_size 512"
 
 # Generator-specific args
-SCORE_ARGS="--generator score_based --gen_num_layers 4 --gen_num_heads 8 --gen_dropout 0.2"
-PMA_FP_ARGS="--generator pma --pma_query_mode farthest_point --gen_num_layers 4 --gen_num_heads 8 --gen_dropout 0.2"
-PMA_SK_ARGS="--generator pma --pma_query_mode soft_kmeans --gen_num_layers 4 --gen_num_heads 8 --gen_dropout 0.2"
-COARSEN_ARGS="--generator graph_coarsening --gen_num_layers 4 --gen_num_heads 8 --gen_dropout 0.2 --coarsen_gnn_type GIN --coarsen_reg_weight 0.1"
+SCORE_ARGS="--generator score_based --gen_num_layers 8 --gen_num_heads 8 --gen_dropout 0.2"
+PMA_FP_ARGS="--generator pma --pma_query_mode farthest_point --gen_num_layers 8 --gen_num_heads 8 --gen_dropout 0.2"
+PMA_SK_ARGS="--generator pma --pma_query_mode soft_kmeans --gen_num_layers 8 --gen_num_heads 8 --gen_dropout 0.2"
+COARSEN_ARGS="--generator graph_coarsening --gen_num_layers 8 --gen_num_heads 8 --gen_dropout 0.2 --coarsen_gnn_type GIN --coarsen_reg_weight 0.1"
 GNN_POOL_ARGS="--generator gnn_pooling --gnn_layers 4 --gnn_type GINE --pool_types max --decode_hidden 128 --decode_layers 3 --gen_dropout 0.2"
 
 
