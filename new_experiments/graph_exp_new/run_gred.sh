@@ -195,4 +195,21 @@ python3 main_three_staged.py \
     --generator_path "${STAGED_DIR}/hybrid_pma/stage2_generator.pt" \
     --save_dir "${STAGED_DIR}/hybrid_pma"
 
+# =============================================================
+# C. Staged Pipeline A (main_staged.py)
+# =============================================================
+
+PIPELINE_A_DIR="${BASE_DIR}/staged_pipeline_a"
+
+echo "=== Staged Pipeline A: score_based (all stages) ==="
+python3 main_staged.py \
+    --stage all \
+    --generator score_based \
+    --num_proxies 8 \
+    --s2_prior_moment_lambda 1 \
+    --s2_num_restarts 5 \
+    --s2_num_steps 100 \
+    --batch_size 8 \
+    --save_dir "${PIPELINE_A_DIR}"
+
 echo "All GRED experiments complete."

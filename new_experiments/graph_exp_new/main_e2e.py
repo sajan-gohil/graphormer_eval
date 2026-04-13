@@ -14,6 +14,7 @@ import time
 import yaml
 import numpy as np
 import torch
+torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 
 from data import get_loaders

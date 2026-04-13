@@ -155,7 +155,17 @@ class GraphTransformer(nn.Module):
         else:
             orig_x = dense_x[:, :max_N, :]
             node_emb_masked = orig_x[dense_mask]
-            pooled = global_mean_pool(node_emb_masked, batch.batch)
+            # Build pooling indices from the active dense node mask so this
+            # works for both full batches and subsampled precomputed_dense.
+            try:
+                pooled = global_mean_pool(node_emb_masked, batch.batch)
+            except:
+                batch_vec = (
+                    torch.arange(B, device=dense_x.device)
+                    .unsqueeze(1)
+                    .expand_as(dense_mask)[dense_mask]
+                )
+                pooled = global_mean_pool(node_emb_masked, batch_vec)
 
         logits = self.head(pooled)
 
@@ -623,7 +633,17 @@ class GREDHybridTransformer(nn.Module):
         else:
             orig_h = h_aug[:, :max_N, :]
             node_emb_masked = orig_h[dense_mask]
-            pooled = global_mean_pool(node_emb_masked, batch.batch)
+            # Keep pooling indices aligned with dense_mask when nodes are dropped
+            # and precomputed_dense is passed from Phase 3.
+            try:
+                pooled = global_mean_pool(node_emb_masked, batch.batch)
+            except:
+                batch_vec = (
+                    torch.arange(B, device=h_aug.device)
+                    .unsqueeze(1)
+                    .expand_as(dense_mask)[dense_mask]
+                )
+                pooled = global_mean_pool(node_emb_masked, batch_vec)
 
         logits = self.head(pooled)
 

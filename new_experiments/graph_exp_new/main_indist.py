@@ -8,8 +8,8 @@ Phase 1: Train full transformer on all N nodes (baseline)
 Phase 2: Train transformer on (N-M) node subsets (frozen encoder from Phase 1)
 Phase 3: Train proxy generator to reconstruct missing M nodes
          (reconstruction + task loss through frozen Phase 2 transformer)
-Phase 4: Augmented evaluation — N nodes + M generated proxies through Phase 1 model
-Phase 5: End-to-end fine-tuning of the full pipeline
+Phase 4: Augmented evaluation — N nodes + 2M generated proxies (no node dropping)
+Phase 5: End-to-end joint fine-tuning from epoch 1 (no separate warmup)
 
 Usage:
     python main_indist.py --phase all --generator score_based --backbone vanilla_gt
@@ -25,9 +25,8 @@ import time
 import yaml
 import numpy as np
 import torch
+torch.set_float32_matmul_precision('high')
 import torch.nn as nn
-import torch.nn.functional as F
-from scipy.optimize import linear_sum_assignment
 
 from data import get_loaders
 from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
@@ -64,12 +63,14 @@ def build_parser():
 
     # Model architecture
     p.add_argument("--hidden_dim", type=int, default=256)
-    p.add_argument("--num_layers", type=int, default=5)
+    p.add_argument("--num_layers", type=int, default=8)
     p.add_argument("--num_heads", type=int, default=8)
     p.add_argument("--output_dim", type=int, default=10)
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--num_proxies", type=int, default=32,
                    help="M: number of nodes to drop (Phase 2) / proxies to generate")
+    p.add_argument("--proxy_multiplier", type=int, default=2,
+                   help="Number of sets of M proxies to generate (e.g. 1 or 2)")
 
     # Laplacian PE
     p.add_argument("--use_lap_pe", action="store_true", default=False)
@@ -118,11 +119,13 @@ def build_parser():
                    help="Number of epochs over which to anneal recon weight")
 
     # Phase 5 — End-to-end fine-tuning
-    p.add_argument("--p5_phase_a_epochs", type=int, default=20)
+    p.add_argument(
+        "--p5_phase_a_epochs", type=int, default=0,
+        help="Deprecated: ignored (Phase 5 starts directly with joint training)")
     p.add_argument("--p5_lr_gen", type=float, default=None,
                    help="Generator LR for Phase 5 (default: 0.1 * p3_lr)")
     p.add_argument("--p5_lr_model", type=float, default=None,
-                   help="Model LR for Phase 5 Phase B (default: 0.1 * p5_lr_gen)")
+                   help="Model LR for Phase 5 (default: same as p5_lr_gen)")
     p.add_argument("--p5_proxy_dropout", type=float, default=0.1)
     p.add_argument("--p5_max_epochs", type=int, default=500)
     p.add_argument("--p5_patience", type=int, default=40)
@@ -131,7 +134,7 @@ def build_parser():
 
     # Generator architecture
     p.add_argument("--gen_hidden_dim", type=int, default=256)
-    p.add_argument("--gen_num_layers", type=int, default=4)
+    p.add_argument("--gen_num_layers", type=int, default=6)
     p.add_argument("--gen_num_heads", type=int, default=8)
     p.add_argument("--gen_dropout", type=float, default=0.2)
     # PMA specific
@@ -175,7 +178,7 @@ def parse_args():
     if args.p5_lr_gen is None:
         args.p5_lr_gen = args.p3_lr * 0.1
     if args.p5_lr_model is None:
-        args.p5_lr_model = args.p5_lr_gen * 0.1
+        args.p5_lr_model = args.p5_lr_gen
     return args
 
 
@@ -350,13 +353,13 @@ def subsample_dist_masks(dist_masks, node_masks, sub_mask):
 
 
 # ================================================================
-# HUNGARIAN MATCHING RECONSTRUCTION LOSS
+# DIFFERENTIABLE DISTRIBUTION RECONSTRUCTION LOSS
 # ================================================================
 
-def hungarian_reconstruction_loss(generated, targets, valid_mask):
+def distribution_reconstruction_loss(generated, targets, valid_mask):
     """
-    Compute MSE between generated proxies and target (held-out) node embeddings
-    using Hungarian matching for optimal assignment.
+    Differentiable set-to-set reconstruction loss using symmetric Chamfer distance.
+    This avoids the non-differentiable assignment step in Hungarian matching.
 
     Args:
         generated: (B, M, d) generated proxy embeddings
@@ -366,32 +369,33 @@ def hungarian_reconstruction_loss(generated, targets, valid_mask):
     Returns:
         loss: scalar reconstruction loss (averaged over valid graphs)
     """
-    B, M, d = generated.shape
-    if not valid_mask.any():
-        return torch.tensor(0.0, device=generated.device, requires_grad=True)
+    if not torch.any(valid_mask):
+        return generated.sum() * 0.0
 
-    total_loss = torch.tensor(0.0, device=generated.device)
-    count = 0
-
-    for b in range(B):
+    losses = []
+    for b in range(generated.shape[0]):
         if not valid_mask[b]:
             continue
 
-        gen_b = generated[b]    # (M, d)
+        gen_b = generated[b]   # (M, d)
         tgt_b = targets[b]     # (M, d)
+        dist2 = torch.cdist(gen_b, tgt_b, p=2).pow(2)  # (M, M)
 
-        # Cost matrix: pairwise squared L2 distances
-        with torch.no_grad():
-            cost = torch.cdist(gen_b, tgt_b, p=2).pow(2)  # (M, M)
-            row_ind, col_ind = linear_sum_assignment(cost.cpu().numpy())
+        # Symmetric Chamfer: generated->target and target->generated.
+        loss_b = 0.5 * (
+            dist2.min(dim=1).values.mean() +
+            dist2.min(dim=0).values.mean()
+        )
+        losses.append(loss_b)
 
-        # Compute loss on matched pairs (differentiable w.r.t. generated)
-        matched_gen = gen_b[row_ind]     # (M, d)
-        matched_tgt = tgt_b[col_ind]     # (M, d)
-        total_loss = total_loss + F.mse_loss(matched_gen, matched_tgt)
-        count += 1
+    if len(losses) == 0:
+        return generated.sum() * 0.0
+    return torch.stack(losses).mean()
 
-    return total_loss / max(count, 1)
+
+def hungarian_reconstruction_loss(generated, targets, valid_mask):
+    """Backward-compatible alias kept for old call sites/checkpoints."""
+    return distribution_reconstruction_loss(generated, targets, valid_mask)
 
 
 # ================================================================
@@ -399,20 +403,32 @@ def hungarian_reconstruction_loss(generated, targets, valid_mask):
 # ================================================================
 
 def _generate_proxies(model, generator, batch, dense_x, dense_mask, args,
-                      gred_h=None):
+                      gred_h=None, num_proxy_sets=1):
     """Generate proxy embeddings for a batch. Handles flat vs dense interface."""
     gen_input = gred_h if gred_h is not None else dense_x
     gen_mask = dense_mask
+    num_proxy_sets = max(int(num_proxy_sets), 1)
 
-    if _uses_flat_interface(args.generator):
-        flat_emb = gen_input[gen_mask]
-        proxies, aux_loss = generator(
-            flat_emb, mask=None,
-            edge_index=batch.edge_index, batch_vec=batch.batch,
-            edge_attr=getattr(batch, "edge_attr", None),
-        )
-    else:
-        proxies, aux_loss = generator(gen_input, gen_mask)
+    proxy_list = []
+    aux_terms = []
+
+    for _ in range(num_proxy_sets):
+        if _uses_flat_interface(args.generator):
+            flat_emb = gen_input[gen_mask]
+            proxies, aux_loss = generator(
+                flat_emb, mask=None,
+                edge_index=batch.edge_index, batch_vec=batch.batch,
+                edge_attr=getattr(batch, "edge_attr", None),
+            )
+        else:
+            proxies, aux_loss = generator(gen_input, gen_mask)
+
+        proxy_list.append(proxies)
+        if aux_loss is not None:
+            aux_terms.append(aux_loss)
+
+    proxies = proxy_list[0] if len(proxy_list) == 1 else torch.cat(proxy_list, dim=1)
+    aux_loss = torch.stack(aux_terms).mean() if len(aux_terms) > 0 else None
     return proxies, aux_loss
 
 
@@ -454,8 +470,9 @@ def evaluate_model_only(model, loader, device, args):
 
 
 @torch.no_grad()
-def evaluate_with_proxies(model, generator, loader, device, args):
-    """Evaluate model with generated proxies. Returns (AP, loss)."""
+def evaluate_with_proxies(model, generator, loader, device, args,
+                          proxy_multiplier=1):
+    """Evaluate model with generated proxies from full nodes (no node dropping)."""
     model.eval()
     generator.eval()
     loss_fn = nn.BCEWithLogitsLoss()
@@ -480,7 +497,8 @@ def evaluate_with_proxies(model, generator, loader, device, args):
             gred_h = model.encode_gred(dense_x, dist_masks_batch, node_masks_batch)
 
         proxies, _ = _generate_proxies(
-            model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
+            model, generator, batch, dense_x, dense_mask, args,
+            gred_h=gred_h, num_proxy_sets=proxy_multiplier)
 
         if args.backbone == "vanilla_gt":
             logits, _ = model(batch, proxy_embeddings=proxies,
@@ -840,7 +858,7 @@ def _evaluate_partial(model, loader, device, args, num_drop):
 def run_phase3(args, phase1_model_path, phase2_model_path):
     """
     Train proxy generator to reconstruct missing M nodes.
-    Uses both reconstruction loss (Hungarian matching) and task loss
+    Uses both differentiable distribution reconstruction loss and task loss
     through the frozen Phase 2 transformer.
     """
     print("\n" + "=" * 60, flush=True)
@@ -934,8 +952,8 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
             else:
                 proxies, aux_loss = generator(sub_x, sub_mask)
 
-            # Loss 1: Reconstruction (Hungarian matching)
-            l_recon = hungarian_reconstruction_loss(
+            # Loss 1: Differentiable reconstruction on dropped-node distribution.
+            l_recon = distribution_reconstruction_loss(
                 proxies, dropped_embs, valid_drop)
 
             # Loss 2: Task loss through Phase 2 transformer
@@ -1108,14 +1126,16 @@ def _evaluate_phase3(phase1_model, phase2_model, generator, loader, device,
 
 def run_phase4(args, phase1_model_path, generator_path):
     """
-    Augmented evaluation: N original nodes + M generated proxies
+    Augmented evaluation: N original nodes + generated proxies
     through the Phase 1 transformer. No training — evaluation only.
     """
     print("\n" + "=" * 60, flush=True)
-    print("PHASE 4: Augmented Evaluation (N + M generated nodes)", flush=True)
+    print("PHASE 4: Augmented Evaluation (N + generated nodes)", flush=True)
     print(f"  Backbone: {args.backbone}", flush=True)
     print("=" * 60, flush=True)
     is_gred = args.backbone in ("gred", "hybrid")
+    proxy_multiplier = args.proxy_multiplier
+    num_aug_proxies = proxy_multiplier * args.num_proxies
 
     _, val_loader, test_loader, _, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
@@ -1147,12 +1167,15 @@ def run_phase4(args, phase1_model_path, generator_path):
     print(f"  Val  AP={val_ap_base:.4f} loss={val_loss_base:.4f}", flush=True)
     print(f"  Test AP={test_ap_base:.4f} loss={test_loss_base:.4f}", flush=True)
 
-    # Augmented: N + M generated proxies
-    print("\nAugmented (N + M generated proxies):", flush=True)
+    # Augmented: N + 2M generated proxies, no node dropping.
+    print(f"\nAugmented (N + {num_aug_proxies} generated proxies = 2M):",
+          flush=True)
     val_ap_aug, val_loss_aug = evaluate_with_proxies(
-        model, generator, val_loader, args.device, args)
+        model, generator, val_loader, args.device, args,
+        proxy_multiplier=proxy_multiplier)
     test_ap_aug, test_loss_aug = evaluate_with_proxies(
-        model, generator, test_loader, args.device, args)
+        model, generator, test_loader, args.device, args,
+        proxy_multiplier=proxy_multiplier)
     print(f"  Val  AP={val_ap_aug:.4f} loss={val_loss_aug:.4f}", flush=True)
     print(f"  Test AP={test_ap_aug:.4f} loss={test_loss_aug:.4f}", flush=True)
 
@@ -1170,6 +1193,8 @@ def run_phase4(args, phase1_model_path, generator_path):
         "val_ap_augmented": val_ap_aug,
         "test_ap_baseline": test_ap_base,
         "test_ap_augmented": test_ap_aug,
+        "proxy_multiplier": proxy_multiplier,
+        "num_generated_proxies": num_aug_proxies,
         "val_delta": val_ap_aug - val_ap_base,
         "test_delta": test_ap_aug - test_ap_base,
     }
@@ -1187,17 +1212,18 @@ def run_phase4(args, phase1_model_path, generator_path):
 
 def run_phase5(args, phase1_model_path, generator_path):
     """
-    End-to-end fine-tuning: jointly train transformer + generator.
-    Phase A: frozen transformer, reduced-LR generator warmup.
-    Phase B: unfrozen transformer at lower LR, proxy dropout.
+    End-to-end fine-tuning: jointly train transformer + generator from epoch 1.
+    Uses the same learning rate for both model and generator.
     """
     print("\n" + "=" * 60, flush=True)
     print("PHASE 5: End-to-End Fine-tuning", flush=True)
     print(f"  Backbone: {args.backbone}", flush=True)
-    print(f"  Phase A: {args.p5_phase_a_epochs} epochs "
-          f"(gen_lr={args.p5_lr_gen:.2e})", flush=True)
-    print(f"  Phase B: model_lr={args.p5_lr_model:.2e}, "
-          f"gen_lr={args.p5_lr_gen:.2e}", flush=True)
+    joint_lr = args.p5_lr_gen
+    if not np.isclose(args.p5_lr_model, joint_lr):
+      print(f"  Overriding model LR {args.p5_lr_model:.2e} -> {joint_lr:.2e} "
+          f"to match generator LR for joint training.", flush=True)
+    args.p5_lr_model = joint_lr
+    print(f"  Joint LR (model + generator): {joint_lr:.2e}", flush=True)
     print(f"  Proxy dropout: {args.p5_proxy_dropout}", flush=True)
     print("=" * 60, flush=True)
     is_gred = args.backbone in ("gred", "hybrid")
@@ -1221,66 +1247,38 @@ def run_phase5(args, phase1_model_path, generator_path):
 
     loss_fn = nn.BCEWithLogitsLoss()
 
-    # Phase A: freeze model, train generator only
-    _freeze(model)
-    opt_a = torch.optim.AdamW(
-        generator.parameters(), lr=args.p5_lr_gen,
+    # Joint optimizer from epoch 1 with identical LR for model + generator.
+    if args.backbone == "vanilla_gt":
+        model_param_groups = [
+            {"params": model.encoder.parameters(), "lr": joint_lr},
+            {"params": model.layers.parameters(), "lr": joint_lr},
+            {"params": model.head.parameters(), "lr": joint_lr},
+        ]
+    elif args.backbone == "gred":
+        model_param_groups = [
+            {"params": model.encoder.parameters(), "lr": joint_lr},
+            {"params": model.layers.parameters(), "lr": joint_lr},
+            {"params": model.head.parameters(), "lr": joint_lr},
+        ]
+    elif args.backbone == "hybrid":
+        model_param_groups = [
+            {"params": model.encoder.parameters(), "lr": joint_lr},
+            {"params": model.gred_layers.parameters(), "lr": joint_lr},
+            {"params": model.transformer_layers.parameters(), "lr": joint_lr},
+            {"params": model.head.parameters(), "lr": joint_lr},
+        ]
+
+    optimizer = torch.optim.AdamW(
+        model_param_groups + [{"params": generator.parameters(), "lr": joint_lr}],
         weight_decay=args.p5_weight_decay)
-    opt_b = None
 
     best_val_ap = 0.0
     best_epoch = -1
     patience_counter = 0
-    current_phase = "A"
     save_path = os.path.join(args.save_dir, "phase5_best.pt")
 
     for epoch in range(1, args.p5_max_epochs + 1):
         epoch_start = time.time()
-
-        # Phase transition A → B
-        if epoch > args.p5_phase_a_epochs and current_phase == "A":
-            current_phase = "B"
-            _unfreeze(model)
-
-            if args.backbone == "vanilla_gt":
-                model_params = [
-                    {"params": model.encoder.parameters(),
-                     "lr": args.p5_lr_model},
-                    {"params": model.layers.parameters(),
-                     "lr": args.p5_lr_model},
-                    {"params": model.head.parameters(),
-                     "lr": args.p5_lr_model},
-                ]
-            elif args.backbone == "gred":
-                model_params = [
-                    {"params": model.encoder.parameters(),
-                     "lr": args.p5_lr_model},
-                    {"params": model.layers.parameters(),
-                     "lr": args.p5_lr_model},
-                    {"params": model.head.parameters(),
-                     "lr": args.p5_lr_model},
-                ]
-            elif args.backbone == "hybrid":
-                model_params = [
-                    {"params": model.encoder.parameters(),
-                     "lr": args.p5_lr_model},
-                    {"params": model.gred_layers.parameters(),
-                     "lr": args.p5_lr_model},
-                    {"params": model.transformer_layers.parameters(),
-                     "lr": args.p5_lr_model},
-                    {"params": model.head.parameters(),
-                     "lr": args.p5_lr_model},
-                ]
-
-            opt_b = torch.optim.AdamW(
-                model_params + [
-                    {"params": generator.parameters(), "lr": args.p5_lr_gen}
-                ],
-                weight_decay=args.p5_weight_decay)
-            print(f"  [Epoch {epoch}] Switching to Phase B — model unfrozen.",
-                  flush=True)
-
-        optimizer = opt_a if current_phase == "A" else opt_b
 
         model.train()
         generator.train()
@@ -1306,16 +1304,13 @@ def run_phase5(args, phase1_model_path, generator_path):
                 gred_h = model.encode_gred(
                     dense_x, dist_masks_batch, node_masks_batch)
 
-            # Proxy dropout in Phase B
-            if current_phase == "A":
-                use_proxy = True
-            else:
-                use_proxy = torch.rand(1).item() > args.p5_proxy_dropout
+            # Proxy dropout during joint training.
+            use_proxy = torch.rand(1).item() > args.p5_proxy_dropout
 
             if use_proxy:
                 proxies, aux_loss = _generate_proxies(
                     model, generator, batch, dense_x, dense_mask, args,
-                    gred_h=gred_h)
+                    gred_h=gred_h, num_proxy_sets=args.proxy_multiplier)
 
                 if args.backbone == "vanilla_gt":
                     logits, _ = model(
@@ -1338,18 +1333,20 @@ def run_phase5(args, phase1_model_path, generator_path):
                 if args.backbone == "vanilla_gt":
                     logits, _ = model(
                         batch, precomputed_dense=(dense_x, dense_mask))
-                else:
+                elif args.backbone == "hybrid":
                     logits, _ = model(
                         batch, dist_masks_batch, node_masks_batch,
                         precomputed_dense=(dense_x, dense_mask),
                         precomputed_gred=gred_h)
+                elif args.backbone == "gred":
+                    logits, _ = model(
+                        batch, dist_masks_batch, node_masks_batch,
+                        precomputed_dense=(dense_x, dense_mask))
                 loss = loss_fn(logits, batch.y)
 
             loss.backward()
 
-            params_to_clip = list(generator.parameters())
-            if current_phase == "B":
-                params_to_clip += list(model.parameters())
+            params_to_clip = list(generator.parameters()) + list(model.parameters())
             nn.utils.clip_grad_norm_(params_to_clip, args.p5_grad_clip)
             optimizer.step()
 
@@ -1362,15 +1359,17 @@ def run_phase5(args, phase1_model_path, generator_path):
         train_loss = float(np.mean(train_losses))
 
         val_ap, val_loss = evaluate_with_proxies(
-            model, generator, val_loader, args.device, args)
+            model, generator, val_loader, args.device, args,
+            proxy_multiplier=args.proxy_multiplier)
         test_ap, _ = evaluate_with_proxies(
-            model, generator, test_loader, args.device, args)
+            model, generator, test_loader, args.device, args,
+            proxy_multiplier=args.proxy_multiplier)
 
         elapsed = time.time() - epoch_start
         mem_str = _mem_str(args)
         print(
             f"Epoch {epoch:3d}/{args.p5_max_epochs} "
-            f"[{current_phase}][{elapsed:.1f}s{mem_str}] | "
+            f"[joint][{elapsed:.1f}s{mem_str}] | "
             f"train_loss={train_loss:.4f} train_AP={train_ap:.4f} | "
             f"val_loss={val_loss:.4f} val_AP={val_ap:.4f} | "
             f"test_AP={test_ap:.4f}",
