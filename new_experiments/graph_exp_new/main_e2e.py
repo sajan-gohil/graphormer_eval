@@ -24,6 +24,7 @@ from generators import (
 )
 from metrics import compute_macro_ap
 from mmd import mmd_squared
+from optim_utils import build_grouped_optimizer_and_scheduler
 
 
 # ================================================================
@@ -55,7 +56,7 @@ def build_parser():
     p.add_argument("--dropout", type=float, default=0.3)
 
     # Laplacian positional encoding
-    p.add_argument("--use_lap_pe", action="store_true", default=False,
+    p.add_argument("--use_lap_pe", action=argparse.BooleanOptionalAction, default=True,
                    help="Add Laplacian eigenvector positional encodings to node features")
     p.add_argument("--lap_pe_dim", type=int, default=32,
                    help="Number of Laplacian eigenvectors for positional encoding")
@@ -110,11 +111,17 @@ def build_parser():
     # Training
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=3e-4)
-    p.add_argument("--batch_size", type=int, default=1)
-    p.add_argument("--max_epochs", type=int, default=500)
-    p.add_argument("--patience", type=int, default=30)
+    p.add_argument("--batch_size", type=int, default=32)
+    p.add_argument("--max_epochs", type=int, default=200)
+    p.add_argument("--patience", type=int, default=50)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--lr_min", type=float, default=1e-7,
+                   help="Minimum LR floor for warmup-cosine schedule")
+    p.add_argument("--warmup_ratio", type=float, default=0.05,
+                   help="Warmup fraction of total optimization steps")
+    p.add_argument("--recurrent_lr_factor", type=float, default=1.0,
+                   help="LR multiplier for recurrent GRED parameters")
 
     # E2E-specific
     p.add_argument("--mmd_lambda", type=float, default=0.01,
@@ -437,11 +444,22 @@ def run_e2e(args):
     print(f"    Model:     {sum(p.numel() for p in model.parameters()):,}", flush=True)
     print(f"    Generator: {sum(p.numel() for p in generator.parameters()):,}", flush=True)
 
-    # Single optimizer for everything
-    optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(generator.parameters()),
-        lr=args.lr,
+    # Official-style grouped optimization + warmup-cosine schedule.
+    train_steps_per_epoch = max(1, len(train_loader))
+    total_steps = max(1, train_steps_per_epoch * args.max_epochs)
+    named_params = [
+        (f"model.{name}", param) for name, param in model.named_parameters()
+    ] + [
+        (f"generator.{name}", param) for name, param in generator.named_parameters()
+    ]
+    optimizer, scheduler = build_grouped_optimizer_and_scheduler(
+        named_parameters=named_params,
+        lr_max=args.lr,
+        lr_min=args.lr_min,
         weight_decay=args.weight_decay,
+        total_steps=total_steps,
+        warmup_ratio=args.warmup_ratio,
+        recurrent_lr_factor=args.recurrent_lr_factor,
     )
     loss_fn = nn.BCEWithLogitsLoss()
 
@@ -491,6 +509,7 @@ def run_e2e(args):
                 args.grad_clip,
             )
             optimizer.step()
+            scheduler.step()
 
             train_task_losses.append(task_loss.item())
             train_mmd_losses.append(mmd_loss.item())
@@ -555,6 +574,7 @@ def run_e2e(args):
                 "model_state": model.state_dict(),
                 "generator_state": generator.state_dict(),
                 "optimizer_state": optimizer.state_dict(),
+                "scheduler_state": scheduler.state_dict(),
                 "val_ap": val_ap,
                 "test_ap": test_ap,
                 "args": vars(args),

@@ -34,6 +34,10 @@ from generators import (
     ScoreBasedGenerator, GNNPoolingGenerator, PMAGenerator, GraphCoarseningGenerator,
 )
 from metrics import compute_macro_ap
+from optim_utils import (
+    build_grouped_optimizer_and_scheduler,
+    build_warmup_cosine_scheduler,
+)
 
 
 # ================================================================
@@ -73,7 +77,7 @@ def build_parser():
                    help="Number of sets of M proxies to generate (e.g. 1 or 2)")
 
     # Laplacian PE
-    p.add_argument("--use_lap_pe", action="store_true", default=False)
+    p.add_argument("--use_lap_pe", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--lap_pe_dim", type=int, default=8)
 
     # GRED-specific
@@ -93,21 +97,21 @@ def build_parser():
     # Phase 1 — Pretrain full transformer
     p.add_argument("--p1_lr", type=float, default=1e-3)
     p.add_argument("--p1_weight_decay", type=float, default=3e-4)
-    p.add_argument("--p1_max_epochs", type=int, default=500)
+    p.add_argument("--p1_max_epochs", type=int, default=200)
     p.add_argument("--p1_patience", type=int, default=50)
     p.add_argument("--p1_grad_clip", type=float, default=1.0)
 
     # Phase 2 — Train partial-graph transformer
     p.add_argument("--p2_lr", type=float, default=1e-3)
     p.add_argument("--p2_weight_decay", type=float, default=3e-4)
-    p.add_argument("--p2_max_epochs", type=int, default=500)
+    p.add_argument("--p2_max_epochs", type=int, default=200)
     p.add_argument("--p2_patience", type=int, default=50)
     p.add_argument("--p2_grad_clip", type=float, default=1.0)
 
     # Phase 3 — Train proxy generator
     p.add_argument("--p3_lr", type=float, default=1e-3)
     p.add_argument("--p3_weight_decay", type=float, default=3e-4)
-    p.add_argument("--p3_max_epochs", type=int, default=1000)
+    p.add_argument("--p3_max_epochs", type=int, default=200)
     p.add_argument("--p3_patience", type=int, default=50)
     p.add_argument("--p3_grad_clip", type=float, default=1.0)
     p.add_argument("--p3_eval_every", type=int, default=1)
@@ -127,8 +131,8 @@ def build_parser():
     p.add_argument("--p5_lr_model", type=float, default=None,
                    help="Model LR for Phase 5 (default: same as p5_lr_gen)")
     p.add_argument("--p5_proxy_dropout", type=float, default=0.1)
-    p.add_argument("--p5_max_epochs", type=int, default=500)
-    p.add_argument("--p5_patience", type=int, default=40)
+    p.add_argument("--p5_max_epochs", type=int, default=200)
+    p.add_argument("--p5_patience", type=int, default=50)
     p.add_argument("--p5_grad_clip", type=float, default=1.0)
     p.add_argument("--p5_weight_decay", type=float, default=1e-4)
 
@@ -157,8 +161,14 @@ def build_parser():
                    choices=["shared", "grouped"])
 
     # Common
-    p.add_argument("--batch_size", type=int, default=128)
+    p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--lr_min", type=float, default=1e-7,
+                   help="Minimum LR floor for warmup-cosine schedule")
+    p.add_argument("--warmup_ratio", type=float, default=0.05,
+                   help="Warmup fraction of total optimization steps")
+    p.add_argument("--recurrent_lr_factor", type=float, default=1.0,
+                   help="LR multiplier for recurrent GRED parameters")
     p.add_argument("--save_dir", type=str, default="checkpoints_indist")
     p.add_argument("--device", type=str, default=None)
 
@@ -543,8 +553,15 @@ def run_phase1(args):
     model = build_model(args).to(args.device)
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.p1_lr, weight_decay=args.p1_weight_decay)
+    optimizer, scheduler = build_grouped_optimizer_and_scheduler(
+        named_parameters=[(f"model.{name}", param) for name, param in model.named_parameters()],
+        lr_max=args.p1_lr,
+        lr_min=args.lr_min,
+        weight_decay=args.p1_weight_decay,
+        total_steps=max(1, len(train_loader) * args.p1_max_epochs),
+        warmup_ratio=args.warmup_ratio,
+        recurrent_lr_factor=args.recurrent_lr_factor,
+    )
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
@@ -577,6 +594,7 @@ def run_phase1(args):
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.p1_grad_clip)
             optimizer.step()
+            scheduler.step()
             train_losses.append(loss.item())
             all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
             all_labels.append(batch.y.cpu().numpy())
@@ -655,23 +673,25 @@ def run_phase2(args, model_path):
     print("  Encoder frozen. Training transformer layers + head only.", flush=True)
 
     # Collect trainable parameters (everything except encoder)
-    trainable_params = []
-    if args.backbone == "vanilla_gt":
-        trainable_params += list(model.layers.parameters())
-        trainable_params += list(model.head.parameters())
-    elif args.backbone == "gred":
-        trainable_params += list(model.layers.parameters())
-        trainable_params += list(model.head.parameters())
-    elif args.backbone == "hybrid":
-        trainable_params += list(model.gred_layers.parameters())
-        trainable_params += list(model.transformer_layers.parameters())
-        trainable_params += list(model.head.parameters())
+    named_trainable = [
+        (f"model.{name}", param)
+        for name, param in model.named_parameters()
+        if param.requires_grad
+    ]
+    trainable_params = [param for _, param in named_trainable]
 
     print(f"  Trainable params: {sum(p.numel() for p in trainable_params):,}",
           flush=True)
 
-    optimizer = torch.optim.AdamW(
-        trainable_params, lr=args.p2_lr, weight_decay=args.p2_weight_decay)
+    optimizer, scheduler = build_grouped_optimizer_and_scheduler(
+        named_parameters=named_trainable,
+        lr_max=args.p2_lr,
+        lr_min=args.lr_min,
+        weight_decay=args.p2_weight_decay,
+        total_steps=max(1, len(train_loader) * args.p2_max_epochs),
+        warmup_ratio=args.warmup_ratio,
+        recurrent_lr_factor=args.recurrent_lr_factor,
+    )
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
@@ -720,8 +740,8 @@ def run_phase2(args, model_path):
                 batch_vec = torch.arange(
                     B, device=h.device
                 ).unsqueeze(1).expand(B, max_N)[sub_mask]
-                from torch_geometric.nn import global_mean_pool
-                pooled = global_mean_pool(node_emb_masked, batch_vec)
+                from torch_geometric.nn import global_add_pool
+                pooled = global_add_pool(node_emb_masked, batch_vec)
                 logits = model.head(pooled)
 
             elif args.backbone == "gred":
@@ -743,6 +763,7 @@ def run_phase2(args, model_path):
             loss.backward()
             nn.utils.clip_grad_norm_(trainable_params, args.p2_grad_clip)
             optimizer.step()
+            scheduler.step()
 
             train_losses.append(loss.item())
             all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
@@ -826,8 +847,8 @@ def _evaluate_partial(model, loader, device, args, num_drop):
             batch_vec = torch.arange(
                 B, device=h.device
             ).unsqueeze(1).expand(B, max_N)[sub_mask]
-            from torch_geometric.nn import global_mean_pool
-            pooled = global_mean_pool(node_emb_masked, batch_vec)
+            from torch_geometric.nn import global_add_pool
+            pooled = global_add_pool(node_emb_masked, batch_vec)
             logits = model.head(pooled)
         elif args.backbone == "gred":
             sub_dm, sub_nm = subsample_dist_masks(
@@ -895,8 +916,15 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
     print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}",
           flush=True)
 
-    optimizer = torch.optim.AdamW(
-        generator.parameters(), lr=args.p3_lr, weight_decay=args.p3_weight_decay)
+    optimizer, scheduler = build_grouped_optimizer_and_scheduler(
+        named_parameters=[(f"generator.{name}", param) for name, param in generator.named_parameters()],
+        lr_max=args.p3_lr,
+        lr_min=args.lr_min,
+        weight_decay=args.p3_weight_decay,
+        total_steps=max(1, len(train_loader) * args.p3_max_epochs),
+        warmup_ratio=args.warmup_ratio,
+        recurrent_lr_factor=1.0,
+    )
     loss_fn = nn.BCEWithLogitsLoss()
     M = args.num_proxies
 
@@ -988,6 +1016,7 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
             loss.backward()
             nn.utils.clip_grad_norm_(generator.parameters(), args.p3_grad_clip)
             optimizer.step()
+            scheduler.step()
 
             train_losses.append(loss.item())
             recon_losses.append(l_recon.item())
@@ -1247,30 +1276,22 @@ def run_phase5(args, phase1_model_path, generator_path):
 
     loss_fn = nn.BCEWithLogitsLoss()
 
-    # Joint optimizer from epoch 1 with identical LR for model + generator.
-    if args.backbone == "vanilla_gt":
-        model_param_groups = [
-            {"params": model.encoder.parameters(), "lr": joint_lr},
-            {"params": model.layers.parameters(), "lr": joint_lr},
-            {"params": model.head.parameters(), "lr": joint_lr},
-        ]
-    elif args.backbone == "gred":
-        model_param_groups = [
-            {"params": model.encoder.parameters(), "lr": joint_lr},
-            {"params": model.layers.parameters(), "lr": joint_lr},
-            {"params": model.head.parameters(), "lr": joint_lr},
-        ]
-    elif args.backbone == "hybrid":
-        model_param_groups = [
-            {"params": model.encoder.parameters(), "lr": joint_lr},
-            {"params": model.gred_layers.parameters(), "lr": joint_lr},
-            {"params": model.transformer_layers.parameters(), "lr": joint_lr},
-            {"params": model.head.parameters(), "lr": joint_lr},
-        ]
-
-    optimizer = torch.optim.AdamW(
-        model_param_groups + [{"params": generator.parameters(), "lr": joint_lr}],
-        weight_decay=args.p5_weight_decay)
+    # Phase A: freeze model, train generator only
+    _freeze(model)
+    phase_a_epochs = min(args.p5_phase_a_epochs, args.p5_max_epochs)
+    phase_a_total_steps = max(1, len(train_loader) * max(phase_a_epochs, 1))
+    phase_b_total_steps = max(1, len(train_loader) * max(args.p5_max_epochs - phase_a_epochs, 1))
+    opt_a, sched_a = build_grouped_optimizer_and_scheduler(
+        named_parameters=[(f"generator.{name}", param) for name, param in generator.named_parameters()],
+        lr_max=args.p5_lr_gen,
+        lr_min=args.lr_min,
+        weight_decay=args.p5_weight_decay,
+        total_steps=phase_a_total_steps,
+        warmup_ratio=args.warmup_ratio,
+        recurrent_lr_factor=1.0,
+    )
+    opt_b = None
+    sched_b = None
 
     best_val_ap = 0.0
     best_epoch = -1
@@ -1279,6 +1300,58 @@ def run_phase5(args, phase1_model_path, generator_path):
 
     for epoch in range(1, args.p5_max_epochs + 1):
         epoch_start = time.time()
+
+        # Phase transition A → B
+        if epoch > args.p5_phase_a_epochs and current_phase == "A":
+            current_phase = "B"
+            _unfreeze(model)
+
+            if args.backbone == "vanilla_gt":
+                model_params = [
+                    {"params": model.encoder.parameters(),
+                     "lr": args.p5_lr_model},
+                    {"params": model.layers.parameters(),
+                     "lr": args.p5_lr_model},
+                    {"params": model.head.parameters(),
+                     "lr": args.p5_lr_model},
+                ]
+            elif args.backbone == "gred":
+                model_params = [
+                    {"params": model.encoder.parameters(),
+                     "lr": args.p5_lr_model},
+                    {"params": model.layers.parameters(),
+                     "lr": args.p5_lr_model},
+                    {"params": model.head.parameters(),
+                     "lr": args.p5_lr_model},
+                ]
+            elif args.backbone == "hybrid":
+                model_params = [
+                    {"params": model.encoder.parameters(),
+                     "lr": args.p5_lr_model},
+                    {"params": model.gred_layers.parameters(),
+                     "lr": args.p5_lr_model},
+                    {"params": model.transformer_layers.parameters(),
+                     "lr": args.p5_lr_model},
+                    {"params": model.head.parameters(),
+                     "lr": args.p5_lr_model},
+                ]
+
+            opt_b = torch.optim.AdamW(
+                model_params + [
+                    {"params": generator.parameters(), "lr": args.p5_lr_gen}
+                ],
+                weight_decay=args.p5_weight_decay)
+            sched_b = build_warmup_cosine_scheduler(
+                optimizer=opt_b,
+                total_steps=phase_b_total_steps,
+                lr_min=args.lr_min,
+                warmup_ratio=args.warmup_ratio,
+            )
+            print(f"  [Epoch {epoch}] Switching to Phase B — model unfrozen.",
+                  flush=True)
+
+        optimizer = opt_a if current_phase == "A" else opt_b
+        scheduler = sched_a if current_phase == "A" else sched_b
 
         model.train()
         generator.train()
@@ -1349,6 +1422,7 @@ def run_phase5(args, phase1_model_path, generator_path):
             params_to_clip = list(generator.parameters()) + list(model.parameters())
             nn.utils.clip_grad_norm_(params_to_clip, args.p5_grad_clip)
             optimizer.step()
+            scheduler.step()
 
             train_losses.append(loss.item())
             all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())

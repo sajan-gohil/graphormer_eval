@@ -2,31 +2,71 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.utils import to_dense_batch, scatter
-from torch_geometric.nn import global_mean_pool
-from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
+from torch_geometric.utils import to_dense_batch
+from torch_geometric.nn import global_add_pool
+
+
+# OGB peptides categorical feature dimensions.
+FULL_ATOM_FEATURE_DIMS = [119, 5, 12, 12, 10, 6, 6, 2, 2]
 
 
 class NodeEncoder(nn.Module):
-    """Atom + bond-aggregated node embeddings with optional Laplacian PE."""
+    """Peptides-style atom feature encoder with optional Laplacian PE.
+
+    For OGB peptides categorical node features, this matches the official
+    implementation by summing per-feature embeddings. For other datasets,
+    a simple dimension-matching fallback keeps the pipelines usable.
+    """
     def __init__(self, hidden_dim=64, lap_pe_dim=0):
         super().__init__()
-        self.atom_encoder = AtomEncoder(hidden_dim // 2)
-        self.bond_encoder = BondEncoder(hidden_dim // 2)
-        self.proj = nn.Linear(hidden_dim, hidden_dim)
+        self.hidden_dim = hidden_dim
+        self.num_atom_features = len(FULL_ATOM_FEATURE_DIMS)
+
+        self.atom_feature_embeddings = nn.ModuleList([
+            nn.Embedding(num_embeddings=dim, embedding_dim=hidden_dim)
+            for dim in FULL_ATOM_FEATURE_DIMS
+        ])
+        for emb in self.atom_feature_embeddings:
+            nn.init.normal_(emb.weight, std=0.01)
+
+        self.atom_post = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+        )
+
+        # Non-peptides fallback for continuous or differently-shaped node features.
+        # Keep this parameter-free to avoid lazy-module initialization issues during
+        # parameter counting/optimizer construction before the first forward pass.
 
         # Optional Laplacian positional encoding
         self.lap_pe_dim = lap_pe_dim
         if lap_pe_dim > 0:
             self.lap_pe_encoder = nn.Linear(lap_pe_dim, hidden_dim)
 
+    def _encode_categorical_atom_features(self, x):
+        h = 0
+        for i, emb in enumerate(self.atom_feature_embeddings):
+            feat_i = x[:, i].long().clamp(min=0, max=emb.num_embeddings - 1)
+            h = h + emb(feat_i)
+        return self.atom_post(h)
+
     def forward(self, x, edge_index, edge_attr, lap_pe=None):
-        h = self.atom_encoder(x)
-        row = edge_index[0]
-        edge_emb = self.bond_encoder(edge_attr)
-        edge_aggr = scatter(edge_emb, row, dim=0, dim_size=h.size(0), reduce="add")
-        h = torch.cat([h, edge_aggr], dim=-1)
-        h = self.proj(h)  # (total_N, d)
+        del edge_index, edge_attr  # Unused in the official peptides-style encoder.
+
+        is_integral = x.dtype in (
+            torch.int8, torch.int16, torch.int32, torch.int64,
+            torch.uint8, torch.bool,
+        )
+        if x.dim() == 2 and x.size(1) == self.num_atom_features and is_integral:
+            h = self._encode_categorical_atom_features(x)
+        else:
+            x_float = x.float()
+            if x_float.size(-1) == self.hidden_dim:
+                h = x_float
+            elif x_float.size(-1) > self.hidden_dim:
+                h = x_float[:, :self.hidden_dim]
+            else:
+                h = F.pad(x_float, (0, self.hidden_dim - x_float.size(-1)))
 
         # Add Laplacian positional encoding if available
         if self.lap_pe_dim > 0 and lap_pe is not None:
@@ -151,21 +191,21 @@ class GraphTransformer(nn.Module):
         if readout_scope == "all_tokens" and proxy_embeddings is not None:
             valid_emb = dense_x[aug_mask]
             batch_vec = torch.arange(B, device=dense_x.device).unsqueeze(1).expand_as(aug_mask)[aug_mask]
-            pooled = global_mean_pool(valid_emb, batch_vec)
+            pooled = global_add_pool(valid_emb, batch_vec)
         else:
             orig_x = dense_x[:, :max_N, :]
             node_emb_masked = orig_x[dense_mask]
             # Build pooling indices from the active dense node mask so this
             # works for both full batches and subsampled precomputed_dense.
             try:
-                pooled = global_mean_pool(node_emb_masked, batch.batch)
+                pooled = global_add_pool(node_emb_masked, batch.batch)
             except:
                 batch_vec = (
                     torch.arange(B, device=dense_x.device)
                     .unsqueeze(1)
                     .expand_as(dense_mask)[dense_mask]
                 )
-                pooled = global_mean_pool(node_emb_masked, batch_vec)
+                pooled = global_add_pool(node_emb_masked, batch_vec)
 
         logits = self.head(pooled)
 
@@ -212,6 +252,11 @@ class DiagonalLRU(nn.Module):
         theta_log = torch.log(u2 * max_phase + 1e-8)
         self.theta_log = nn.Parameter(theta_log)
 
+        with torch.no_grad():
+            diag_lambda_init = torch.exp(-torch.exp(self.nu_log) + 1j * torch.exp(self.theta_log))
+            gamma_log_init = torch.log(torch.sqrt(1 - torch.abs(diag_lambda_init) ** 2 + 1e-8))
+        self.gamma_log = nn.Parameter(gamma_log_init)
+
         # Input projection B (complex: B_re + i*B_im)
         self.B_re = nn.Parameter(torch.empty(input_dim, state_dim))
         self.B_im = nn.Parameter(torch.empty(input_dim, state_dim))
@@ -239,9 +284,9 @@ class DiagonalLRU(nn.Module):
         """Compute complex eigenvalues from log-polar parameterization."""
         return torch.exp(-torch.exp(self.nu_log) + 1j * torch.exp(self.theta_log))
 
-    def _get_gamma(self, diag_lambda):
-        """Normalization factor: gamma = sqrt(1 - |lambda|^2)."""
-        return torch.sqrt(1 - torch.abs(diag_lambda) ** 2 + 1e-8)
+    def _get_gamma(self):
+        """Trainable input scaling from log parameterization."""
+        return torch.exp(self.gamma_log)
 
     def forward(self, xs):
         """
@@ -260,7 +305,7 @@ class DiagonalLRU(nn.Module):
 
         # Complex eigenvalues and input matrix
         diag_lambda = self._get_lambda()  # (state_dim,)
-        gamma = self._get_gamma(diag_lambda)  # (state_dim,)
+        gamma = self._get_gamma()  # (state_dim,)
         B_complex = (self.B_re + 1j * self.B_im) * gamma.unsqueeze(0)  # (d, state_dim)
 
         # Project input: Bu = normed @ B_complex -> (BN, K+1, state_dim) complex
@@ -495,10 +540,10 @@ class GREDEncoder(nn.Module):
                 "Use GREDHybridTransformer instead."
             )
 
-        # Readout: mean pool over valid nodes
+        # Readout: sum pool over valid nodes
         valid_emb = h[node_masks]
         batch_vec = torch.arange(B, device=h.device).unsqueeze(1).expand_as(node_masks)[node_masks]
-        pooled = global_mean_pool(valid_emb, batch_vec)
+        pooled = global_add_pool(valid_emb, batch_vec)
 
         logits = self.head(pooled)
 
@@ -629,21 +674,21 @@ class GREDHybridTransformer(nn.Module):
         if readout_scope == "all_tokens" and proxy_embeddings is not None:
             valid_emb = h_aug[aug_mask]
             batch_vec = torch.arange(B, device=h_aug.device).unsqueeze(1).expand_as(aug_mask)[aug_mask]
-            pooled = global_mean_pool(valid_emb, batch_vec)
+            pooled = global_add_pool(valid_emb, batch_vec)
         else:
             orig_h = h_aug[:, :max_N, :]
             node_emb_masked = orig_h[dense_mask]
             # Keep pooling indices aligned with dense_mask when nodes are dropped
             # and precomputed_dense is passed from Phase 3.
             try:
-                pooled = global_mean_pool(node_emb_masked, batch.batch)
+                pooled = global_add_pool(node_emb_masked, batch.batch)
             except:
                 batch_vec = (
                     torch.arange(B, device=h_aug.device)
                     .unsqueeze(1)
                     .expand_as(dense_mask)[dense_mask]
                 )
-                pooled = global_mean_pool(node_emb_masked, batch_vec)
+                pooled = global_add_pool(node_emb_masked, batch_vec)
 
         logits = self.head(pooled)
 

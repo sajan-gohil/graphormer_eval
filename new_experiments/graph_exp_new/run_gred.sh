@@ -31,9 +31,9 @@ python3 main_e2e.py \
     --dropout 0.2 \
     --lr 1e-3 \
     --weight_decay 0.2 \
-    --batch_size 8 \
-    --max_epochs 500 \
-    --patience 30 \
+    --batch_size 32 \
+    --max_epochs 200 \
+    --patience 50 \
     --mmd_lambda 0 \
     --proxy_warmup_epochs 0 \
     --save_dir "${BASE_DIR}/gred_only_e2e"
@@ -58,9 +58,9 @@ python3 main_e2e.py \
     --dropout 0.2 \
     --lr 1e-3 \
     --weight_decay 3e-4 \
-    --batch_size 8 \
-    --max_epochs 500 \
-    --patience 30 \
+    --batch_size 32 \
+    --max_epochs 200 \
+    --patience 50 \
     --mmd_lambda 0.01 \
     --proxy_warmup_epochs 20 \
     --readout_scope nodes_only \
@@ -88,11 +88,11 @@ python3 main_three_staged.py \
     --gred_act full-glu \
     --max_hops 40 \
     --dropout 0.2 \
-    --batch_size 8 \
+    --batch_size 32 \
     --s1_lr 1e-3 \
     --s1_weight_decay 0.2 \
     --s1_max_epochs 200 \
-    --s1_patience 10 \
+    --s1_patience 50 \
     --save_dir "${SHARED_DIR}"
 
 # --- Stage 1: Pretrain hybrid backbone ---
@@ -112,11 +112,11 @@ python3 main_three_staged.py \
     --gred_act full-glu \
     --max_hops 40 \
     --dropout 0.2 \
-    --batch_size 8 \
+    --batch_size 32 \
     --s1_lr 1e-3 \
     --s1_weight_decay 3e-4 \
-    --s1_max_epochs 500 \
-    --s1_patience 10 \
+    --s1_max_epochs 200 \
+    --s1_patience 50 \
     --save_dir "${STAGED_DIR}/hybrid_shared"
 
 HYBRID_MODEL="${STAGED_DIR}/hybrid_shared/stage1_best.pt"
@@ -135,7 +135,7 @@ python3 main_three_staged.py \
     --num_heads 8 \
     --max_hops 40 \
     --dropout 0.2 \
-    --batch_size 8 \
+    --batch_size 32 \
     --model_path "${HYBRID_MODEL}" \
     --save_dir "${STAGED_DIR}/hybrid_score"
 
@@ -152,7 +152,7 @@ python3 main_three_staged.py \
     --num_heads 8 \
     --max_hops 40 \
     --dropout 0.2 \
-    --batch_size 8 \
+    --batch_size 32 \
     --model_path "${HYBRID_MODEL}" \
     --generator_path "${STAGED_DIR}/hybrid_score/stage2_generator.pt" \
     --save_dir "${STAGED_DIR}/hybrid_score"
@@ -172,7 +172,7 @@ python3 main_three_staged.py \
     --num_heads 8 \
     --max_hops 40 \
     --dropout 0.2 \
-    --batch_size 8 \
+    --batch_size 32 \
     --model_path "${HYBRID_MODEL}" \
     --save_dir "${STAGED_DIR}/hybrid_pma"
 
@@ -190,7 +190,7 @@ python3 main_three_staged.py \
     --num_heads 8 \
     --max_hops 40 \
     --dropout 0.2 \
-    --batch_size 8 \
+    --batch_size 32 \
     --model_path "${HYBRID_MODEL}" \
     --generator_path "${STAGED_DIR}/hybrid_pma/stage2_generator.pt" \
     --save_dir "${STAGED_DIR}/hybrid_pma"
