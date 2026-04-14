@@ -188,10 +188,21 @@ class GraphTransformer(nn.Module):
             aug_x = dense_x
             aug_mask = dense_mask
 
+            # Build kwargs for GNN-based generators (graph_coarsening / gnn_pooling).
+            # For attention-based generators the dict is empty and ignored.
+            _gen = self.multi_point_proxy.get_generator(0)
+            from generators import GraphCoarseningGenerator, GNNPoolingGenerator
+            _needs_graph_kwargs = isinstance(_gen, (GraphCoarseningGenerator, GNNPoolingGenerator))
+            gen_kwargs = {
+                "edge_index": batch.edge_index,
+                "batch_vec": batch.batch,
+                "edge_attr": getattr(batch, "edge_attr", None),
+            } if _needs_graph_kwargs else {}
+
             for i, layer in enumerate(self.layers):
                 if i in insertion_set:
                     aug_x, aug_mask, aux = self.multi_point_proxy.run_proxy_block(
-                        aug_x, aug_mask, point_idx,
+                        aug_x, aug_mask, point_idx, **gen_kwargs
                     )
                     decay = self.multi_point_proxy.aux_loss_decay ** point_idx
                     total_aux = total_aux + aux * decay
@@ -710,10 +721,21 @@ class GREDHybridTransformer(nn.Module):
             h_aug = h
             aug_mask = dense_mask
 
+            # Build kwargs for GNN-based generators (graph_coarsening / gnn_pooling).
+            # For attention-based generators the dict is empty and ignored.
+            _gen = self.multi_point_proxy.get_generator(0)
+            from generators import GraphCoarseningGenerator, GNNPoolingGenerator
+            _needs_graph_kwargs = isinstance(_gen, (GraphCoarseningGenerator, GNNPoolingGenerator))
+            gen_kwargs = {
+                "edge_index": batch.edge_index,
+                "batch_vec": batch.batch,
+                "edge_attr": getattr(batch, "edge_attr", None),
+            } if _needs_graph_kwargs else {}
+
             for i, layer in enumerate(self.transformer_layers):
                 if i in insertion_set:
                     h_aug, aug_mask, aux = self.multi_point_proxy.run_proxy_block(
-                        h_aug, aug_mask, point_idx,
+                        h_aug, aug_mask, point_idx, **gen_kwargs
                     )
                     decay = self.multi_point_proxy.aux_loss_decay ** point_idx
                     total_aux = total_aux + aux * decay

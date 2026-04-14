@@ -72,13 +72,13 @@ def build_parser():
     p.add_argument("--num_heads", type=int, default=8)
     p.add_argument("--output_dim", type=int, default=10)
     p.add_argument("--dropout", type=float, default=0.1)
-    p.add_argument("--num_proxies", type=int, default=32,
+    p.add_argument("--num_proxies", type=int, default=64,
                    help="M: number of nodes to drop (Phase 2) / proxies to generate")
     p.add_argument("--proxy_multiplier", type=int, default=2,
                    help="Number of sets of M proxies to generate (e.g. 1 or 2)")
 
     # Laplacian PE
-    p.add_argument("--use_lap_pe", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--use_lap_pe", action="store_true", default=False)
     p.add_argument("--lap_pe_dim", type=int, default=8)
 
     # GRED-specific
@@ -98,21 +98,21 @@ def build_parser():
     # Phase 1 — Pretrain full transformer
     p.add_argument("--p1_lr", type=float, default=1e-3)
     p.add_argument("--p1_weight_decay", type=float, default=3e-4)
-    p.add_argument("--p1_max_epochs", type=int, default=200)
+    p.add_argument("--p1_max_epochs", type=int, default=500)
     p.add_argument("--p1_patience", type=int, default=50)
     p.add_argument("--p1_grad_clip", type=float, default=1.0)
 
     # Phase 2 — Train partial-graph transformer
     p.add_argument("--p2_lr", type=float, default=1e-3)
     p.add_argument("--p2_weight_decay", type=float, default=3e-4)
-    p.add_argument("--p2_max_epochs", type=int, default=200)
+    p.add_argument("--p2_max_epochs", type=int, default=500)
     p.add_argument("--p2_patience", type=int, default=50)
     p.add_argument("--p2_grad_clip", type=float, default=1.0)
 
     # Phase 3 — Train proxy generator
     p.add_argument("--p3_lr", type=float, default=1e-3)
     p.add_argument("--p3_weight_decay", type=float, default=3e-4)
-    p.add_argument("--p3_max_epochs", type=int, default=200)
+    p.add_argument("--p3_max_epochs", type=int, default=500)
     p.add_argument("--p3_patience", type=int, default=50)
     p.add_argument("--p3_grad_clip", type=float, default=1.0)
     p.add_argument("--p3_eval_every", type=int, default=1)
@@ -122,20 +122,22 @@ def build_parser():
                    help="Final weight for reconstruction loss after annealing")
     p.add_argument("--p3_recon_anneal_epochs", type=int, default=100,
                    help="Number of epochs over which to anneal recon weight")
+    p.add_argument("--p3_no_task_loss", action="store_true", default=False,
+                   help="If set, skip task loss in Phase 3 and train on reconstruction only")
 
     # Phase 5 — End-to-end fine-tuning
     p.add_argument(
         "--p5_phase_a_epochs", type=int, default=0,
         help="Deprecated: ignored (Phase 5 starts directly with joint training)")
-    p.add_argument("--p5_lr_gen", type=float, default=None,
+    p.add_argument("--p5_lr_gen", type=float, default=1e-4,
                    help="Generator LR for Phase 5 (default: 0.1 * p3_lr)")
-    p.add_argument("--p5_lr_model", type=float, default=None,
+    p.add_argument("--p5_lr_model", type=float, default=1e-4,
                    help="Model LR for Phase 5 (default: same as p5_lr_gen)")
     p.add_argument("--p5_proxy_dropout", type=float, default=0.1)
-    p.add_argument("--p5_max_epochs", type=int, default=200)
+    p.add_argument("--p5_max_epochs", type=int, default=500)
     p.add_argument("--p5_patience", type=int, default=50)
     p.add_argument("--p5_grad_clip", type=float, default=1.0)
-    p.add_argument("--p5_weight_decay", type=float, default=1e-4)
+    p.add_argument("--p5_weight_decay", type=float, default=5e-5)
 
     # Generator architecture
     p.add_argument("--gen_hidden_dim", type=int, default=256)
@@ -211,6 +213,7 @@ def parse_args():
         args.p5_lr_gen = args.p3_lr * 0.1
     if args.p5_lr_model is None:
         args.p5_lr_model = args.p5_lr_gen
+    print("Args = ", args.__dict__)
     return args
 
 
@@ -279,10 +282,18 @@ def _build_multi_point_proxy(args, generator, router):
     )
 
 
-def build_model(args):
-    """Build backbone model based on --backbone arg."""
+def build_model(args, include_proxy_modules=True):
+    """Build backbone model based on --backbone arg.
+
+    Args:
+        include_proxy_modules: If False, the cross_attn_router is NOT attached
+            to the model. Use False for Phases 1 and 2 where no proxies are
+            ever generated — this ensures proxy parameters receive zero gradients
+            and are not part of the optimizer in those phases.
+    """
     lap_pe_dim = args.lap_pe_dim if args.use_lap_pe else 0
-    cross_attn_router = _build_cross_attn_router(args)
+    # Only build the cross-attention router when we actually need proxies (Phase 3+).
+    cross_attn_router = _build_cross_attn_router(args) if include_proxy_modules else None
     if args.backbone == "vanilla_gt":
         return GraphTransformer(
             num_layers=args.num_layers, num_heads=args.num_heads,
@@ -624,7 +635,8 @@ def run_phase1(args):
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
-    model = build_model(args).to(args.device)
+    # Phase 1: no proxies or cross-attention router needed.
+    model = build_model(args, include_proxy_modules=False).to(args.device)
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
     optimizer, scheduler = build_grouped_optimizer_and_scheduler(
@@ -738,7 +750,8 @@ def run_phase2(args, model_path):
     )
 
     # Load Phase 1 model
-    model = build_model(args).to(args.device)
+    # Phase 2: no proxies or cross-attention router needed.
+    model = build_model(args, include_proxy_modules=False).to(args.device)
     ckpt = torch.load(model_path, map_location=args.device, weights_only=False)
     model.load_state_dict(ckpt["model_state"])
 
@@ -971,17 +984,22 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
-    # Load Phase 1 model (frozen — for target embeddings)
-    phase1_model = build_model(args).to(args.device)
+    # Load Phase 1 model (frozen — for target embeddings).
+    # The Phase 1 checkpoint was saved WITHOUT proxy modules, so we rebuild
+    # without them here to match the state_dict exactly.
+    phase1_model = build_model(args, include_proxy_modules=False).to(args.device)
     ckpt1 = torch.load(phase1_model_path, map_location=args.device, weights_only=True)
     phase1_model.load_state_dict(ckpt1["model_state"])
     _freeze(phase1_model)
     phase1_model.eval()
 
-    # Load Phase 2 model (frozen — for task loss)
-    phase2_model = build_model(args).to(args.device)
-    ckpt2 = torch.load(phase2_model_path, map_location=args.device, weights_only=True)
-    phase2_model.load_state_dict(ckpt2["model_state"])
+    # Load Phase 2 model (frozen — for task loss).
+    # Phase 2 checkpoint also has no proxy modules; build to match.
+    # The cross_attn_router IS included here because proxies generated by the
+    # generator are fed into this model (single-point path in Phase 3 task loss).
+    phase2_model = build_model(args, include_proxy_modules=True).to(args.device)
+    ckpt2 = torch.load(phase2_model_path, map_location=args.device, weights_only=False)
+    phase2_model.load_state_dict(ckpt2["model_state"], strict=False)
     _freeze(phase2_model)
     phase2_model.eval()
 
@@ -1058,32 +1076,36 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
             l_recon = distribution_reconstruction_loss(
                 proxies, dropped_embs, valid_drop)
 
-            # Loss 2: Task loss through Phase 2 transformer
-            # Feed (N-M) subset + generated proxies through Phase 2 model
-            if args.backbone == "vanilla_gt":
-                logits, _ = phase2_model(
-                    batch, proxy_embeddings=proxies,
-                    precomputed_dense=(sub_x, sub_mask))
-            elif args.backbone == "hybrid":
-                sub_dm, sub_nm = subsample_dist_masks(
-                    dist_masks_batch, node_masks_batch, sub_mask)
-                gred_h = phase2_model.encode_gred(sub_x, sub_dm, sub_nm)
-                logits, _ = phase2_model(
-                    batch, sub_dm, sub_nm,
-                    proxy_embeddings=proxies,
-                    precomputed_dense=(sub_x, sub_mask),
-                    precomputed_gred=gred_h)
-            elif args.backbone == "gred":
-                sub_dm, sub_nm = subsample_dist_masks(
-                    dist_masks_batch, node_masks_batch, sub_mask)
-                logits, _ = phase2_model(
-                    batch, sub_dm, sub_nm,
-                    precomputed_dense=(sub_x, sub_mask))
-
-            l_task = loss_fn(logits, batch.y)
+            # Loss 2: Task loss through Phase 2 transformer (optional)
+            if args.p3_no_task_loss:
+                l_task = torch.tensor(0.0, device=args.device)
+            else:
+                # Feed (N-M) subset + generated proxies through Phase 2 model
+                if args.backbone == "vanilla_gt":
+                    logits, _ = phase2_model(
+                        batch, proxy_embeddings=proxies,
+                        precomputed_dense=(sub_x, sub_mask))
+                elif args.backbone == "hybrid":
+                    sub_dm, sub_nm = subsample_dist_masks(
+                        dist_masks_batch, node_masks_batch, sub_mask)
+                    gred_h = phase2_model.encode_gred(sub_x, sub_dm, sub_nm)
+                    logits, _ = phase2_model(
+                        batch, sub_dm, sub_nm,
+                        proxy_embeddings=proxies,
+                        precomputed_dense=(sub_x, sub_mask),
+                        precomputed_gred=gred_h)
+                elif args.backbone == "gred":
+                    sub_dm, sub_nm = subsample_dist_masks(
+                        dist_masks_batch, node_masks_batch, sub_mask)
+                    logits, _ = phase2_model(
+                        batch, sub_dm, sub_nm,
+                        precomputed_dense=(sub_x, sub_mask))
+                l_task = loss_fn(logits, batch.y)
 
             # Combined loss
-            loss = l_task + recon_w * l_recon
+            loss = recon_w * l_recon
+            if not args.p3_no_task_loss:
+                loss = loss + l_task
             if aux_loss is not None:
                 loss = loss + aux_loss
 
@@ -1247,10 +1269,12 @@ def run_phase4(args, phase1_model_path, generator_path):
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
-    # Load Phase 1 model
+    # Load Phase 1 model. Built with proxy modules so cross_attn_router /
+    # multi_point_proxy slots exist; use strict=False since Phase 1 checkpoint
+    # has no router keys (it was trained without them).
     model = build_model(args).to(args.device)
     ckpt = torch.load(phase1_model_path, map_location=args.device, weights_only=True)
-    model.load_state_dict(ckpt["model_state"])
+    model.load_state_dict(ckpt["model_state"], strict=False)
     _freeze(model)
     model.eval()
 
@@ -1347,10 +1371,11 @@ def run_phase5(args, phase1_model_path, generator_path):
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
-    # Load Phase 1 model
+    # Load Phase 1 model. Built with proxy modules (cross_attn_router) so they
+    # can be fine-tuned in Phase 5; strict=False skips missing router keys.
     model = build_model(args).to(args.device)
     ckpt = torch.load(phase1_model_path, map_location=args.device, weights_only=True)
-    model.load_state_dict(ckpt["model_state"])
+    model.load_state_dict(ckpt["model_state"], strict=False)
 
     # Load Phase 3 generator
     generator = build_generator(args).to(args.device)
@@ -1507,7 +1532,10 @@ def run_phase5(args, phase1_model_path, generator_path):
                         dense_x, dist_masks_batch, node_masks_batch)
 
                 # Proxy dropout during joint training.
-                use_proxy = torch.rand(1).item() > args.p5_proxy_dropout
+                # In Phase A the model is fully frozen — skipping proxies yields
+                # a loss with no grad_fn and breaks backward.  Only apply dropout
+                # in Phase B when the model is also being trained.
+                use_proxy = (current_phase == "A") or (torch.rand(1).item() > args.p5_proxy_dropout)
 
                 if use_proxy:
                     proxies, aux_loss = _generate_proxies(

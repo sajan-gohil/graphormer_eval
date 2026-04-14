@@ -85,10 +85,10 @@ def build_parser():
     p.add_argument("--num_proxies", type=int, default=4)
     p.add_argument("--s2_proxy_lr", type=float, default=5e-2)
     p.add_argument("--s2_num_steps", type=int, default=75)
-    p.add_argument("--s2_mmd_lambda", type=float, default=1)
+    p.add_argument("--s2_mmd_lambda", type=float, default=0.01)
     p.add_argument("--s2_cross_moment_lambda", type=float, default=0.5,
                    help="Weight for intra-batch cross-sample moment matching")
-    p.add_argument("--s2_prior_moment_lambda", type=float, default=0.5,
+    p.add_argument("--s2_prior_moment_lambda", type=float, default=1,
                    help="Weight for fixed-prior moment regularization")
     p.add_argument("--s2_prior_target_var", type=float, default=-1.0,
                    help="Target variance for prior loss; <=0 estimates from train embeddings")

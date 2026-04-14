@@ -953,13 +953,21 @@ class MultiPointProxyWrapper(nn.Module):
             return self.routers[0]
         return self.routers[point_idx]
 
-    def run_proxy_block(self, node_emb, mask, point_idx):
+    def run_proxy_block(self, node_emb, mask, point_idx, **gen_kwargs):
         """Run one proxy-generation + routing pass.
 
         Args:
             node_emb: (B, N_current, d) current node / token embeddings.
             mask: (B, N_current) boolean mask (True = real token).
             point_idx: index into ``self.insertion_layers``.
+            **gen_kwargs: extra keyword arguments forwarded to the generator.
+                For GNN-based generators (GraphCoarseningGenerator,
+                GNNPoolingGenerator) this must include 'edge_index' and
+                'batch_vec', and optionally 'edge_attr'.  Those generators
+                also expect *flat* node embeddings, so the caller is
+                responsible for flattening dense (B, N, d) back to
+                (total_N, d) before passing to this method (or the
+                generator handles the mask internally).
 
         Returns:
             out_tokens: (B, N', d) — either refined nodes (cross-attn,
@@ -969,7 +977,13 @@ class MultiPointProxyWrapper(nn.Module):
             aux_loss: scalar auxiliary loss from the generator.
         """
         gen = self.get_generator(point_idx)
-        proxy_emb, aux_loss = gen(node_emb, mask)
+        if gen_kwargs:
+            # GNN-based generators expect flat (total_N, d) node embeddings.
+            # Flatten from dense (B, N, d) using the boolean mask.
+            flat_node_emb = node_emb[mask]  # (total_N, d)
+            proxy_emb, aux_loss = gen(flat_node_emb, mask=None, **gen_kwargs)
+        else:
+            proxy_emb, aux_loss = gen(node_emb, mask)
 
         router = self.get_router(point_idx)
         if router is not None:

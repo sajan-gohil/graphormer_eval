@@ -35,7 +35,13 @@ from optim_utils import (
     build_warmup_cosine_scheduler,
 )
 
+import warnings
 
+warnings.filterwarnings(
+    "ignore",
+    message="k >= N for N \\* N square matrix",
+    category=RuntimeWarning
+)
 # ================================================================
 # CONFIG
 # ================================================================
@@ -45,7 +51,7 @@ def build_parser():
     p.add_argument("--config", type=str, default=None)
     p.add_argument("--stage", type=str, default="all",
                    choices=["1", "2", "3", "all"])
-    p.add_argument("--generator", type=str, default="score_based",
+    p.add_argument("--generator", type=str, default="graph_coarsening",
                    choices=["score_based", "pma", "graph_coarsening", "gnn_pooling"])
 
     # Backbone
@@ -93,28 +99,28 @@ def build_parser():
     # Stage 1  Pretrain transformer
     p.add_argument("--s1_lr", type=float, default=1e-3)
     p.add_argument("--s1_weight_decay", type=float, default=3e-4)
-    p.add_argument("--s1_max_epochs", type=int, default=200)
+    p.add_argument("--s1_max_epochs", type=int, default=300)
     p.add_argument("--s1_patience", type=int, default=50)
     p.add_argument("--s1_grad_clip", type=float, default=1.0)
 
     # Stage 2 - Train generator on task loss
     p.add_argument("--s2_lr", type=float, default=1e-3)
     p.add_argument("--s2_weight_decay", type=float, default=3e-4)
-    p.add_argument("--s2_max_epochs", type=int, default=200)
+    p.add_argument("--s2_max_epochs", type=int, default=500)
     p.add_argument("--s2_patience", type=int, default=50)
     p.add_argument("--s2_eval_every", type=int, default=1)
     p.add_argument("--s2_grad_clip", type=float, default=1.0)
 
     # Stage 3 - End-to-end finetune
-    p.add_argument("--s3_phase_a_epochs", type=int, default=20,
+    p.add_argument("--s3_phase_a_epochs", type=int, default=5,
                    help="Epochs to keep transformer frozen before Phase B")
-    p.add_argument("--s3_lr_gen", type=float, default=None,
+    p.add_argument("--s3_lr_gen", type=float, default=5e-4,
                    help="Generator LR for stage 3 (default: 0.1 * s2_lr)")
     p.add_argument("--s3_lr_transformer", type=float, default=5e-4,
                    help="Transformer LR for Phase B (default: 0.1 * s3_lr_gen)")
     p.add_argument("--s3_proxy_dropout", type=float, default=0.1,
                    help="Fraction of batches that train without proxies")
-    p.add_argument("--s3_max_epochs", type=int, default=200)
+    p.add_argument("--s3_max_epochs", type=int, default=500)
     p.add_argument("--s3_patience", type=int, default=50)
     p.add_argument("--s3_grad_clip", type=float, default=1.0)
     p.add_argument("--s3_weight_decay", type=float, default=1e-4)
@@ -194,6 +200,7 @@ def parse_args():
         args.s3_lr_gen = args.s2_lr * 0.1
     if args.s3_lr_transformer is None:
         args.s3_lr_transformer = args.s3_lr_gen * 0.1
+    print(args.__dict__)
     return args
 
 

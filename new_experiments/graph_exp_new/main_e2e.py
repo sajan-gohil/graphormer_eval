@@ -125,11 +125,11 @@ def build_parser():
                    help="LR multiplier for recurrent GRED parameters")
 
     # E2E-specific
-    p.add_argument("--mmd_lambda", type=float, default=0.01,
+    p.add_argument("--mmd_lambda", type=float, default=0.0,
                    help="Weight for MMD regularization (0 to disable)")
     p.add_argument("--proxy_warmup_epochs", type=int, default=0,
                    help="Epochs to train transformer without proxies before activating generator")
-    p.add_argument("--readout_scope", type=str, default="nodes_only",
+    p.add_argument("--readout_scope", type=str, default="all_tokens",
                    choices=["nodes_only", "all_tokens"],
                    help="Pool over N original nodes or all N+M tokens")
 
