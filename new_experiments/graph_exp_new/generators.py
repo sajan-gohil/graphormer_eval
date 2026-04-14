@@ -747,3 +747,136 @@ class GNNPoolingGenerator(BaseGenerator):
             aux_loss = torch.stack(mmd_losses).mean()
 
         return proxy_embeddings, aux_loss
+
+
+# ================================================================
+# CROSS-ATTENTION ROUTER (N→M→N Hyperedge Routing)
+# ================================================================
+
+class _CrossAttentionRouterLayer(nn.Module):
+    """Single N→M→N routing layer: proxy gather, proxy self-refine, node readback."""
+    def __init__(self, hidden_dim, num_heads, dropout, use_proxy_self_attn):
+        super().__init__()
+        self.use_proxy_self_attn = use_proxy_self_attn
+
+        # Step 1: Proxy Gather — N→M cross-attention (Q=proxy, K/V=node)
+        self.gather_norm_q = nn.LayerNorm(hidden_dim)
+        self.gather_norm_kv = nn.LayerNorm(hidden_dim)
+        self.gather_cross_attn = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout=dropout, batch_first=True
+        )
+        self.gather_norm_ff = nn.LayerNorm(hidden_dim)
+        self.gather_ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 4, hidden_dim),
+        )
+
+        # Step 2: Proxy Self-Refine — M×M self-attention (optional)
+        if use_proxy_self_attn:
+            self.self_norm = nn.LayerNorm(hidden_dim)
+            self.self_attn = nn.MultiheadAttention(
+                hidden_dim, num_heads, dropout=dropout, batch_first=True
+            )
+            self.self_norm_ff = nn.LayerNorm(hidden_dim)
+            self.self_ffn = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim * 4),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim * 4, hidden_dim),
+            )
+
+        # Step 3: Node Readback — M→N cross-attention (Q=node, K/V=proxy)
+        self.readback_norm_q = nn.LayerNorm(hidden_dim)
+        self.readback_norm_kv = nn.LayerNorm(hidden_dim)
+        self.readback_cross_attn = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout=dropout, batch_first=True
+        )
+        self.readback_norm_ff = nn.LayerNorm(hidden_dim)
+        self.readback_ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 4, hidden_dim),
+        )
+
+    def forward(self, node_emb, proxy_emb, node_key_pad_mask):
+        """
+        Args:
+            node_emb: (B, N, d)
+            proxy_emb: (B, M, d)
+            node_key_pad_mask: (B, N) — True = padding (for MHA key_padding_mask)
+        Returns:
+            node_out: (B, N, d)
+            proxy_out: (B, M, d)
+        """
+        # Step 1: Proxy Gather (N→M)
+        q = self.gather_norm_q(proxy_emb)
+        kv = self.gather_norm_kv(node_emb)
+        attn_out, _ = self.gather_cross_attn(
+            q, kv, kv, key_padding_mask=node_key_pad_mask
+        )
+        proxy_emb = proxy_emb + attn_out
+        proxy_emb = proxy_emb + self.gather_ffn(self.gather_norm_ff(proxy_emb))
+
+        # Step 2: Proxy Self-Refine (M×M)
+        if self.use_proxy_self_attn:
+            normed = self.self_norm(proxy_emb)
+            attn_out, _ = self.self_attn(normed, normed, normed)
+            proxy_emb = proxy_emb + attn_out
+            proxy_emb = proxy_emb + self.self_ffn(self.self_norm_ff(proxy_emb))
+
+        # Step 3: Node Readback (M→N)
+        q = self.readback_norm_q(node_emb)
+        kv = self.readback_norm_kv(proxy_emb)
+        attn_out, _ = self.readback_cross_attn(q, kv, kv)
+        node_emb = node_emb + attn_out
+        node_emb = node_emb + self.readback_ffn(self.readback_norm_ff(node_emb))
+
+        return node_emb, proxy_emb
+
+
+class CrossAttentionRouter(nn.Module):
+    """
+    N→M→N cross-attention routing using M proxies as hyperedges.
+
+    Takes M proxy embeddings from any generator and N node embeddings,
+    performs bidirectional cross-attention routing, and returns N refined
+    node embeddings. The M proxies never enter the main transformer.
+
+    Args:
+        hidden_dim: embedding dimension d.
+        num_heads: attention heads for cross- and self-attention.
+        num_cross_layers: number of N→M→N routing iterations.
+        dropout: dropout rate.
+        use_proxy_self_attn: if True, include M×M self-attention in each layer.
+    """
+    def __init__(self, hidden_dim, num_heads=8, num_cross_layers=2,
+                 dropout=0.2, use_proxy_self_attn=True):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            _CrossAttentionRouterLayer(
+                hidden_dim, num_heads, dropout, use_proxy_self_attn
+            )
+            for _ in range(num_cross_layers)
+        ])
+
+    def forward(self, node_embeddings, proxy_embeddings, node_mask):
+        """
+        Args:
+            node_embeddings: (B, N, d)
+            proxy_embeddings: (B, M, d)
+            node_mask: (B, N) boolean — True = real node, False = padding
+        Returns:
+            refined_nodes: (B, N, d) — proxy-informed node embeddings
+        """
+        # MHA expects key_padding_mask where True = ignore
+        key_pad_mask = ~node_mask  # (B, N)
+
+        node_emb = node_embeddings
+        proxy_emb = proxy_embeddings
+        for layer in self.layers:
+            node_emb, proxy_emb = layer(node_emb, proxy_emb, key_pad_mask)
+
+        return node_emb

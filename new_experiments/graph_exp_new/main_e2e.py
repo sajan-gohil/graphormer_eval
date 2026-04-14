@@ -21,6 +21,7 @@ from data import get_loaders
 from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
 from generators import (
     ScoreBasedGenerator, GNNPoolingGenerator, PMAGenerator, GraphCoarseningGenerator,
+    CrossAttentionRouter,
 )
 from metrics import compute_macro_ap
 from mmd import mmd_squared
@@ -132,6 +133,15 @@ def build_parser():
                    choices=["nodes_only", "all_tokens"],
                    help="Pool over N original nodes or all N+M tokens")
 
+    # Cross-attention routing (N→M→N)
+    p.add_argument("--use_cross_attn_routing", action="store_true", default=False,
+                   help="Use N→M→N cross-attention routing instead of N+M concat")
+    p.add_argument("--num_cross_layers", type=int, default=2,
+                   help="Number of N→M→N routing layers (only with --use_cross_attn_routing)")
+    p.add_argument("--cross_attn_proxy_self_attn", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Include M×M self-attention within cross-attention routing")
+
     # Paths
     p.add_argument("--save_dir", type=str, default="checkpoints_e2e2")
     p.add_argument("--device", type=str, default=None)
@@ -160,8 +170,22 @@ def parse_args():
 # MODEL BUILDING
 # ================================================================
 
+def _build_cross_attn_router(args):
+    """Build CrossAttentionRouter if --use_cross_attn_routing is set."""
+    if getattr(args, 'use_cross_attn_routing', False):
+        return CrossAttentionRouter(
+            hidden_dim=args.hidden_dim,
+            num_heads=args.num_heads,
+            num_cross_layers=args.num_cross_layers,
+            dropout=args.dropout,
+            use_proxy_self_attn=args.cross_attn_proxy_self_attn,
+        )
+    return None
+
+
 def build_model(args):
     """Build backbone model based on --backbone arg."""
+    cross_attn_router = _build_cross_attn_router(args)
     if args.backbone == "vanilla_gt":
         return GraphTransformer(
             num_layers=args.num_layers,
@@ -170,6 +194,7 @@ def build_model(args):
             output_dim=args.output_dim,
             dropout=args.dropout,
             lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
+            cross_attn_router=cross_attn_router,
         )
     elif args.backbone == "gred":
         return GREDEncoder(
@@ -200,6 +225,7 @@ def build_model(args):
             act=args.gred_act,
             output_dim=args.output_dim,
             lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
+            cross_attn_router=cross_attn_router,
         )
     else:
         raise ValueError(f"Unknown backbone: {args.backbone}")
@@ -412,6 +438,9 @@ def run_e2e(args):
     print(f"  Generator: {args.generator}", flush=True)
     print(f"  Proxies: {args.num_proxies}, Warmup: {args.proxy_warmup_epochs} epochs", flush=True)
     print(f"  Readout: {args.readout_scope}, MMD lambda: {args.mmd_lambda}", flush=True)
+    if args.use_cross_attn_routing:
+        print(f"  Cross-attn routing: layers={args.num_cross_layers}, "
+              f"proxy_self_attn={args.cross_attn_proxy_self_attn}", flush=True)
     if args.use_lap_pe:
         print(f"  Laplacian PE: dim={args.lap_pe_dim}", flush=True)
     if is_gred:

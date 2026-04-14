@@ -128,7 +128,8 @@ class TransformerLayer(nn.Module):
 
 class GraphTransformer(nn.Module):
     def __init__(self, num_layers=5, num_heads=8, hidden_dim=64,
-                 output_dim=10, dropout=0.3, lap_pe_dim=0):
+                 output_dim=10, dropout=0.3, lap_pe_dim=0,
+                 cross_attn_router=None):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.encoder = NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim)
@@ -142,6 +143,8 @@ class GraphTransformer(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim),
         )
+        # Optional N→M→N cross-attention router (None = use N+M concat default)
+        self.cross_attn_router = cross_attn_router
 
     def encode_nodes(self, batch):
         """Flat node embeddings: (total_N, d)."""
@@ -174,7 +177,12 @@ class GraphTransformer(nn.Module):
 
         B, max_N, d = dense_x.shape
 
-        if proxy_embeddings is not None:
+        if proxy_embeddings is not None and self.cross_attn_router is not None:
+            # N→M→N routing: refine node embeddings via proxy hyperedges
+            dense_x = self.cross_attn_router(dense_x, proxy_embeddings, dense_mask)
+            aug_mask = dense_mask  # still N tokens, not N+M
+        elif proxy_embeddings is not None:
+            # Default: concatenate proxies for N+M self-attention
             M = proxy_embeddings.shape[1]
             dense_x = torch.cat([dense_x, proxy_embeddings], dim=1)
             aug_mask = torch.cat([
@@ -188,7 +196,7 @@ class GraphTransformer(nn.Module):
             dense_x = layer(dense_x, aug_mask)
 
         # Readout: pool and classify
-        if readout_scope == "all_tokens" and proxy_embeddings is not None:
+        if readout_scope == "all_tokens" and proxy_embeddings is not None and self.cross_attn_router is None:
             valid_emb = dense_x[aug_mask]
             batch_vec = torch.arange(B, device=dense_x.device).unsqueeze(1).expand_as(aug_mask)[aug_mask]
             pooled = global_add_pool(valid_emb, batch_vec)
@@ -579,7 +587,8 @@ class GREDHybridTransformer(nn.Module):
     def __init__(self, hidden_dim=88, state_dim=88, num_gred_layers=6,
                  num_transformer_layers=2, num_heads=8, expand=1,
                  r_min=0.0, r_max=1.0, max_phase=6.28, dropout=0.2,
-                 act="full-glu", output_dim=10, lap_pe_dim=0):
+                 act="full-glu", output_dim=10, lap_pe_dim=0,
+                 cross_attn_router=None):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.encoder = NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim)
@@ -602,6 +611,8 @@ class GREDHybridTransformer(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim),
         )
+        # Optional N→M→N cross-attention router (None = use N+M concat default)
+        self.cross_attn_router = cross_attn_router
 
     def encode_nodes(self, batch):
         """Flat node embeddings: (total_N, d)."""
@@ -654,9 +665,14 @@ class GREDHybridTransformer(nn.Module):
             h = self.encode_gred(dense_x, dist_masks, node_masks)
 
         # Transformer layers with optional proxy integration
-        if proxy_embeddings is not None:
+        if proxy_embeddings is not None and self.cross_attn_router is not None:
+            # N→M→N routing: refine node embeddings via proxy hyperedges
+            h = self.cross_attn_router(h, proxy_embeddings, dense_mask)
+            h_aug = h
+            aug_mask = dense_mask  # still N tokens, not N+M
+        elif proxy_embeddings is not None:
             M = proxy_embeddings.shape[1]
-            # Concatenate proxies to GRED-encoded node features
+            # Default: concatenate proxies to GRED-encoded node features
             h_aug = torch.cat([h, proxy_embeddings], dim=1)  # (B, N+M, d)
             aug_mask = torch.cat([
                 dense_mask,
@@ -671,7 +687,7 @@ class GREDHybridTransformer(nn.Module):
             h_aug = layer(h_aug, aug_mask)
 
         # Readout
-        if readout_scope == "all_tokens" and proxy_embeddings is not None:
+        if readout_scope == "all_tokens" and proxy_embeddings is not None and self.cross_attn_router is None:
             valid_emb = h_aug[aug_mask]
             batch_vec = torch.arange(B, device=h_aug.device).unsqueeze(1).expand_as(aug_mask)[aug_mask]
             pooled = global_add_pool(valid_emb, batch_vec)

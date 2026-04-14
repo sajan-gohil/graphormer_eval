@@ -29,7 +29,7 @@ from data import get_loaders, ProxyTargetDataset, collate_with_proxies
 from models import GraphTransformer
 from generators import (
     ScoreBasedGenerator, FlowMatchingGenerator, GNNPoolingGenerator,
-    PMAGenerator, GraphCoarseningGenerator,
+    PMAGenerator, GraphCoarseningGenerator, CrossAttentionRouter,
 )
 from metrics import compute_macro_ap
 from mmd import mmd_squared, cross_sample_moment_loss, prior_moment_loss
@@ -132,6 +132,15 @@ def build_parser():
     p.add_argument("--coarsen_reg_weight", type=float, default=0.1)
     p.add_argument("--coarsen_reg_type", type=str, default="mincut")
 
+    # Cross-attention routing (N→M→N)
+    p.add_argument("--use_cross_attn_routing", action="store_true", default=False,
+                   help="Use N→M→N cross-attention routing instead of N+M concat")
+    p.add_argument("--num_cross_layers", type=int, default=2,
+                   help="Number of N→M→N routing layers (only with --use_cross_attn_routing)")
+    p.add_argument("--cross_attn_proxy_self_attn", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Include M×M self-attention within cross-attention routing")
+
     # Stage 4 — Finetune
     p.add_argument("--s4_lr_transformer", type=float, default=1e-5)
     p.add_argument("--s4_lr_generator", type=float, default=1e-4)
@@ -181,6 +190,30 @@ def save_code_snapshot(save_dir):
 # ================================================================
 # HELPERS
 # ================================================================
+
+def _build_cross_attn_router(args):
+    """Build CrossAttentionRouter if --use_cross_attn_routing is set."""
+    if getattr(args, 'use_cross_attn_routing', False):
+        return CrossAttentionRouter(
+            hidden_dim=args.hidden_dim,
+            num_heads=args.num_heads,
+            num_cross_layers=args.num_cross_layers,
+            dropout=args.dropout,
+            use_proxy_self_attn=args.cross_attn_proxy_self_attn,
+        )
+    return None
+
+
+def _build_graph_transformer(args):
+    """Build GraphTransformer with optional cross-attention router."""
+    return GraphTransformer(
+        num_layers=args.num_layers, num_heads=args.num_heads,
+        hidden_dim=args.hidden_dim, output_dim=args.output_dim,
+        dropout=args.dropout,
+        lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
+        cross_attn_router=_build_cross_attn_router(args),
+    )
+
 
 def _freeze(model):
     for p in model.parameters():
@@ -355,12 +388,7 @@ def run_stage1(args):
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
-    model = GraphTransformer(
-        num_layers=args.num_layers, num_heads=args.num_heads,
-        hidden_dim=args.hidden_dim, output_dim=args.output_dim,
-        dropout=args.dropout,
-        lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
-    ).to(args.device)
+    model = _build_graph_transformer(args).to(args.device)
 
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
@@ -568,12 +596,7 @@ def run_stage2(args, model_path):
     )
 
     # Load and freeze transformer
-    model = GraphTransformer(
-        num_layers=args.num_layers, num_heads=args.num_heads,
-        hidden_dim=args.hidden_dim, output_dim=args.output_dim,
-        dropout=args.dropout,
-        lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
-    ).to(args.device)
+    model = _build_graph_transformer(args).to(args.device)
     ckpt = torch.load(model_path, map_location=args.device, weights_only=True)
     model.load_state_dict(ckpt["model_state"])
     _freeze(model)
@@ -757,12 +780,7 @@ def run_stage3(args, model_path, proxy_pairs_path):
     )
 
     # Load and freeze transformer
-    model = GraphTransformer(
-        num_layers=args.num_layers, num_heads=args.num_heads,
-        hidden_dim=args.hidden_dim, output_dim=args.output_dim,
-        dropout=args.dropout,
-        lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
-    ).to(args.device)
+    model = _build_graph_transformer(args).to(args.device)
     ckpt = torch.load(model_path, map_location=args.device, weights_only=True)
     model.load_state_dict(ckpt["model_state"])
     _freeze(model)
@@ -940,12 +958,7 @@ def run_stage4(args, model_path, generator_path):
     )
 
     # Load transformer from stage 1
-    model = GraphTransformer(
-        num_layers=args.num_layers, num_heads=args.num_heads,
-        hidden_dim=args.hidden_dim, output_dim=args.output_dim,
-        dropout=args.dropout,
-        lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
-    ).to(args.device)
+    model = _build_graph_transformer(args).to(args.device)
     model_ckpt = torch.load(model_path, map_location=args.device, weights_only=True)
     model.load_state_dict(model_ckpt["model_state"])
 

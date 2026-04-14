@@ -27,6 +27,7 @@ from data import get_loaders
 from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
 from generators import (
     ScoreBasedGenerator, GNNPoolingGenerator, PMAGenerator, GraphCoarseningGenerator,
+    CrossAttentionRouter,
 )
 from metrics import compute_macro_ap
 from optim_utils import (
@@ -142,6 +143,15 @@ def build_parser():
     p.add_argument("--decode_mode", type=str, default="shared",
                    choices=["shared", "grouped"])
 
+    # Cross-attention routing (N→M→N)
+    p.add_argument("--use_cross_attn_routing", action="store_true", default=False,
+                   help="Use N→M→N cross-attention routing instead of N+M concat")
+    p.add_argument("--num_cross_layers", type=int, default=2,
+                   help="Number of N→M→N routing layers (only with --use_cross_attn_routing)")
+    p.add_argument("--cross_attn_proxy_self_attn", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Include M×M self-attention within cross-attention routing")
+
     # Common
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
@@ -204,14 +214,29 @@ def _uses_flat_interface(generator_name):
     return generator_name in ("graph_coarsening", "gnn_pooling")
 
 
+def _build_cross_attn_router(args):
+    """Build CrossAttentionRouter if --use_cross_attn_routing is set."""
+    if getattr(args, 'use_cross_attn_routing', False):
+        return CrossAttentionRouter(
+            hidden_dim=args.hidden_dim,
+            num_heads=args.num_heads,
+            num_cross_layers=args.num_cross_layers,
+            dropout=args.dropout,
+            use_proxy_self_attn=args.cross_attn_proxy_self_attn,
+        )
+    return None
+
+
 def build_model(args):
     """Build backbone model based on --backbone arg."""
     lap_pe_dim = args.lap_pe_dim if args.use_lap_pe else 0
+    cross_attn_router = _build_cross_attn_router(args)
     if args.backbone == "vanilla_gt":
         return GraphTransformer(
             num_layers=args.num_layers, num_heads=args.num_heads,
             hidden_dim=args.hidden_dim, output_dim=args.output_dim,
             dropout=args.dropout, lap_pe_dim=lap_pe_dim,
+            cross_attn_router=cross_attn_router,
         )
     elif args.backbone == "gred":
         return GREDEncoder(
@@ -230,6 +255,7 @@ def build_model(args):
             r_min=args.r_min, r_max=args.r_max, max_phase=args.max_phase,
             dropout=args.dropout, act=args.gred_act, output_dim=args.output_dim,
             lap_pe_dim=lap_pe_dim,
+            cross_attn_router=cross_attn_router,
         )
     else:
         raise ValueError(f"Unknown backbone: {args.backbone}")
