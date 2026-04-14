@@ -1,3 +1,4 @@
+import copy
 import math
 import torch
 import torch.nn as nn
@@ -880,3 +881,107 @@ class CrossAttentionRouter(nn.Module):
             node_emb, proxy_emb = layer(node_emb, proxy_emb, key_pad_mask)
 
         return node_emb
+
+
+# ================================================================
+# MULTI-POINT PROXY WRAPPER
+# ================================================================
+
+class MultiPointProxyWrapper(nn.Module):
+    """
+    Manages proxy generation and cross-attention routing at multiple
+    insertion points within a transformer stack.
+
+    At each insertion point the wrapper generates fresh proxies from the
+    current node representations (Option A: shared generator) or from a
+    dedicated per-point generator (Option B: separate generators), then
+    either routes via N->M->N cross-attention or concatenates M proxy
+    tokens to the sequence.
+
+    Args:
+        generator: BaseGenerator instance (used directly if shared, deep-copied
+                   per insertion point if ``separate_generators`` is True).
+        router: CrossAttentionRouter instance for N->M->N mode, or ``None``
+                for N+M concatenation mode.  Shared by default; deep-copied
+                per insertion point when ``separate_routers`` is True.
+        insertion_layers: sorted list of ints — before which transformer
+                          layers to inject a proxy block (0-indexed).
+        separate_generators: if True, create independent generator copies
+                             per insertion point (Option B).
+        separate_routers: if True, create independent router copies per
+                          insertion point.
+        aux_loss_decay: geometric decay factor applied to the aux_loss of
+                        successive insertion points (1.0 = no decay).
+    """
+
+    def __init__(self, generator, router, insertion_layers,
+                 separate_generators=False, separate_routers=False,
+                 aux_loss_decay=1.0):
+        super().__init__()
+        self.insertion_layers = sorted(insertion_layers)
+        self.aux_loss_decay = aux_loss_decay
+        K = len(insertion_layers)
+
+        # Generators
+        if separate_generators:
+            self.generators = nn.ModuleList([
+                copy.deepcopy(generator) for _ in range(K)
+            ])
+        else:
+            self.generators = nn.ModuleList([generator])
+
+        # Routers (None when using N+M concat mode)
+        if router is not None:
+            if separate_routers:
+                self.routers = nn.ModuleList([
+                    copy.deepcopy(router) for _ in range(K)
+                ])
+            else:
+                self.routers = nn.ModuleList([router])
+        else:
+            self.routers = None
+
+    def get_generator(self, point_idx):
+        if len(self.generators) == 1:
+            return self.generators[0]
+        return self.generators[point_idx]
+
+    def get_router(self, point_idx):
+        if self.routers is None:
+            return None
+        if len(self.routers) == 1:
+            return self.routers[0]
+        return self.routers[point_idx]
+
+    def run_proxy_block(self, node_emb, mask, point_idx):
+        """Run one proxy-generation + routing pass.
+
+        Args:
+            node_emb: (B, N_current, d) current node / token embeddings.
+            mask: (B, N_current) boolean mask (True = real token).
+            point_idx: index into ``self.insertion_layers``.
+
+        Returns:
+            out_tokens: (B, N', d) — either refined nodes (cross-attn,
+                        N' = N_current) or augmented tokens (concat,
+                        N' = N_current + M).
+            out_mask: (B, N') — updated mask.
+            aux_loss: scalar auxiliary loss from the generator.
+        """
+        gen = self.get_generator(point_idx)
+        proxy_emb, aux_loss = gen(node_emb, mask)
+
+        router = self.get_router(point_idx)
+        if router is not None:
+            # Cross-attention mode: N->M->N, token count unchanged
+            refined = router(node_emb, proxy_emb, mask)
+            return refined, mask, aux_loss
+        else:
+            # Concat mode: append M proxy tokens
+            B, M, _d = proxy_emb.shape
+            aug_tokens = torch.cat([node_emb, proxy_emb], dim=1)
+            aug_mask = torch.cat([
+                mask,
+                torch.ones(B, M, dtype=torch.bool, device=mask.device),
+            ], dim=1)
+            return aug_tokens, aug_mask, aux_loss

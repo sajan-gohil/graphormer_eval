@@ -129,7 +129,7 @@ class TransformerLayer(nn.Module):
 class GraphTransformer(nn.Module):
     def __init__(self, num_layers=5, num_heads=8, hidden_dim=64,
                  output_dim=10, dropout=0.3, lap_pe_dim=0,
-                 cross_attn_router=None):
+                 cross_attn_router=None, multi_point_proxy=None):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.encoder = NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim)
@@ -145,6 +145,9 @@ class GraphTransformer(nn.Module):
         )
         # Optional N→M→N cross-attention router (None = use N+M concat default)
         self.cross_attn_router = cross_attn_router
+        # Optional multi-point proxy wrapper (None = single-point or no proxies)
+        self.multi_point_proxy = multi_point_proxy
+        self._last_mp_aux_loss = 0.0
 
     def encode_nodes(self, batch):
         """Flat node embeddings: (total_N, d)."""
@@ -177,28 +180,59 @@ class GraphTransformer(nn.Module):
 
         B, max_N, d = dense_x.shape
 
-        if proxy_embeddings is not None and self.cross_attn_router is not None:
-            # N→M→N routing: refine node embeddings via proxy hyperedges
+        if self.multi_point_proxy is not None:
+            # ── Multi-point mode: interleave proxy blocks with TF layers ──
+            insertion_set = set(self.multi_point_proxy.insertion_layers)
+            point_idx = 0
+            total_aux = 0.0
+            aug_x = dense_x
+            aug_mask = dense_mask
+
+            for i, layer in enumerate(self.layers):
+                if i in insertion_set:
+                    aug_x, aug_mask, aux = self.multi_point_proxy.run_proxy_block(
+                        aug_x, aug_mask, point_idx,
+                    )
+                    decay = self.multi_point_proxy.aux_loss_decay ** point_idx
+                    total_aux = total_aux + aux * decay
+                    point_idx += 1
+
+                aug_x = layer(aug_x, aug_mask)
+
+            self._last_mp_aux_loss = total_aux
+            dense_x = aug_x
+            aug_mask_final = aug_mask
+
+        elif proxy_embeddings is not None and self.cross_attn_router is not None:
+            # ── Single-point cross-attention (existing behaviour) ──
             dense_x = self.cross_attn_router(dense_x, proxy_embeddings, dense_mask)
-            aug_mask = dense_mask  # still N tokens, not N+M
+            aug_mask_final = dense_mask
+            for layer in self.layers:
+                dense_x = layer(dense_x, aug_mask_final)
+
         elif proxy_embeddings is not None:
-            # Default: concatenate proxies for N+M self-attention
+            # ── Single-point N+M concat (existing behaviour) ──
             M = proxy_embeddings.shape[1]
             dense_x = torch.cat([dense_x, proxy_embeddings], dim=1)
-            aug_mask = torch.cat([
+            aug_mask_final = torch.cat([
                 dense_mask,
                 torch.ones(B, M, dtype=torch.bool, device=dense_x.device)
             ], dim=1)
-        else:
-            aug_mask = dense_mask
+            for layer in self.layers:
+                dense_x = layer(dense_x, aug_mask_final)
 
-        for layer in self.layers:
-            dense_x = layer(dense_x, aug_mask)
+        else:
+            # ── No proxies at all ──
+            aug_mask_final = dense_mask
+            for layer in self.layers:
+                dense_x = layer(dense_x, aug_mask_final)
 
         # Readout: pool and classify
-        if readout_scope == "all_tokens" and proxy_embeddings is not None and self.cross_attn_router is None:
-            valid_emb = dense_x[aug_mask]
-            batch_vec = torch.arange(B, device=dense_x.device).unsqueeze(1).expand_as(aug_mask)[aug_mask]
+        if readout_scope == "all_tokens" and (
+            proxy_embeddings is not None or self.multi_point_proxy is not None
+        ) and self.cross_attn_router is None:
+            valid_emb = dense_x[aug_mask_final]
+            batch_vec = torch.arange(B, device=dense_x.device).unsqueeze(1).expand_as(aug_mask_final)[aug_mask_final]
             pooled = global_add_pool(valid_emb, batch_vec)
         else:
             orig_x = dense_x[:, :max_N, :]
@@ -588,7 +622,7 @@ class GREDHybridTransformer(nn.Module):
                  num_transformer_layers=2, num_heads=8, expand=1,
                  r_min=0.0, r_max=1.0, max_phase=6.28, dropout=0.2,
                  act="full-glu", output_dim=10, lap_pe_dim=0,
-                 cross_attn_router=None):
+                 cross_attn_router=None, multi_point_proxy=None):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.encoder = NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim)
@@ -613,6 +647,9 @@ class GREDHybridTransformer(nn.Module):
         )
         # Optional N→M→N cross-attention router (None = use N+M concat default)
         self.cross_attn_router = cross_attn_router
+        # Optional multi-point proxy wrapper (None = single-point or no proxies)
+        self.multi_point_proxy = multi_point_proxy
+        self._last_mp_aux_loss = 0.0
 
     def encode_nodes(self, batch):
         """Flat node embeddings: (total_N, d)."""
@@ -665,29 +702,57 @@ class GREDHybridTransformer(nn.Module):
             h = self.encode_gred(dense_x, dist_masks, node_masks)
 
         # Transformer layers with optional proxy integration
-        if proxy_embeddings is not None and self.cross_attn_router is not None:
-            # N→M→N routing: refine node embeddings via proxy hyperedges
+        if self.multi_point_proxy is not None:
+            # ── Multi-point mode: interleave proxy blocks with TF layers ──
+            insertion_set = set(self.multi_point_proxy.insertion_layers)
+            point_idx = 0
+            total_aux = 0.0
+            h_aug = h
+            aug_mask = dense_mask
+
+            for i, layer in enumerate(self.transformer_layers):
+                if i in insertion_set:
+                    h_aug, aug_mask, aux = self.multi_point_proxy.run_proxy_block(
+                        h_aug, aug_mask, point_idx,
+                    )
+                    decay = self.multi_point_proxy.aux_loss_decay ** point_idx
+                    total_aux = total_aux + aux * decay
+                    point_idx += 1
+
+                h_aug = layer(h_aug, aug_mask)
+
+            self._last_mp_aux_loss = total_aux
+
+        elif proxy_embeddings is not None and self.cross_attn_router is not None:
+            # ── Single-point cross-attention (existing behaviour) ──
             h = self.cross_attn_router(h, proxy_embeddings, dense_mask)
             h_aug = h
-            aug_mask = dense_mask  # still N tokens, not N+M
+            aug_mask = dense_mask
+            for layer in self.transformer_layers:
+                h_aug = layer(h_aug, aug_mask)
+
         elif proxy_embeddings is not None:
+            # ── Single-point N+M concat (existing behaviour) ──
             M = proxy_embeddings.shape[1]
-            # Default: concatenate proxies to GRED-encoded node features
             h_aug = torch.cat([h, proxy_embeddings], dim=1)  # (B, N+M, d)
             aug_mask = torch.cat([
                 dense_mask,
                 torch.ones(B, M, dtype=torch.bool, device=h.device)
             ], dim=1)
+            for layer in self.transformer_layers:
+                h_aug = layer(h_aug, aug_mask)
+
         else:
+            # ── No proxies ──
             h_aug = h
             aug_mask = dense_mask
-
-        # Run transformer layers (for proxy-node interaction)
-        for layer in self.transformer_layers:
-            h_aug = layer(h_aug, aug_mask)
+            for layer in self.transformer_layers:
+                h_aug = layer(h_aug, aug_mask)
 
         # Readout
-        if readout_scope == "all_tokens" and proxy_embeddings is not None and self.cross_attn_router is None:
+        if readout_scope == "all_tokens" and (
+            proxy_embeddings is not None or self.multi_point_proxy is not None
+        ) and self.cross_attn_router is None:
             valid_emb = h_aug[aug_mask]
             batch_vec = torch.arange(B, device=h_aug.device).unsqueeze(1).expand_as(aug_mask)[aug_mask]
             pooled = global_add_pool(valid_emb, batch_vec)

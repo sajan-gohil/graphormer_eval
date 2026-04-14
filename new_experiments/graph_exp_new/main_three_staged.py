@@ -27,7 +27,7 @@ from data import get_loaders
 from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
 from generators import (
     ScoreBasedGenerator, GNNPoolingGenerator, PMAGenerator, GraphCoarseningGenerator,
-    CrossAttentionRouter,
+    CrossAttentionRouter, MultiPointProxyWrapper,
 )
 from metrics import compute_macro_ap
 from optim_utils import (
@@ -152,6 +152,18 @@ def build_parser():
                    default=True,
                    help="Include M×M self-attention within cross-attention routing")
 
+    # Multi-point proxy insertion
+    p.add_argument("--proxy_insertion_layers", type=str, default="-1",
+                   help="Comma-separated layer indices for multi-point proxy insertion. "
+                        "-1 = no insertion (default). 0 = before layer 0 (like current). "
+                        "E.g., '0,2,4' for three insertion points.")
+    p.add_argument("--separate_proxy_generators", action="store_true", default=False,
+                   help="Use independent generator per insertion point (Option B).")
+    p.add_argument("--separate_proxy_routers", action="store_true", default=False,
+                   help="Use independent router per insertion point.")
+    p.add_argument("--proxy_aux_loss_decay", type=float, default=1.0,
+                   help="Geometric decay factor for multi-point aux losses.")
+
     # Common
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
@@ -225,6 +237,29 @@ def _build_cross_attn_router(args):
             use_proxy_self_attn=args.cross_attn_proxy_self_attn,
         )
     return None
+
+
+def _parse_insertion_layers(s):
+    """Parse '--proxy_insertion_layers' string into a sorted list or None."""
+    layers = [int(x.strip()) for x in s.split(",")]
+    if layers == [-1]:
+        return None  # disabled
+    return sorted(layers)
+
+
+def _build_multi_point_proxy(args, generator, router):
+    """Build MultiPointProxyWrapper if multi-point is enabled."""
+    layers = _parse_insertion_layers(args.proxy_insertion_layers)
+    if layers is None:
+        return None
+    return MultiPointProxyWrapper(
+        generator=generator,
+        router=router,  # None when not using cross-attn routing
+        insertion_layers=layers,
+        separate_generators=args.separate_proxy_generators,
+        separate_routers=args.separate_proxy_routers,
+        aux_loss_decay=args.proxy_aux_loss_decay,
+    )
 
 
 def build_model(args):
@@ -338,7 +373,8 @@ def _generate_proxies(model, generator, batch, dense_x, dense_mask, args,
 def downstream_eval(model, generator, loader, device, args):
     """Evaluate generated proxies through frozen transformer. Returns (AP, loss)."""
     model.eval()
-    generator.eval()
+    if generator is not None:
+        generator.eval()
     loss_fn = nn.BCEWithLogitsLoss()
     all_preds, all_labels, losses = [], [], []
     is_gred = args.backbone in ("gred", "hybrid")
@@ -354,26 +390,36 @@ def downstream_eval(model, generator, loader, device, args):
             dist_masks_batch = None
             node_masks_batch = None
 
-        dense_x, dense_mask = model.encode_dense(batch)
+        # Multi-point proxy path
+        if hasattr(model, 'multi_point_proxy') and model.multi_point_proxy is not None:
+            if args.backbone == "vanilla_gt":
+                logits, _ = model(batch)
+            elif args.backbone == "gred":
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+            elif args.backbone == "hybrid":
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+        else:
+            # Standard single-point proxy path
+            dense_x, dense_mask = model.encode_dense(batch)
 
-        # For hybrid: run GRED encoding
-        gred_h = None
-        if args.backbone == "hybrid":
-            gred_h = model.encode_gred(dense_x, dist_masks_batch, node_masks_batch)
+            # For hybrid: run GRED encoding
+            gred_h = None
+            if args.backbone == "hybrid":
+                gred_h = model.encode_gred(dense_x, dist_masks_batch, node_masks_batch)
 
-        proxies, _ = _generate_proxies(
-            model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
+            proxies, _ = _generate_proxies(
+                model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
 
-        if args.backbone == "vanilla_gt":
-            logits, _ = model(batch, proxy_embeddings=proxies,
-                              precomputed_dense=(dense_x, dense_mask))
-        elif args.backbone == "gred":
-            logits, _ = model(batch, dist_masks_batch, node_masks_batch)
-        elif args.backbone == "hybrid":
-            logits, _ = model(batch, dist_masks_batch, node_masks_batch,
-                              proxy_embeddings=proxies,
-                              precomputed_dense=(dense_x, dense_mask),
-                              precomputed_gred=gred_h)
+            if args.backbone == "vanilla_gt":
+                logits, _ = model(batch, proxy_embeddings=proxies,
+                                  precomputed_dense=(dense_x, dense_mask))
+            elif args.backbone == "gred":
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+            elif args.backbone == "hybrid":
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch,
+                                  proxy_embeddings=proxies,
+                                  precomputed_dense=(dense_x, dense_mask),
+                                  precomputed_gred=gred_h)
 
         losses.append(loss_fn(logits, batch.y).item())
         all_preds.append(torch.sigmoid(logits).cpu().numpy())
@@ -391,9 +437,16 @@ def mean_proxy_eval(model, generator, loader, device, args):
     """
     Sanity check: replace each proxy with the mean over the M dimension,
     then evaluate AP. If AP doesn't drop vs normal eval, proxies are inert.
+    For multi-point proxy, this sanity check doesn't apply and is skipped.
     """
     model.eval()
-    generator.eval()
+    if generator is not None:
+        generator.eval()
+
+    # Skip for multi-point proxy (doesn't make sense)
+    if hasattr(model, 'multi_point_proxy') and model.multi_point_proxy is not None:
+        return float('nan')
+
     all_preds, all_labels = [], []
     is_gred = args.backbone in ("gred", "hybrid")
 
@@ -633,6 +686,8 @@ def run_stage2(args, model_path):
     print(f"  Backbone: {args.backbone}", flush=True)
     print(f"  LR={args.s2_lr}, patience={args.s2_patience}, max_epochs={args.s2_max_epochs}",
           flush=True)
+    if _parse_insertion_layers(args.proxy_insertion_layers) is not None:
+        print(f"  Multi-point proxy insertion layers: {_parse_insertion_layers(args.proxy_insertion_layers)}", flush=True)
     print("=" * 60, flush=True)
     is_gred = args.backbone in ("gred", "hybrid")
 
@@ -654,9 +709,23 @@ def run_stage2(args, model_path):
     print(f"  Generator parameters: {sum(p.numel() for p in generator.parameters()):,}",
           flush=True)
 
+    # Build multi-point proxy wrapper if enabled
+    router = None  # Stage 2 doesn't use cross-attention routing
+    multi_point_proxy = _build_multi_point_proxy(args, generator, router)
+    if multi_point_proxy is not None:
+        model.multi_point_proxy = multi_point_proxy
+        print(f"  Multi-point proxy wrapper attached", flush=True)
+
     total_steps = max(1, len(train_loader) * args.s2_max_epochs)
+    # For multi-point proxy, generator is inside the wrapper and already in model.parameters()
+    if multi_point_proxy is not None:
+        named_params = [(f"multi_point_proxy.{name}", param)
+                        for name, param in model.multi_point_proxy.named_parameters()]
+    else:
+        named_params = [(f"generator.{name}", param) for name, param in generator.named_parameters()]
+
     optimizer, scheduler = build_grouped_optimizer_and_scheduler(
-        named_parameters=[(f"generator.{name}", param) for name, param in generator.named_parameters()],
+        named_parameters=named_params,
         lr_max=args.s2_lr,
         lr_min=args.lr_min,
         weight_decay=args.s2_weight_decay,
@@ -702,20 +771,35 @@ def run_stage2(args, model_path):
 
             optimizer.zero_grad()
 
-            proxies, aux_loss = _generate_proxies(
-                model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
+            # Multi-point proxy path
+            if model.multi_point_proxy is not None:
+                if args.backbone == "vanilla_gt":
+                    logits, _ = model(batch, precomputed_dense=(dense_x, dense_mask))
+                elif args.backbone == "hybrid":
+                    logits, _ = model(batch, dist_masks_batch, node_masks_batch,
+                                      precomputed_dense=(dense_x, dense_mask),
+                                      precomputed_gred=gred_h)
+                elif args.backbone == "gred":
+                    logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                aux_loss = getattr(model, '_last_mp_aux_loss', None)
+                if aux_loss is not None and not isinstance(aux_loss, torch.Tensor):
+                    aux_loss = torch.tensor(aux_loss, device=batch.x.device)
+            else:
+                # Standard single-point proxy path
+                proxies, aux_loss = _generate_proxies(
+                    model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
 
-            # Forward through frozen model with generated proxies
-            if args.backbone == "vanilla_gt":
-                logits, _ = model(batch, proxy_embeddings=proxies,
-                                  precomputed_dense=(dense_x, dense_mask))
-            elif args.backbone == "hybrid":
-                logits, _ = model(batch, dist_masks_batch, node_masks_batch,
-                                  proxy_embeddings=proxies,
-                                  precomputed_dense=(dense_x, dense_mask),
-                                  precomputed_gred=gred_h)
-            elif args.backbone == "gred":
-                logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                # Forward through frozen model with generated proxies
+                if args.backbone == "vanilla_gt":
+                    logits, _ = model(batch, proxy_embeddings=proxies,
+                                      precomputed_dense=(dense_x, dense_mask))
+                elif args.backbone == "hybrid":
+                    logits, _ = model(batch, dist_masks_batch, node_masks_batch,
+                                      proxy_embeddings=proxies,
+                                      precomputed_dense=(dense_x, dense_mask),
+                                      precomputed_gred=gred_h)
+                elif args.backbone == "gred":
+                    logits, _ = model(batch, dist_masks_batch, node_masks_batch)
 
             loss = loss_fn(logits, batch.y)
             # Add aux_loss if any (e.g., orthogonality regularization for graph_coarsening)
@@ -834,6 +918,8 @@ def run_stage3(args, model_path, generator_path):
     print(f"  Phase B: unfreeze model at lr={args.s3_lr_transformer:.2e}, "
           f"gen_lr={args.s3_lr_gen:.2e}", flush=True)
     print(f"  Proxy dropout: {args.s3_proxy_dropout}", flush=True)
+    if _parse_insertion_layers(args.proxy_insertion_layers) is not None:
+        print(f"  Multi-point proxy insertion layers: {_parse_insertion_layers(args.proxy_insertion_layers)}", flush=True)
     print("=" * 60, flush=True)
     is_gred = args.backbone in ("gred", "hybrid")
 
@@ -854,15 +940,34 @@ def run_stage3(args, model_path, generator_path):
     gen_ckpt = torch.load(generator_path, map_location=args.device, weights_only=True)
     generator.load_state_dict(gen_ckpt["generator_state"])
 
+    # Build multi-point proxy wrapper if enabled
+    router = None  # Stage 3 doesn't use cross-attention routing
+    multi_point_proxy = _build_multi_point_proxy(args, generator, router)
+    if multi_point_proxy is not None:
+        model.multi_point_proxy = multi_point_proxy
+        print(f"  Multi-point proxy wrapper attached", flush=True)
+
     loss_fn = nn.BCEWithLogitsLoss()
 
     # Phase A optimizer: generator only, transformer frozen
     _freeze(model)
+    # If multi-point is active, unfreeze the wrapper
+    if multi_point_proxy is not None:
+        _unfreeze(model.multi_point_proxy)
+
     phase_a_epochs = min(args.s3_phase_a_epochs, args.s3_max_epochs)
     phase_a_total_steps = max(1, len(train_loader) * max(phase_a_epochs, 1))
     phase_b_total_steps = max(1, len(train_loader) * max(args.s3_max_epochs - phase_a_epochs, 1))
+
+    # For multi-point proxy, generator is inside the wrapper
+    if multi_point_proxy is not None:
+        phase_a_named_params = [(f"multi_point_proxy.{name}", param)
+                                for name, param in model.multi_point_proxy.named_parameters()]
+    else:
+        phase_a_named_params = [(f"generator.{name}", param) for name, param in generator.named_parameters()]
+
     opt_a, sched_a = build_grouped_optimizer_and_scheduler(
-        named_parameters=[(f"generator.{name}", param) for name, param in generator.named_parameters()],
+        named_parameters=phase_a_named_params,
         lr_max=args.s3_lr_gen,
         lr_min=args.lr_min,
         weight_decay=args.s3_weight_decay,
@@ -888,6 +993,9 @@ def run_stage3(args, model_path, generator_path):
         if epoch > args.s3_phase_a_epochs and phase == "A":
             phase = "B"
             _unfreeze(model)
+            # If multi-point is active, keep it unfrozen (it was unfrozen in phase A)
+            if multi_point_proxy is not None:
+                _unfreeze(model.multi_point_proxy)
             # Build parameter groups based on backbone type
             if args.backbone == "vanilla_gt":
                 model_param_groups = [
@@ -908,8 +1016,15 @@ def run_stage3(args, model_path, generator_path):
                     {"params": model.transformer_layers.parameters(), "lr": args.s3_lr_transformer},
                     {"params": model.head.parameters(), "lr": args.s3_lr_transformer},
                 ]
+
+            # For multi-point proxy, generator is inside the wrapper, don't add separately
+            if multi_point_proxy is not None:
+                gen_param_groups = [{"params": model.multi_point_proxy.parameters(), "lr": args.s3_lr_gen}]
+            else:
+                gen_param_groups = [{"params": generator.parameters(), "lr": args.s3_lr_gen}]
+
             opt_b = torch.optim.AdamW(
-                model_param_groups + [{"params": generator.parameters(), "lr": args.s3_lr_gen}],
+                model_param_groups + gen_param_groups,
                 weight_decay=args.s3_weight_decay,
             )
             sched_b = build_warmup_cosine_scheduler(
@@ -940,44 +1055,75 @@ def run_stage3(args, model_path, generator_path):
 
             optimizer.zero_grad()
 
-            dense_x, dense_mask = model.encode_dense(batch)
-
-            gred_h = None
-            if args.backbone == "hybrid":
-                gred_h = model.encode_gred(dense_x, dist_masks_batch, node_masks_batch)
-
-            # In Phase A the model is frozen, so proxies must be used
-            # to keep a valid gradient path to the generator.
-            if phase == "A":
-                use_proxy = True
-            else:
-                # Phase B: randomly skip proxies for a fraction of batches.
-                use_proxy = torch.rand(1).item() > args.s3_proxy_dropout
-
-            if use_proxy:
-                proxies, aux_loss = _generate_proxies(
-                    model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
-                if args.backbone == "vanilla_gt":
-                    logits, _ = model(batch, proxy_embeddings=proxies,
-                                      precomputed_dense=(dense_x, dense_mask))
-                elif args.backbone == "hybrid":
-                    logits, _ = model(batch, dist_masks_batch, node_masks_batch,
-                                      proxy_embeddings=proxies,
-                                      precomputed_dense=(dense_x, dense_mask),
-                                      precomputed_gred=gred_h)
-                elif args.backbone == "gred":
-                    logits, _ = model(batch, dist_masks_batch, node_masks_batch)
-                loss = loss_fn(logits, batch.y)
-                if aux_loss is not None:
-                    loss = loss + aux_loss
-            else:
-                if args.backbone == "vanilla_gt":
-                    logits, _ = model(batch, precomputed_dense=(dense_x, dense_mask))
+            # Multi-point proxy path
+            if model.multi_point_proxy is not None:
+                # Multi-point proxy handles generation internally
+                if phase == "A":
+                    use_proxy = True
                 else:
-                    logits, _ = model(batch, dist_masks_batch, node_masks_batch,
-                                      precomputed_dense=(dense_x, dense_mask),
-                                      precomputed_gred=gred_h)
-                loss = loss_fn(logits, batch.y)
+                    # Phase B: randomly skip proxies for a fraction of batches.
+                    use_proxy = torch.rand(1).item() > args.s3_proxy_dropout
+
+                if use_proxy:
+                    if args.backbone == "vanilla_gt":
+                        logits, _ = model(batch)
+                    elif args.backbone == "hybrid":
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                    elif args.backbone == "gred":
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                    aux_loss = getattr(model, '_last_mp_aux_loss', None)
+                    if aux_loss is not None and not isinstance(aux_loss, torch.Tensor):
+                        aux_loss = torch.tensor(aux_loss, device=batch.x.device)
+                else:
+                    # Without proxies, model is frozen in phase A, so this shouldn't happen
+                    if args.backbone == "vanilla_gt":
+                        logits, _ = model(batch)
+                    elif args.backbone == "hybrid":
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                    elif args.backbone == "gred":
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                    aux_loss = None
+            else:
+                # Standard single-point proxy path
+                dense_x, dense_mask = model.encode_dense(batch)
+
+                gred_h = None
+                if args.backbone == "hybrid":
+                    gred_h = model.encode_gred(dense_x, dist_masks_batch, node_masks_batch)
+
+                # In Phase A the model is frozen, so proxies must be used
+                # to keep a valid gradient path to the generator.
+                if phase == "A":
+                    use_proxy = True
+                else:
+                    # Phase B: randomly skip proxies for a fraction of batches.
+                    use_proxy = torch.rand(1).item() > args.s3_proxy_dropout
+
+                if use_proxy:
+                    proxies, aux_loss = _generate_proxies(
+                        model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
+                    if args.backbone == "vanilla_gt":
+                        logits, _ = model(batch, proxy_embeddings=proxies,
+                                          precomputed_dense=(dense_x, dense_mask))
+                    elif args.backbone == "hybrid":
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch,
+                                          proxy_embeddings=proxies,
+                                          precomputed_dense=(dense_x, dense_mask),
+                                          precomputed_gred=gred_h)
+                    elif args.backbone == "gred":
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                else:
+                    if args.backbone == "vanilla_gt":
+                        logits, _ = model(batch, precomputed_dense=(dense_x, dense_mask))
+                    else:
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch,
+                                          precomputed_dense=(dense_x, dense_mask),
+                                          precomputed_gred=gred_h)
+                    aux_loss = None
+
+            loss = loss_fn(logits, batch.y)
+            if aux_loss is not None:
+                loss = loss + aux_loss
 
             loss.backward()
 

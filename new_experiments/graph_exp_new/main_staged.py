@@ -30,6 +30,7 @@ from models import GraphTransformer
 from generators import (
     ScoreBasedGenerator, FlowMatchingGenerator, GNNPoolingGenerator,
     PMAGenerator, GraphCoarseningGenerator, CrossAttentionRouter,
+    MultiPointProxyWrapper,
 )
 from metrics import compute_macro_ap
 from mmd import mmd_squared, cross_sample_moment_loss, prior_moment_loss
@@ -141,6 +142,18 @@ def build_parser():
                    default=True,
                    help="Include M×M self-attention within cross-attention routing")
 
+    # Multi-point proxy insertion
+    p.add_argument("--proxy_insertion_layers", type=str, default="-1",
+                   help="Comma-separated layer indices for multi-point proxy insertion. "
+                        "-1 = no insertion (default). 0 = before layer 0 (like current). "
+                        "E.g., '0,2,4' for three insertion points.")
+    p.add_argument("--separate_proxy_generators", action="store_true", default=False,
+                   help="Use independent generator per insertion point (Option B).")
+    p.add_argument("--separate_proxy_routers", action="store_true", default=False,
+                   help="Use independent router per insertion point.")
+    p.add_argument("--proxy_aux_loss_decay", type=float, default=1.0,
+                   help="Geometric decay factor for multi-point aux losses.")
+
     # Stage 4 — Finetune
     p.add_argument("--s4_lr_transformer", type=float, default=1e-5)
     p.add_argument("--s4_lr_generator", type=float, default=1e-4)
@@ -202,6 +215,29 @@ def _build_cross_attn_router(args):
             use_proxy_self_attn=args.cross_attn_proxy_self_attn,
         )
     return None
+
+
+def _parse_insertion_layers(s):
+    """Parse '--proxy_insertion_layers' string into a sorted list or None."""
+    layers = [int(x.strip()) for x in s.split(",")]
+    if layers == [-1]:
+        return None
+    return sorted(layers)
+
+
+def _build_multi_point_proxy(args, generator, router):
+    """Build MultiPointProxyWrapper if multi-point is enabled."""
+    layers = _parse_insertion_layers(args.proxy_insertion_layers)
+    if layers is None:
+        return None
+    return MultiPointProxyWrapper(
+        generator=generator,
+        router=router,
+        insertion_layers=layers,
+        separate_generators=args.separate_proxy_generators,
+        separate_routers=args.separate_proxy_routers,
+        aux_loss_decay=args.proxy_aux_loss_decay,
+    )
 
 
 def _build_graph_transformer(args):
@@ -360,9 +396,16 @@ def downstream_eval(model, generator, loader, device, args):
 
     for batch in loader:
         batch = batch.to(device)
-        proxy_emb, dense_x, dense_mask = generate_proxies(model, generator, batch, args)
-        logits, _ = model(batch, proxy_embeddings=proxy_emb,
-                          precomputed_dense=(dense_x, dense_mask))
+
+        # Multi-point proxy path: model handles generation internally
+        if getattr(model, 'multi_point_proxy', None) is not None:
+            logits, _ = model(batch)
+        else:
+            # Single-point proxy path: generate proxies externally
+            proxy_emb, dense_x, dense_mask = generate_proxies(model, generator, batch, args)
+            logits, _ = model(batch, proxy_embeddings=proxy_emb,
+                              precomputed_dense=(dense_x, dense_mask))
+
         loss = loss_fn(logits, batch.y)
         losses.append(loss.item())
         all_preds.append(torch.sigmoid(logits).cpu().numpy())
@@ -779,12 +822,21 @@ def run_stage3(args, model_path, proxy_pairs_path):
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
-    # Load and freeze transformer
+    # Load and freeze transformer (without multi-point initially)
     model = _build_graph_transformer(args).to(args.device)
     ckpt = torch.load(model_path, map_location=args.device, weights_only=True)
     model.load_state_dict(ckpt["model_state"])
     _freeze(model)
     model.eval()
+
+    # Generator
+    generator = build_generator(args).to(args.device)
+
+    # Build and attach multi-point proxy wrapper if enabled
+    cross_attn_router = _build_cross_attn_router(args)
+    multi_point_proxy = _build_multi_point_proxy(args, generator, cross_attn_router)
+    if multi_point_proxy is not None:
+        model.multi_point_proxy = multi_point_proxy
 
     # Proxy target dataset
     proxy_train_ds = ProxyTargetDataset(train_ds, proxy_pairs_path)
@@ -794,21 +846,42 @@ def run_stage3(args, model_path, proxy_pairs_path):
     )
     print(f"  Training on {len(proxy_train_ds)} proxy-paired graphs", flush=True)
 
-    # Generator
-    generator = build_generator(args).to(args.device)
     gen_params = sum(p.numel() for p in generator.parameters())
     print(f"  Generator parameters: {gen_params:,}", flush=True)
+    if args.proxy_insertion_layers != "-1":
+        print(f"  Multi-point proxy: insertion_layers={args.proxy_insertion_layers}, "
+              f"separate_gens={args.separate_proxy_generators}, "
+              f"separate_routers={args.separate_proxy_routers}, "
+              f"aux_decay={args.proxy_aux_loss_decay}", flush=True)
 
     total_steps = max(1, len(proxy_train_loader) * args.s3_max_epochs)
-    optimizer, scheduler = build_grouped_optimizer_and_scheduler(
-        named_parameters=[(f"generator.{name}", param) for name, param in generator.named_parameters()],
-        lr_max=args.s3_lr,
-        lr_min=args.lr_min,
-        weight_decay=args.s3_weight_decay,
-        total_steps=total_steps,
-        warmup_ratio=args.warmup_ratio,
-        recurrent_lr_factor=1.0,
-    )
+
+    # When multi-point is active, generator is inside model's wrapper
+    # We freeze model, then unfreeze only the wrapper's parameters
+    if multi_point_proxy is not None:
+        # Model is frozen, unfreeze only the wrapper
+        for p in model.multi_point_proxy.parameters():
+            p.requires_grad_(True)
+        optimizer, scheduler = build_grouped_optimizer_and_scheduler(
+            named_parameters=[(f"wrapper.{name}", param)
+                            for name, param in model.multi_point_proxy.named_parameters()],
+            lr_max=args.s3_lr,
+            lr_min=args.lr_min,
+            weight_decay=args.s3_weight_decay,
+            total_steps=total_steps,
+            warmup_ratio=args.warmup_ratio,
+            recurrent_lr_factor=1.0,
+        )
+    else:
+        optimizer, scheduler = build_grouped_optimizer_and_scheduler(
+            named_parameters=[(f"generator.{name}", param) for name, param in generator.named_parameters()],
+            lr_max=args.s3_lr,
+            lr_min=args.lr_min,
+            weight_decay=args.s3_weight_decay,
+            total_steps=total_steps,
+            warmup_ratio=args.warmup_ratio,
+            recurrent_lr_factor=1.0,
+        )
 
     best_val_ap = 0.0
     best_epoch = -1
@@ -837,11 +910,15 @@ def run_stage3(args, model_path, proxy_pairs_path):
 
             optimizer.zero_grad()
 
+            # Get the active generator (from wrapper if multi-point, else standalone)
+            active_gen = model.multi_point_proxy.generators[0] if multi_point_proxy is not None else generator
+
+            # Generate proxies with targets (supervised training)
             if args.generator in ("gnn_pooling", "graph_coarsening"):
                 # GNN-based generators need flat embeddings + graph structure
                 with torch.no_grad():
                     flat_emb = model.encode_nodes(pyg_batch)
-                proxy_emb, aux_loss = generator(
+                proxy_emb, aux_loss = active_gen(
                     flat_emb, mask=None, targets=targets,
                     edge_index=pyg_batch.edge_index,
                     batch_vec=pyg_batch.batch,
@@ -849,7 +926,7 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 )
             else:
                 # Dense-interface generators (score_based, flow_matching, pma)
-                proxy_emb, aux_loss = generator(encoder_embs, emb_masks, targets=targets)
+                proxy_emb, aux_loss = active_gen(encoder_embs, emb_masks, targets=targets)
 
             if aux_loss is not None:
                 # Reconstruction / regularization loss (MMD, CFM, ortho)
@@ -862,7 +939,10 @@ def run_stage3(args, model_path, proxy_pairs_path):
                     logits, pyg_batch.y)
 
             train_loss.backward()
-            nn.utils.clip_grad_norm_(generator.parameters(), args.s3_grad_clip)
+            # Clip gradients for both multi-point and single-point cases
+            all_params = (list(model.multi_point_proxy.parameters()) if multi_point_proxy is not None
+                         else list(generator.parameters()))
+            nn.utils.clip_grad_norm_(all_params, args.s3_grad_clip)
             optimizer.step()
             scheduler.step()
             train_losses.append(train_loss.item())
@@ -967,17 +1047,35 @@ def run_stage4(args, model_path, generator_path):
     gen_ckpt = torch.load(generator_path, map_location=args.device, weights_only=True)
     generator.load_state_dict(gen_ckpt["generator_state"])
 
+    # Build and attach multi-point proxy wrapper if enabled
+    cross_attn_router = _build_cross_attn_router(args)
+    multi_point_proxy = _build_multi_point_proxy(args, generator, cross_attn_router)
+    if multi_point_proxy is not None:
+        model.multi_point_proxy = multi_point_proxy
+        print(f"  Multi-point proxy: insertion_layers={args.proxy_insertion_layers}, "
+              f"separate_gens={args.separate_proxy_generators}, "
+              f"separate_routers={args.separate_proxy_routers}, "
+              f"aux_decay={args.proxy_aux_loss_decay}", flush=True)
+
     # Unfreeze everything
     _unfreeze(model)
     _unfreeze(generator)
 
     # Differential LR groups
-    optimizer = torch.optim.AdamW([
+    # When multi-point is active, generator is inside model, so don't add generator separately
+    param_groups = [
         {"params": model.encoder.parameters(), "lr": args.s4_lr_transformer},
         {"params": model.layers.parameters(), "lr": args.s4_lr_transformer},
         {"params": model.head.parameters(), "lr": args.s4_lr_transformer},
-        {"params": generator.parameters(), "lr": args.s4_lr_generator},
-    ], weight_decay=args.s4_weight_decay)
+    ]
+    if getattr(model, 'multi_point_proxy', None) is None:
+        param_groups.append({"params": generator.parameters(), "lr": args.s4_lr_generator})
+    else:
+        # Multi-point wrapper is inside model, so its params are already covered above
+        # But we add it explicitly to ensure it gets the generator LR
+        param_groups.append({"params": model.multi_point_proxy.parameters(), "lr": args.s4_lr_generator})
+
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=args.s4_weight_decay)
     scheduler = build_warmup_cosine_scheduler(
         optimizer=optimizer,
         total_steps=max(1, len(train_loader) * args.s4_max_epochs),
@@ -1005,31 +1103,45 @@ def run_stage4(args, model_path, generator_path):
             batch = batch.to(args.device)
             optimizer.zero_grad()
 
-            # Encode once
-            dense_x, dense_mask = model.encode_dense(batch)
-
-            # Generate proxies (differentiable)
-            if args.generator in ("gnn_pooling", "graph_coarsening"):
-                flat_emb = model.encode_nodes(batch)
-                proxy_emb, _ = generator(
-                    flat_emb, mask=None,
-                    edge_index=batch.edge_index,
-                    batch_vec=batch.batch,
-                    edge_attr=batch.edge_attr,
-                )
-            elif args.generator == "flow_matching":
-                # Single Euler step, fully differentiable
-                proxy_emb = generator.forward_differentiable(
-                    dense_x, dense_mask, euler_steps=args.euler_steps)
+            # Multi-point proxy path: model handles generation internally
+            if getattr(model, 'multi_point_proxy', None) is not None:
+                logits, _ = model(batch)
+                loss = loss_fn(logits, batch.y)
+                # Optionally add auxiliary loss from multi-point proxy
+                aux_loss = getattr(model, '_last_mp_aux_loss', None)
+                if aux_loss is not None:
+                    if not isinstance(aux_loss, torch.Tensor):
+                        aux_loss = torch.tensor(aux_loss, device=batch.x.device)
+                    # aux_loss is already weighted by decay factors; add it
+                    loss = loss + aux_loss
             else:
-                proxy_emb, _ = generator(dense_x, dense_mask)
+                # Single-point proxy path: generate proxies externally
+                # Encode once
+                dense_x, dense_mask = model.encode_dense(batch)
 
-            # Forward through transformer with proxies
-            logits, _ = model(batch, proxy_embeddings=proxy_emb,
-                              precomputed_dense=(dense_x, dense_mask))
+                # Generate proxies (differentiable)
+                if args.generator in ("gnn_pooling", "graph_coarsening"):
+                    flat_emb = model.encode_nodes(batch)
+                    proxy_emb, _ = generator(
+                        flat_emb, mask=None,
+                        edge_index=batch.edge_index,
+                        batch_vec=batch.batch,
+                        edge_attr=batch.edge_attr,
+                    )
+                elif args.generator == "flow_matching":
+                    # Single Euler step, fully differentiable
+                    proxy_emb = generator.forward_differentiable(
+                        dense_x, dense_mask, euler_steps=args.euler_steps)
+                else:
+                    proxy_emb, _ = generator(dense_x, dense_mask)
 
-            # Task loss only — no proxy matching loss
-            loss = loss_fn(logits, batch.y)
+                # Forward through transformer with proxies
+                logits, _ = model(batch, proxy_embeddings=proxy_emb,
+                                  precomputed_dense=(dense_x, dense_mask))
+
+                # Task loss only — no proxy matching loss
+                loss = loss_fn(logits, batch.y)
+
             loss.backward()
             nn.utils.clip_grad_norm_(
                 list(model.parameters()) + list(generator.parameters()),

@@ -21,7 +21,7 @@ from data import get_loaders
 from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
 from generators import (
     ScoreBasedGenerator, GNNPoolingGenerator, PMAGenerator, GraphCoarseningGenerator,
-    CrossAttentionRouter,
+    CrossAttentionRouter, MultiPointProxyWrapper,
 )
 from metrics import compute_macro_ap
 from mmd import mmd_squared
@@ -142,6 +142,18 @@ def build_parser():
                    default=True,
                    help="Include M×M self-attention within cross-attention routing")
 
+    # Multi-point proxy insertion
+    p.add_argument("--proxy_insertion_layers", type=str, default="-1",
+                   help="Comma-separated layer indices for multi-point proxy insertion. "
+                        "-1 = no insertion (default). 0 = before layer 0 (like current). "
+                        "E.g., '0,2,4' for three insertion points.")
+    p.add_argument("--separate_proxy_generators", action="store_true", default=False,
+                   help="Use independent generator per insertion point (Option B).")
+    p.add_argument("--separate_proxy_routers", action="store_true", default=False,
+                   help="Use independent router per insertion point.")
+    p.add_argument("--proxy_aux_loss_decay", type=float, default=1.0,
+                   help="Geometric decay factor for multi-point aux losses.")
+
     # Paths
     p.add_argument("--save_dir", type=str, default="checkpoints_e2e2")
     p.add_argument("--device", type=str, default=None)
@@ -183,21 +195,51 @@ def _build_cross_attn_router(args):
     return None
 
 
+def _parse_insertion_layers(s):
+    """Parse '--proxy_insertion_layers' string into a sorted list or None."""
+    layers = [int(x.strip()) for x in s.split(",")]
+    if layers == [-1]:
+        return None  # disabled
+    return sorted(layers)
+
+
+def _build_multi_point_proxy(args, generator, router):
+    """Build MultiPointProxyWrapper if multi-point is enabled."""
+    layers = _parse_insertion_layers(args.proxy_insertion_layers)
+    if layers is None:
+        return None
+    return MultiPointProxyWrapper(
+        generator=generator,
+        router=router,  # None when not using cross-attn routing
+        insertion_layers=layers,
+        separate_generators=args.separate_proxy_generators,
+        separate_routers=args.separate_proxy_routers,
+        aux_loss_decay=args.proxy_aux_loss_decay,
+    )
+
+
 def build_model(args):
     """Build backbone model based on --backbone arg."""
     cross_attn_router = _build_cross_attn_router(args)
+    generator = build_generator(args)
+    mp_wrapper = _build_multi_point_proxy(args, generator, cross_attn_router)
+
+    # When multi-point is active, the wrapper owns the router; the model gets None.
+    model_router = cross_attn_router if mp_wrapper is None else None
+
     if args.backbone == "vanilla_gt":
-        return GraphTransformer(
+        model = GraphTransformer(
             num_layers=args.num_layers,
             num_heads=args.num_heads,
             hidden_dim=args.hidden_dim,
             output_dim=args.output_dim,
             dropout=args.dropout,
             lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
-            cross_attn_router=cross_attn_router,
+            cross_attn_router=model_router,
+            multi_point_proxy=mp_wrapper,
         )
     elif args.backbone == "gred":
-        return GREDEncoder(
+        model = GREDEncoder(
             hidden_dim=args.hidden_dim,
             state_dim=args.state_dim,
             num_layers=args.num_gred_layers,
@@ -211,7 +253,7 @@ def build_model(args):
             lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
         )
     elif args.backbone == "hybrid":
-        return GREDHybridTransformer(
+        model = GREDHybridTransformer(
             hidden_dim=args.hidden_dim,
             state_dim=args.state_dim,
             num_gred_layers=args.num_gred_layers,
@@ -225,10 +267,13 @@ def build_model(args):
             act=args.gred_act,
             output_dim=args.output_dim,
             lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
-            cross_attn_router=cross_attn_router,
+            cross_attn_router=model_router,
+            multi_point_proxy=mp_wrapper,
         )
     else:
         raise ValueError(f"Unknown backbone: {args.backbone}")
+
+    return model, generator
 
 
 def build_generator(args):
@@ -319,7 +364,24 @@ def forward_e2e(model, generator, batch, args, use_proxies=True,
         _zero = torch.tensor(0.0, device=batch.x.device)
         return logits, _zero, _zero, node_emb
 
-    # --- Proxy path ---
+    # --- Multi-point proxy path ---
+    # When active the model generates + routes proxies internally at each
+    # insertion point.  We skip external generation / MMD entirely.
+    if getattr(model, 'multi_point_proxy', None) is not None:
+        _zero = torch.tensor(0.0, device=batch.x.device)
+        if args.backbone == "vanilla_gt":
+            logits, node_emb = model(batch, readout_scope=args.readout_scope)
+        elif args.backbone == "hybrid":
+            logits, node_emb = model(batch, dist_masks, node_masks,
+                                     readout_scope=args.readout_scope)
+        else:
+            raise ValueError("GRED backbone does not support proxy integration. Use 'hybrid'.")
+        aux_loss = model._last_mp_aux_loss
+        if not isinstance(aux_loss, torch.Tensor):
+            aux_loss = torch.tensor(aux_loss, device=batch.x.device)
+        return logits, _zero, aux_loss, node_emb
+
+    # --- Single-point proxy path (existing behaviour) ---
     # Step 1: Encode nodes (dense)
     dense_x, dense_mask = model.encode_dense(batch)
 
@@ -441,6 +503,11 @@ def run_e2e(args):
     if args.use_cross_attn_routing:
         print(f"  Cross-attn routing: layers={args.num_cross_layers}, "
               f"proxy_self_attn={args.cross_attn_proxy_self_attn}", flush=True)
+    if args.proxy_insertion_layers != "-1":
+        print(f"  Multi-point proxy: insertion_layers={args.proxy_insertion_layers}, "
+              f"separate_gens={args.separate_proxy_generators}, "
+              f"separate_routers={args.separate_proxy_routers}, "
+              f"aux_decay={args.proxy_aux_loss_decay}", flush=True)
     if args.use_lap_pe:
         print(f"  Laplacian PE: dim={args.lap_pe_dim}", flush=True)
     if is_gred:
@@ -464,23 +531,40 @@ def run_e2e(args):
     )
 
     # Model
-    model = build_model(args).to(args.device)
-    generator = build_generator(args).to(args.device)
+    model, generator = build_model(args)
+    model = model.to(args.device)
+    generator = generator.to(args.device)
 
-    total_params = sum(p.numel() for p in model.parameters()) + \
-                   sum(p.numel() for p in generator.parameters())
-    print(f"  Total parameters: {total_params:,}", flush=True)
-    print(f"    Model:     {sum(p.numel() for p in model.parameters()):,}", flush=True)
-    print(f"    Generator: {sum(p.numel() for p in generator.parameters()):,}", flush=True)
+    # When multi-point is active the generator lives inside the model's
+    # MultiPointProxyWrapper, so model.parameters() already covers it.
+    mp_active = getattr(model, 'multi_point_proxy', None) is not None
+    if mp_active:
+        total_params = sum(p.numel() for p in model.parameters())
+        gen_params = sum(p.numel() for p in generator.parameters())
+        print(f"  Total parameters: {total_params:,}", flush=True)
+        print(f"    Model (incl. multi-point gen+router): {total_params:,}", flush=True)
+        print(f"    Generator (inside wrapper):           {gen_params:,}", flush=True)
+    else:
+        total_params = sum(p.numel() for p in model.parameters()) + \
+                       sum(p.numel() for p in generator.parameters())
+        print(f"  Total parameters: {total_params:,}", flush=True)
+        print(f"    Model:     {sum(p.numel() for p in model.parameters()):,}", flush=True)
+        print(f"    Generator: {sum(p.numel() for p in generator.parameters()):,}", flush=True)
 
     # Official-style grouped optimization + warmup-cosine schedule.
     train_steps_per_epoch = max(1, len(train_loader))
     total_steps = max(1, train_steps_per_epoch * args.max_epochs)
-    named_params = [
-        (f"model.{name}", param) for name, param in model.named_parameters()
-    ] + [
-        (f"generator.{name}", param) for name, param in generator.named_parameters()
-    ]
+    if mp_active:
+        # Generator is already inside model — only list model params.
+        named_params = [
+            (f"model.{name}", param) for name, param in model.named_parameters()
+        ]
+    else:
+        named_params = [
+            (f"model.{name}", param) for name, param in model.named_parameters()
+        ] + [
+            (f"generator.{name}", param) for name, param in generator.named_parameters()
+        ]
     optimizer, scheduler = build_grouped_optimizer_and_scheduler(
         named_parameters=named_params,
         lr_max=args.lr,
