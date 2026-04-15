@@ -431,7 +431,7 @@ def _build_flat_generator_inputs(gen_input, gen_mask, batch):
     pre_subsample_total_nodes = batch.batch.numel()
     keep_mask_flat = torch.zeros(pre_subsample_total_nodes, dtype=torch.bool, device=gen_mask.device)
 
-    # Iterate per graph because dense masks are ragged (different n_g per graph).
+    # Iterate per graph because dense masks are ragged (different node counts per graph).
     # This preserves exact dense-to-flat alignment for each graph slice.
     for graph_idx in range(num_graphs):
         graph_nodes = (batch.batch == graph_idx).nonzero(as_tuple=True)[0]
@@ -454,7 +454,8 @@ def _build_flat_generator_inputs(gen_input, gen_mask, batch):
     if flat_batch_vec.numel() != flat_emb.size(0):
         raise RuntimeError(
             f"Flat interface mismatch: flat_emb has {flat_emb.size(0)} nodes "
-            f"but flat_batch_vec has {flat_batch_vec.numel()} nodes."
+            f"but flat_batch_vec has {flat_batch_vec.numel()} nodes. "
+            "Check dense-to-flat keep-mask alignment for the subsampled batch."
         )
 
     return flat_emb, sub_edge_index, flat_batch_vec, sub_edge_attr
