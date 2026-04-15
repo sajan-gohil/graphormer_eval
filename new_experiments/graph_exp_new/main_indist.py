@@ -25,6 +25,7 @@ import time
 import yaml
 import numpy as np
 import torch
+from torch_geometric.utils import subgraph
 torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 
@@ -412,6 +413,54 @@ def subsample_nodes(dense_x, dense_mask, num_drop):
     return sub_x, sub_mask, dropped_embs, valid_drop_mask
 
 
+def _build_flat_generator_inputs(gen_input, gen_mask, batch):
+    """
+    Build flat-interface generator inputs aligned to a subsampled dense mask.
+
+    Returns:
+        flat_emb: kept node embeddings in flat order
+        sub_edge_index: relabeled edges among kept nodes
+        flat_batch_vec: per-node graph ids for kept nodes
+        sub_edge_attr: edge attributes aligned with sub_edge_index (or None)
+    """
+    # Flat embeddings in dense-to-flat order.
+    flat_emb = gen_input[gen_mask]
+
+    # Map dense mask back to original flat PyG node indexing.
+    num_graphs = gen_mask.size(0)
+    pre_subsample_total_nodes = batch.batch.numel()
+    keep_mask_flat = torch.zeros(pre_subsample_total_nodes, dtype=torch.bool, device=gen_mask.device)
+
+    # Iterate per graph because dense masks are ragged (different node counts per graph).
+    # This preserves exact dense-to-flat alignment for each graph slice.
+    for graph_idx in range(num_graphs):
+        graph_nodes = (batch.batch == graph_idx).nonzero(as_tuple=True)[0]
+        num_nodes_in_graph = graph_nodes.numel()
+        if num_nodes_in_graph == 0:
+            continue
+        keep_local = gen_mask[graph_idx, :num_nodes_in_graph]
+        keep_mask_flat[graph_nodes[keep_local]] = True
+
+    flat_batch_vec = batch.batch[keep_mask_flat]
+    edge_attr = getattr(batch, "edge_attr", None)
+    sub_edge_index, sub_edge_attr = subgraph(
+        keep_mask_flat,
+        batch.edge_index,
+        edge_attr=edge_attr,
+        relabel_nodes=True,
+        num_nodes=pre_subsample_total_nodes,
+    )
+
+    if flat_batch_vec.numel() != flat_emb.size(0):
+        raise RuntimeError(
+            f"Flat interface mismatch: flat_emb has {flat_emb.size(0)} nodes "
+            f"but flat_batch_vec has {flat_batch_vec.numel()} nodes. "
+            "Check dense-to-flat keep-mask alignment for the subsampled batch."
+        )
+
+    return flat_emb, sub_edge_index, flat_batch_vec, sub_edge_attr
+
+
 def subsample_dist_masks(dist_masks, node_masks, sub_mask):
     """
     Recompute distance masks for the subsampled node set.
@@ -496,11 +545,13 @@ def _generate_proxies(model, generator, batch, dense_x, dense_mask, args,
 
     for _ in range(num_proxy_sets):
         if _uses_flat_interface(args.generator):
-            flat_emb = gen_input[gen_mask]
+            flat_emb, sub_edge_index, flat_batch_vec, sub_edge_attr = _build_flat_generator_inputs(
+                gen_input, gen_mask, batch
+            )
             proxies, aux_loss = generator(
                 flat_emb, mask=None,
-                edge_index=batch.edge_index, batch_vec=batch.batch,
-                edge_attr=getattr(batch, "edge_attr", None),
+                edge_index=sub_edge_index, batch_vec=flat_batch_vec,
+                edge_attr=sub_edge_attr,
             )
         else:
             proxies, aux_loss = generator(gen_input, gen_mask)
@@ -1063,11 +1114,13 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
 
             # Generate proxies from (N-M) node subset
             if _uses_flat_interface(args.generator):
-                flat_emb = sub_x[sub_mask]
+                flat_emb, sub_edge_index, flat_batch_vec, sub_edge_attr = _build_flat_generator_inputs(
+                    sub_x, sub_mask, batch
+                )
                 proxies, aux_loss = generator(
                     flat_emb, mask=None,
-                    edge_index=batch.edge_index, batch_vec=batch.batch,
-                    edge_attr=getattr(batch, "edge_attr", None),
+                    edge_index=sub_edge_index, batch_vec=flat_batch_vec,
+                    edge_attr=sub_edge_attr,
                 )
             else:
                 proxies, aux_loss = generator(sub_x, sub_mask)
@@ -1207,11 +1260,13 @@ def _evaluate_phase3(phase1_model, phase2_model, generator, loader, device,
             full_dense_x, full_dense_mask, num_drop)
 
         if _uses_flat_interface(args.generator):
-            flat_emb = sub_x[sub_mask]
+            flat_emb, sub_edge_index, flat_batch_vec, sub_edge_attr = _build_flat_generator_inputs(
+                sub_x, sub_mask, batch
+            )
             proxies, _ = generator(
                 flat_emb, mask=None,
-                edge_index=batch.edge_index, batch_vec=batch.batch,
-                edge_attr=getattr(batch, "edge_attr", None),
+                edge_index=sub_edge_index, batch_vec=flat_batch_vec,
+                edge_attr=sub_edge_attr,
             )
         else:
             proxies, _ = generator(sub_x, sub_mask)
