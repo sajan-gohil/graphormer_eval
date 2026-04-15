@@ -427,19 +427,19 @@ def _build_flat_generator_inputs(gen_input, gen_mask, batch):
     flat_emb = gen_input[gen_mask]
 
     # Map dense mask back to original flat PyG node indexing.
-    B = gen_mask.size(0)
+    num_graphs = gen_mask.size(0)
     pre_subsample_total_nodes = batch.batch.numel()
     keep_mask_flat = torch.zeros(pre_subsample_total_nodes, dtype=torch.bool, device=gen_mask.device)
 
     # Iterate per graph because dense masks are ragged (different n_g per graph).
     # This preserves exact dense-to-flat alignment for each graph slice.
-    for g in range(B):
-        g_nodes = (batch.batch == g).nonzero(as_tuple=True)[0]
-        n_g = g_nodes.numel()
-        if n_g == 0:
+    for graph_idx in range(num_graphs):
+        graph_nodes = (batch.batch == graph_idx).nonzero(as_tuple=True)[0]
+        num_nodes_in_graph = graph_nodes.numel()
+        if num_nodes_in_graph == 0:
             continue
-        keep_local = gen_mask[g, :n_g]
-        keep_mask_flat[g_nodes[keep_local]] = True
+        keep_local = gen_mask[graph_idx, :num_nodes_in_graph]
+        keep_mask_flat[graph_nodes[keep_local]] = True
 
     flat_batch_vec = batch.batch[keep_mask_flat]
     edge_attr = getattr(batch, "edge_attr", None)
