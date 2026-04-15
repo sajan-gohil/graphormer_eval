@@ -25,6 +25,7 @@ import time
 import yaml
 import numpy as np
 import torch
+from torch_geometric.utils import subgraph
 torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 
@@ -422,15 +423,13 @@ def _build_flat_generator_inputs(gen_input, gen_mask, batch):
         flat_batch_vec: per-node graph ids for kept nodes
         sub_edge_attr: edge attributes aligned with sub_edge_index (or None)
     """
-    from torch_geometric.utils import subgraph
-
     # Flat embeddings in dense-to-flat order.
     flat_emb = gen_input[gen_mask]
 
     # Map dense mask back to original flat PyG node indexing.
     B = gen_mask.size(0)
-    original_total_nodes = batch.batch.numel()
-    keep_mask_flat = torch.zeros(original_total_nodes, dtype=torch.bool, device=gen_mask.device)
+    pre_subsample_total_nodes = batch.batch.numel()
+    keep_mask_flat = torch.zeros(pre_subsample_total_nodes, dtype=torch.bool, device=gen_mask.device)
 
     # Iterate per graph because dense masks are ragged (different n_g per graph).
     # This preserves exact dense-to-flat alignment for each graph slice.
@@ -449,7 +448,7 @@ def _build_flat_generator_inputs(gen_input, gen_mask, batch):
         batch.edge_index,
         edge_attr=edge_attr,
         relabel_nodes=True,
-        num_nodes=original_total_nodes,
+        num_nodes=pre_subsample_total_nodes,
     )
 
     if flat_batch_vec.numel() != flat_emb.size(0):
