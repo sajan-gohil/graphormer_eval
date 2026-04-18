@@ -161,7 +161,7 @@ class GraphTransformer(nn.Module):
         return to_dense_batch(h, batch.batch)
 
     def forward(self, batch, proxy_embeddings=None, precomputed_dense=None,
-                readout_scope="nodes_only"):
+                readout_scope="nodes_only", disable_proxy_injection=False):
         """
         Args:
             batch: PyG Batch object.
@@ -169,6 +169,10 @@ class GraphTransformer(nn.Module):
             precomputed_dense: optional (dense_x, dense_mask) tuple to skip encoding.
             readout_scope: "nodes_only" pools over N original nodes,
                            "all_tokens" pools over N+M (requires proxy_embeddings).
+            disable_proxy_injection: if True, force the no-proxy path regardless
+                of ``proxy_embeddings`` or an attached ``multi_point_proxy``.
+                Useful for running paired with/without proxy forwards on the
+                same model instance.
         Returns:
             logits: (B, output_dim)
             node_embeddings: (total_N, d) flat node embeddings from encoder
@@ -180,7 +184,12 @@ class GraphTransformer(nn.Module):
 
         B, max_N, d = dense_x.shape
 
-        if self.multi_point_proxy is not None:
+        if disable_proxy_injection:
+            proxy_embeddings = None
+        use_multi_point = (self.multi_point_proxy is not None
+                           and not disable_proxy_injection)
+
+        if use_multi_point:
             # ── Multi-point mode: interleave proxy blocks with TF layers ──
             insertion_set = set(self.multi_point_proxy.insertion_layers)
             point_idx = 0
@@ -685,7 +694,7 @@ class GREDHybridTransformer(nn.Module):
 
     def forward(self, batch, dist_masks, node_masks, proxy_embeddings=None,
                 precomputed_dense=None, precomputed_gred=None,
-                readout_scope="nodes_only"):
+                readout_scope="nodes_only", disable_proxy_injection=False):
         """
         Args:
             batch: PyG Batch object.
@@ -695,6 +704,8 @@ class GREDHybridTransformer(nn.Module):
             precomputed_dense: optional (dense_x, dense_mask) to skip node encoding.
             precomputed_gred: optional (gred_h,) to skip GRED encoding.
             readout_scope: "nodes_only" or "all_tokens".
+            disable_proxy_injection: if True, force the no-proxy path regardless
+                of ``proxy_embeddings`` or an attached ``multi_point_proxy``.
         Returns:
             logits: (B, output_dim)
             node_embeddings: (total_N, d) flat
@@ -712,8 +723,13 @@ class GREDHybridTransformer(nn.Module):
         else:
             h = self.encode_gred(dense_x, dist_masks, node_masks)
 
+        if disable_proxy_injection:
+            proxy_embeddings = None
+        use_multi_point = (self.multi_point_proxy is not None
+                           and not disable_proxy_injection)
+
         # Transformer layers with optional proxy integration
-        if self.multi_point_proxy is not None:
+        if use_multi_point:
             # ── Multi-point mode: interleave proxy blocks with TF layers ──
             insertion_set = set(self.multi_point_proxy.insertion_layers)
             point_idx = 0
@@ -799,3 +815,4 @@ class GREDHybridTransformer(nn.Module):
         orig_h = h_aug[:, :max_N, :]
         node_emb = orig_h[dense_mask]
         return logits, node_emb
+

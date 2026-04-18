@@ -26,7 +26,7 @@ import yaml
 import numpy as np
 import torch
 from torch_geometric.utils import subgraph
-torch.set_float32_matmul_precision('high')
+# torch.set_float32_matmul_precision('high')
 import torch.nn as nn
 
 from data import get_loaders
@@ -68,8 +68,8 @@ def build_parser():
                    help="Phase 3 generator checkpoint")
 
     # Model architecture
-    p.add_argument("--hidden_dim", type=int, default=256)
-    p.add_argument("--num_layers", type=int, default=8)
+    p.add_argument("--hidden_dim", type=int, default=128)
+    p.add_argument("--num_layers", type=int, default=6)
     p.add_argument("--num_heads", type=int, default=8)
     p.add_argument("--output_dim", type=int, default=10)
     p.add_argument("--dropout", type=float, default=0.1)
@@ -97,21 +97,21 @@ def build_parser():
     p.add_argument("--dist_mask_workers", type=int, default=8)
 
     # Phase 1 — Pretrain full transformer
-    p.add_argument("--p1_lr", type=float, default=1e-3)
+    p.add_argument("--p1_lr", type=float, default=1e-4)
     p.add_argument("--p1_weight_decay", type=float, default=3e-4)
     p.add_argument("--p1_max_epochs", type=int, default=500)
     p.add_argument("--p1_patience", type=int, default=50)
     p.add_argument("--p1_grad_clip", type=float, default=1.0)
 
     # Phase 2 — Train partial-graph transformer
-    p.add_argument("--p2_lr", type=float, default=1e-3)
+    p.add_argument("--p2_lr", type=float, default=1e-4)
     p.add_argument("--p2_weight_decay", type=float, default=3e-4)
     p.add_argument("--p2_max_epochs", type=int, default=500)
     p.add_argument("--p2_patience", type=int, default=50)
     p.add_argument("--p2_grad_clip", type=float, default=1.0)
 
     # Phase 3 — Train proxy generator
-    p.add_argument("--p3_lr", type=float, default=1e-3)
+    p.add_argument("--p3_lr", type=float, default=1e-4)
     p.add_argument("--p3_weight_decay", type=float, default=3e-4)
     p.add_argument("--p3_max_epochs", type=int, default=500)
     p.add_argument("--p3_patience", type=int, default=50)
