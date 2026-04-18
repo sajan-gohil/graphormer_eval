@@ -26,6 +26,7 @@ from generators import (
 from metrics import compute_macro_ap
 from mmd import mmd_squared
 from optim_utils import build_grouped_optimizer_and_scheduler
+from losses import novelty_loss, inter_proxy_cosine_stats, proxy_diversity_loss
 
 
 # ================================================================
@@ -153,6 +154,18 @@ def build_parser():
                    help="Use independent router per insertion point.")
     p.add_argument("--proxy_aux_loss_decay", type=float, default=1.0,
                    help="Geometric decay factor for multi-point aux losses.")
+
+    # Novelty loss hyperparameters
+    p.add_argument("--novelty_temperature", type=float, default=1.0,
+                   help="Sigmoid temperature for output-level novelty.")
+    p.add_argument("--novelty_alpha", type=float, default=0.0,
+                   help="Weight for output_penalty. 0 disables novelty loss.")
+    p.add_argument("--novelty_alpha_node", type=float, default=0.0,
+                   help="Weight for node_penalty. 0 disables node-level novelty.")
+
+    # Proxy diversity loss
+    p.add_argument("--diversity_weight", type=float, default=0.0,
+                   help="Weight for proxy diversity loss. 0 disables.")
 
     # Paths
     p.add_argument("--save_dir", type=str, default="checkpoints_e2e2")
@@ -349,6 +362,7 @@ def forward_e2e(model, generator, batch, args, use_proxies=True,
         mmd_loss: scalar tensor (0 if mmd_lambda == 0 or no proxies)
         aux_loss: scalar tensor from generator regularization (e.g. graph coarsening)
         node_emb: (total_N, d)
+        proxy_emb: proxy embeddings or None
     """
     is_gred = args.backbone in ("gred", "hybrid")
 
@@ -362,7 +376,7 @@ def forward_e2e(model, generator, batch, args, use_proxies=True,
             logits, node_emb = model(batch, dist_masks, node_masks,
                                      readout_scope=args.readout_scope)
         _zero = torch.tensor(0.0, device=batch.x.device)
-        return logits, _zero, _zero, node_emb
+        return logits, _zero, _zero, node_emb, None
 
     # --- Multi-point proxy path ---
     # When active the model generates + routes proxies internally at each
@@ -379,7 +393,7 @@ def forward_e2e(model, generator, batch, args, use_proxies=True,
         aux_loss = model._last_mp_aux_loss
         if not isinstance(aux_loss, torch.Tensor):
             aux_loss = torch.tensor(aux_loss, device=batch.x.device)
-        return logits, _zero, aux_loss, node_emb
+        return logits, _zero, aux_loss, node_emb, None
 
     # --- Single-point proxy path (existing behaviour) ---
     # Step 1: Encode nodes (dense)
@@ -441,7 +455,7 @@ def forward_e2e(model, generator, batch, args, use_proxies=True,
     if aux_loss is None:
         aux_loss = torch.tensor(0.0, device=batch.x.device)
 
-    return logits, mmd_loss, aux_loss, node_emb
+    return logits, mmd_loss, aux_loss, node_emb, proxy_emb
 
 
 # ================================================================
@@ -470,7 +484,7 @@ def evaluate(model, generator, loader, device, args, use_proxies=True):
             dist_masks_batch = None
             node_masks_batch = None
 
-        logits, mmd_loss, aux_loss, _ = forward_e2e(
+        logits, mmd_loss, aux_loss, _, _ = forward_e2e(
             model, generator, batch, args,
             use_proxies=use_proxies,
             dist_masks=dist_masks_batch,
@@ -592,6 +606,8 @@ def run_e2e(args):
         model.train()
         generator.train()
         train_task_losses, train_mmd_losses = [], []
+        train_novelty_losses, train_diversity_losses = [], []
+        train_inter_proxy_means, train_inter_proxy_stds = [], []
         all_train_preds, all_train_labels = [], []
 
         for batch_data in train_loader:
@@ -607,14 +623,36 @@ def run_e2e(args):
 
             optimizer.zero_grad()
 
-            logits, mmd_loss, aux_loss, _ = forward_e2e(
+            logits, mmd_loss, aux_loss, node_emb_with, proxy_emb = forward_e2e(
                 model, generator, batch, args,
                 use_proxies=use_proxies,
                 dist_masks=dist_masks_batch,
                 node_masks=node_masks_batch,
             )
             task_loss = loss_fn(logits, batch.y)
-            total_loss = task_loss + args.mmd_lambda * mmd_loss + aux_loss
+
+            # Novelty loss
+            use_novelty = (args.novelty_alpha > 0 or args.novelty_alpha_node > 0) and use_proxies
+            if use_novelty:
+                with torch.no_grad():
+                    logits_without, _, _, node_emb_without, _ = forward_e2e(
+                        model, generator, batch, args, use_proxies=False,
+                        dist_masks=dist_masks_batch, node_masks=node_masks_batch)
+                node_w = node_emb_with if args.novelty_alpha_node > 0 else None
+                node_wo = node_emb_without if args.novelty_alpha_node > 0 else None
+                total_loss, nov_metrics = novelty_loss(
+                    task_loss, logits, logits_without.detach(),
+                    node_w, node_wo.detach() if node_wo is not None else None,
+                    mask=None, alpha=args.novelty_alpha,
+                    alpha_node=args.novelty_alpha_node,
+                    temperature=args.novelty_temperature)
+                total_loss = total_loss + args.mmd_lambda * mmd_loss + aux_loss
+            else:
+                total_loss = task_loss + args.mmd_lambda * mmd_loss + aux_loss
+
+            # Diversity loss
+            if args.diversity_weight > 0 and proxy_emb is not None:
+                total_loss = total_loss + args.diversity_weight * proxy_diversity_loss(proxy_emb)
 
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(
@@ -626,6 +664,18 @@ def run_e2e(args):
 
             train_task_losses.append(task_loss.item())
             train_mmd_losses.append(mmd_loss.item())
+
+            # Log novelty metrics
+            if use_novelty:
+                if 'novelty_loss' in nov_metrics:
+                    train_novelty_losses.append(nov_metrics['novelty_loss'])
+            # Log diversity metrics
+            if args.diversity_weight > 0 and proxy_emb is not None:
+                train_diversity_losses.append(proxy_diversity_loss(proxy_emb).item())
+                mean_cos, std_cos = inter_proxy_cosine_stats(proxy_emb)
+                train_inter_proxy_means.append(mean_cos)
+                train_inter_proxy_stds.append(std_cos)
+
             all_train_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
             all_train_labels.append(batch.y.cpu().numpy())
 
@@ -634,6 +684,10 @@ def run_e2e(args):
         train_ap = compute_macro_ap(train_pred, train_true)
         train_task = float(np.mean(train_task_losses))
         train_mmd = float(np.mean(train_mmd_losses))
+        train_novelty = float(np.mean(train_novelty_losses)) if train_novelty_losses else 0.0
+        train_diversity = float(np.mean(train_diversity_losses)) if train_diversity_losses else 0.0
+        train_inter_proxy_mean = float(np.mean(train_inter_proxy_means)) if train_inter_proxy_means else 0.0
+        train_inter_proxy_std = float(np.mean(train_inter_proxy_stds)) if train_inter_proxy_stds else 0.0
 
         # --- Val ---
         val_ap, val_loss, val_mmd = evaluate(
@@ -662,6 +716,10 @@ def run_e2e(args):
             "epoch": epoch,
             "train_loss": train_task,
             "train_mmd": train_mmd,
+            "train_novelty": train_novelty,
+            "train_diversity": train_diversity,
+            "train_inter_proxy_mean": train_inter_proxy_mean,
+            "train_inter_proxy_std": train_inter_proxy_std,
             "train_ap": train_ap,
             "val_loss": val_loss,
             "val_ap": val_ap,
@@ -669,13 +727,21 @@ def run_e2e(args):
             "elapsed": elapsed,
         })
 
-        print(
+        # Build logging string with novelty and diversity metrics
+        log_str = (
             f"Epoch {epoch:3d}/{args.max_epochs} [{elapsed:.1f}s{mem_str}] proxies={proxies_str} | "
-            f"train_loss={train_task:.4f} mmd={train_mmd:.4f} train_AP={train_ap:.4f} | "
-            f"val_loss={val_loss:.4f} val_AP={val_ap:.4f} | "
-            f"test_loss={test_loss:.4f} test_AP={test_ap:.4f}",
-            flush=True,
+            f"train_loss={train_task:.4f} mmd={train_mmd:.4f}"
         )
+        if train_novelty > 0:
+            log_str += f" novelty={train_novelty:.4f}"
+        if train_diversity > 0:
+            log_str += f" div={train_diversity:.4f} proxy_cos={train_inter_proxy_mean:.4f}±{train_inter_proxy_std:.4f}"
+        log_str += (
+            f" train_AP={train_ap:.4f} | "
+            f"val_loss={val_loss:.4f} val_AP={val_ap:.4f} | "
+            f"test_loss={test_loss:.4f} test_AP={test_ap:.4f}"
+        )
+        print(log_str, flush=True)
 
         # --- Early stopping on val AP ---
         if val_ap > best_val_ap:
@@ -726,4 +792,3 @@ def run_e2e(args):
 if __name__ == "__main__":
     args = parse_args()
     run_e2e(args)
-

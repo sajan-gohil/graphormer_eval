@@ -161,7 +161,7 @@ class GraphTransformer(nn.Module):
         return to_dense_batch(h, batch.batch)
 
     def forward(self, batch, proxy_embeddings=None, precomputed_dense=None,
-                readout_scope="nodes_only", disable_proxy_injection=False):
+                readout_scope="all_tokens", disable_proxy_injection=False):
         """
         Args:
             batch: PyG Batch object.
@@ -567,7 +567,7 @@ class GREDEncoder(nn.Module):
         return to_dense_batch(h, batch.batch)
 
     def forward(self, batch, dist_masks, node_masks, proxy_embeddings=None,
-                precomputed_dense=None, readout_scope="nodes_only"):
+                precomputed_dense=None, readout_scope="all_tokens"):
         """
         Args:
             batch: PyG Batch object.
@@ -694,7 +694,7 @@ class GREDHybridTransformer(nn.Module):
 
     def forward(self, batch, dist_masks, node_masks, proxy_embeddings=None,
                 precomputed_dense=None, precomputed_gred=None,
-                readout_scope="nodes_only", disable_proxy_injection=False):
+                readout_scope="all_tokens", disable_proxy_injection=False):
         """
         Args:
             batch: PyG Batch object.
@@ -815,4 +815,3 @@ class GREDHybridTransformer(nn.Module):
         orig_h = h_aug[:, :max_N, :]
         node_emb = orig_h[dense_mask]
         return logits, node_emb
-

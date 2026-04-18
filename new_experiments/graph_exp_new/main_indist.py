@@ -40,6 +40,7 @@ from optim_utils import (
     build_grouped_optimizer_and_scheduler,
     build_warmup_cosine_scheduler,
 )
+from losses import novelty_loss, inter_proxy_cosine_stats, proxy_diversity_loss
 
 
 # ================================================================
@@ -140,6 +141,18 @@ def build_parser():
     p.add_argument("--p5_grad_clip", type=float, default=1.0)
     p.add_argument("--p5_weight_decay", type=float, default=5e-5)
 
+    # Novelty loss hyperparameters
+    p.add_argument("--novelty_temperature", type=float, default=1.0,
+                   help="Sigmoid temperature for output-level novelty.")
+    p.add_argument("--novelty_alpha", type=float, default=0.0,
+                   help="Weight for output_penalty. 0 disables novelty loss.")
+    p.add_argument("--novelty_alpha_node", type=float, default=0.0,
+                   help="Weight for node_penalty. 0 disables node-level novelty.")
+
+    # Proxy diversity loss
+    p.add_argument("--diversity_weight", type=float, default=0.0,
+                   help="Weight for proxy diversity loss. 0 disables.")
+
     # Generator architecture
     p.add_argument("--gen_hidden_dim", type=int, default=256)
     p.add_argument("--gen_num_layers", type=int, default=6)
@@ -186,6 +199,7 @@ def build_parser():
                    help="Geometric decay factor for multi-point aux losses.")
 
     # Common
+    p.add_argument("--readout_scope", type=str, default="all_tokens")
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--lr_min", type=float, default=1e-7,
@@ -627,10 +641,10 @@ def evaluate_with_proxies(model, generator, loader, device, args,
         if getattr(model, 'multi_point_proxy', None) is not None:
             with torch.no_grad():
                 if args.backbone == "vanilla_gt":
-                    logits, _ = model(batch, readout_scope="all")
+                    logits, _ = model(batch, readout_scope=args.readout_scope)
                 elif args.backbone == "hybrid":
                     logits, _ = model(batch, dist_masks_batch, node_masks_batch,
-                                      readout_scope="all")
+                                      readout_scope=args.readout_scope)
                 else:
                     raise ValueError("GRED backbone does not support proxy integration. Use 'hybrid'.")
         else:
@@ -1132,17 +1146,19 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
             # Loss 2: Task loss through Phase 2 transformer (optional)
             if args.p3_no_task_loss:
                 l_task = torch.tensor(0.0, device=args.device)
+                logits = None
+                node_emb_with = None
             else:
                 # Feed (N-M) subset + generated proxies through Phase 2 model
                 if args.backbone == "vanilla_gt":
-                    logits, _ = phase2_model(
+                    logits, node_emb_with = phase2_model(
                         batch, proxy_embeddings=proxies,
                         precomputed_dense=(sub_x, sub_mask))
                 elif args.backbone == "hybrid":
                     sub_dm, sub_nm = subsample_dist_masks(
                         dist_masks_batch, node_masks_batch, sub_mask)
                     gred_h = phase2_model.encode_gred(sub_x, sub_dm, sub_nm)
-                    logits, _ = phase2_model(
+                    logits, node_emb_with = phase2_model(
                         batch, sub_dm, sub_nm,
                         proxy_embeddings=proxies,
                         precomputed_dense=(sub_x, sub_mask),
@@ -1150,15 +1166,54 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
                 elif args.backbone == "gred":
                     sub_dm, sub_nm = subsample_dist_masks(
                         dist_masks_batch, node_masks_batch, sub_mask)
-                    logits, _ = phase2_model(
+                    logits, node_emb_with = phase2_model(
                         batch, sub_dm, sub_nm,
                         precomputed_dense=(sub_x, sub_mask))
                 l_task = loss_fn(logits, batch.y)
+
+            # Novelty loss (when enabled)
+            use_novelty = (args.novelty_alpha > 0 or args.novelty_alpha_node > 0) and not args.p3_no_task_loss
+            nov_metrics = {}
+            if use_novelty:
+                # logits and node_emb_with from with-proxies forward above
+                # Need without-proxies forward through phase2_model
+                with torch.no_grad():
+                    if args.backbone == "vanilla_gt":
+                        logits_without, node_emb_without = phase2_model(
+                            batch, precomputed_dense=(sub_x, sub_mask))
+                    elif args.backbone == "hybrid":
+                        logits_without, node_emb_without = phase2_model(
+                            batch, sub_dm, sub_nm,
+                            precomputed_dense=(sub_x, sub_mask),
+                            precomputed_gred=gred_h)
+                    elif args.backbone == "gred":
+                        logits_without, node_emb_without = phase2_model(
+                            batch, sub_dm, sub_nm,
+                            precomputed_dense=(sub_x, sub_mask))
+
+                node_w = node_emb_with if args.novelty_alpha_node > 0 else None
+                node_wo = node_emb_without if args.novelty_alpha_node > 0 else None
+                # novelty_loss returns (total_loss, metrics_dict)
+                nov_total, nov_metrics = novelty_loss(
+                    l_task, logits, logits_without.detach(),
+                    node_w, node_wo.detach() if node_wo is not None else None,
+                    mask=None, alpha=args.novelty_alpha,
+                    alpha_node=args.novelty_alpha_node,
+                    temperature=args.novelty_temperature)
+                # nov_total already includes l_task, so replace l_task with novelty-augmented version
+                l_task = nov_total
+
+            # Proxy diversity loss
+            diversity_loss = torch.tensor(0.0, device=args.device)
+            if args.diversity_weight > 0:
+                diversity_loss = proxy_diversity_loss(proxies)
 
             # Combined loss
             loss = recon_w * l_recon
             if not args.p3_no_task_loss:
                 loss = loss + l_task
+            if args.diversity_weight > 0:
+                loss = loss + args.diversity_weight * diversity_loss
             if aux_loss is not None:
                 loss = loss + aux_loss
 
@@ -1175,6 +1230,37 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
         mean_recon = float(np.mean(recon_losses))
         mean_task = float(np.mean(task_losses))
 
+        # Compute inter-proxy cosine stats for logging (only when proxies exist)
+        cosine_mean = 0.0
+        cosine_std = 0.0
+        if args.diversity_weight > 0 and len(train_loader) > 0:
+            # Recompute on a sample batch for stats
+            try:
+                with torch.no_grad():
+                    for sample_batch_data in train_loader:
+                        if is_gred:
+                            sample_batch = sample_batch_data[0].to(args.device)
+                        else:
+                            sample_batch = sample_batch_data.to(args.device)
+                        full_dense_x, full_dense_mask = phase1_model.encode_dense(sample_batch)
+                        sub_x_s, sub_mask_s, _, _ = subsample_nodes(
+                            full_dense_x, full_dense_mask, M)
+                        if _uses_flat_interface(args.generator):
+                            flat_emb, sub_edge_index, flat_batch_vec, sub_edge_attr = _build_flat_generator_inputs(
+                                sub_x_s, sub_mask_s, sample_batch
+                            )
+                            proxies_s, _ = generator(
+                                flat_emb, mask=None,
+                                edge_index=sub_edge_index, batch_vec=flat_batch_vec,
+                                edge_attr=sub_edge_attr,
+                            )
+                        else:
+                            proxies_s, _ = generator(sub_x_s, sub_mask_s)
+                        cosine_mean, cosine_std = inter_proxy_cosine_stats(proxies_s)
+                        break
+            except Exception:
+                pass
+
         if epoch % args.p3_eval_every == 0:
             # Evaluate: use (N-M) + generated proxies through Phase 2 model
             val_ap, val_loss = _evaluate_phase3(
@@ -1186,12 +1272,15 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
 
             elapsed = time.time() - epoch_start
             mem_str = _mem_str(args)
-            print(
+            log_str = (
                 f"Epoch {epoch:3d}/{args.p3_max_epochs} [{elapsed:.1f}s{mem_str}] | "
                 f"loss={mean_loss:.4f} task={mean_task:.4f} recon={mean_recon:.4f} "
-                f"(w={recon_w:.3f}) | "
-                f"val_AP={val_ap:.4f} test_AP={test_ap:.4f}",
-                flush=True)
+                f"(w={recon_w:.3f})"
+            )
+            if args.diversity_weight > 0:
+                log_str += f" | cosine_mean={cosine_mean:.4f} cosine_std={cosine_std:.4f}"
+            log_str += f" | val_AP={val_ap:.4f} test_AP={test_ap:.4f}"
+            print(log_str, flush=True)
 
             diagnostics.append({
                 "epoch": epoch, "loss": mean_loss, "task_loss": mean_task,
@@ -1564,13 +1653,43 @@ def run_phase5(args, phase1_model_path, generator_path):
             if getattr(model, 'multi_point_proxy', None) is not None:
                 # Model generates + routes proxies internally
                 if args.backbone == "vanilla_gt":
-                    logits, _ = model(batch, readout_scope="all")
+                    logits, node_emb_with = model(batch, readout_scope=args.readout_scope)
                 elif args.backbone == "hybrid":
-                    logits, _ = model(batch, dist_masks_batch, node_masks_batch,
-                                      readout_scope="all")
+                    logits, node_emb_with = model(batch, dist_masks_batch, node_masks_batch,
+                                      readout_scope=args.readout_scope)
                 else:
                     raise ValueError("GRED backbone does not support proxy integration. Use 'hybrid'.")
-                loss = loss_fn(logits, batch.y)
+
+                # Novelty loss (when enabled)
+                use_novelty_mp = args.novelty_alpha > 0 or args.novelty_alpha_node > 0
+                if use_novelty_mp:
+                    with torch.no_grad():
+                        if args.backbone == "vanilla_gt":
+                            logits_without, node_emb_without = model(
+                                batch, readout_scope=args.readout_scope, disable_proxy_injection=True)
+                        elif args.backbone == "hybrid":
+                            logits_without, node_emb_without = model(
+                                batch, dist_masks_batch, node_masks_batch,
+                                readout_scope=args.readout_scope, disable_proxy_injection=True)
+
+                    node_w = node_emb_with if args.novelty_alpha_node > 0 else None
+                    node_wo = node_emb_without if args.novelty_alpha_node > 0 else None
+                    base_task_loss = loss_fn(logits, batch.y)
+                    nov_total, _ = novelty_loss(
+                        base_task_loss, logits, logits_without.detach(),
+                        node_w, node_wo.detach() if node_wo is not None else None,
+                        mask=None, alpha=args.novelty_alpha,
+                        alpha_node=args.novelty_alpha_node,
+                        temperature=args.novelty_temperature)
+                    loss = nov_total
+                else:
+                    loss = loss_fn(logits, batch.y)
+
+                # Proxy diversity loss (proxies from multi-point wrapper)
+                if args.diversity_weight > 0 and hasattr(model.multi_point_proxy, '_last_proxies'):
+                    loss = loss + args.diversity_weight * proxy_diversity_loss(
+                        model.multi_point_proxy._last_proxies)
+
                 aux_loss = model._last_mp_aux_loss
                 if aux_loss is not None:
                     if not isinstance(aux_loss, torch.Tensor):
@@ -1598,23 +1717,57 @@ def run_phase5(args, phase1_model_path, generator_path):
                         gred_h=gred_h, num_proxy_sets=args.proxy_multiplier)
 
                     if args.backbone == "vanilla_gt":
-                        logits, _ = model(
+                        logits, node_emb_with = model(
                             batch, proxy_embeddings=proxies,
                             precomputed_dense=(dense_x, dense_mask))
                     elif args.backbone == "hybrid":
-                        logits, _ = model(
+                        logits, node_emb_with = model(
                             batch, dist_masks_batch, node_masks_batch,
                             proxy_embeddings=proxies,
                             precomputed_dense=(dense_x, dense_mask),
                             precomputed_gred=gred_h)
                     elif args.backbone == "gred":
-                        logits, _ = model(
+                        logits, node_emb_with = model(
                             batch, dist_masks_batch, node_masks_batch)
 
-                    loss = loss_fn(logits, batch.y)
+                    # Novelty loss (when enabled)
+                    use_novelty_p5 = args.novelty_alpha > 0 or args.novelty_alpha_node > 0
+                    if use_novelty_p5:
+                        with torch.no_grad():
+                            if args.backbone == "vanilla_gt":
+                                logits_without, node_emb_without = model(
+                                    batch, precomputed_dense=(dense_x, dense_mask))
+                            elif args.backbone == "hybrid":
+                                logits_without, node_emb_without = model(
+                                    batch, dist_masks_batch, node_masks_batch,
+                                    precomputed_dense=(dense_x, dense_mask),
+                                    precomputed_gred=gred_h)
+                            elif args.backbone == "gred":
+                                logits_without, node_emb_without = model(
+                                    batch, dist_masks_batch, node_masks_batch,
+                                    precomputed_dense=(dense_x, dense_mask))
+
+                        node_w = node_emb_with if args.novelty_alpha_node > 0 else None
+                        node_wo = node_emb_without if args.novelty_alpha_node > 0 else None
+                        base_task_loss = loss_fn(logits, batch.y)
+                        nov_total, _ = novelty_loss(
+                            base_task_loss, logits, logits_without.detach(),
+                            node_w, node_wo.detach() if node_wo is not None else None,
+                            mask=None, alpha=args.novelty_alpha,
+                            alpha_node=args.novelty_alpha_node,
+                            temperature=args.novelty_temperature)
+                        loss = nov_total
+                    else:
+                        loss = loss_fn(logits, batch.y)
+
+                    # Proxy diversity loss
+                    if args.diversity_weight > 0:
+                        loss = loss + args.diversity_weight * proxy_diversity_loss(proxies)
+
                     if aux_loss is not None:
                         loss = loss + aux_loss
                 else:
+                    # Proxy dropout: skip proxies and novelty/diversity losses
                     if args.backbone == "vanilla_gt":
                         logits, _ = model(
                             batch, precomputed_dense=(dense_x, dense_mask))

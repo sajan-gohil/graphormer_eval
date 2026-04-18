@@ -61,7 +61,7 @@ python3 main_e2e.py \
     --batch_size 32 \
     --max_epochs 200 \
     --patience 50 \
-    --mmd_lambda 0.01 \
+    --mmd_lambda 0.0 \
     --proxy_warmup_epochs 20 \
     --readout_scope nodes_only \
     --save_dir "${BASE_DIR}/hybrid_score_e2e"

@@ -30,6 +30,7 @@ from generators import (
     CrossAttentionRouter, MultiPointProxyWrapper,
 )
 from metrics import compute_macro_ap
+from losses import novelty_loss, inter_proxy_cosine_stats, proxy_diversity_loss
 from optim_utils import (
     build_grouped_optimizer_and_scheduler,
     build_warmup_cosine_scheduler,
@@ -125,6 +126,18 @@ def build_parser():
     p.add_argument("--s3_grad_clip", type=float, default=1.0)
     p.add_argument("--s3_weight_decay", type=float, default=1e-4)
 
+    # Novelty loss hyperparameters
+    p.add_argument("--novelty_temperature", type=float, default=1.0,
+                   help="Sigmoid temperature for output-level novelty.")
+    p.add_argument("--novelty_alpha", type=float, default=0.0,
+                   help="Weight for output_penalty. 0 disables novelty loss.")
+    p.add_argument("--novelty_alpha_node", type=float, default=0.0,
+                   help="Weight for node_penalty. 0 disables node-level novelty.")
+
+    # Proxy diversity loss
+    p.add_argument("--diversity_weight", type=float, default=0.0,
+                   help="Weight for proxy diversity loss. 0 disables.")
+
     # Generator architecture
     p.add_argument("--gen_hidden_dim", type=int, default=256)
     p.add_argument("--gen_num_layers", type=int, default=4)
@@ -171,6 +184,7 @@ def build_parser():
                    help="Geometric decay factor for multi-point aux losses.")
 
     # Common
+    p.add_argument("--readout_scope", type=str, default="all_tokens", help="all_tokens or nodes_only")
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--lr_min", type=float, default=1e-7,
@@ -400,11 +414,11 @@ def downstream_eval(model, generator, loader, device, args):
         # Multi-point proxy path
         if hasattr(model, 'multi_point_proxy') and model.multi_point_proxy is not None:
             if args.backbone == "vanilla_gt":
-                logits, _ = model(batch)
+                logits, _ = model(batch, readout_scope=args.readout_scope)
             elif args.backbone == "gred":
-                logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
             elif args.backbone == "hybrid":
-                logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
         else:
             # Standard single-point proxy path
             dense_x, dense_mask = model.encode_dense(batch)
@@ -419,14 +433,14 @@ def downstream_eval(model, generator, loader, device, args):
 
             if args.backbone == "vanilla_gt":
                 logits, _ = model(batch, proxy_embeddings=proxies,
-                                  precomputed_dense=(dense_x, dense_mask))
+                                  precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
             elif args.backbone == "gred":
-                logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
             elif args.backbone == "hybrid":
                 logits, _ = model(batch, dist_masks_batch, node_masks_batch,
                                   proxy_embeddings=proxies,
                                   precomputed_dense=(dense_x, dense_mask),
-                                  precomputed_gred=gred_h)
+                                  precomputed_gred=gred_h, readout_scope=args.readout_scope)
 
         losses.append(loss_fn(logits, batch.y).item())
         all_preds.append(torch.sigmoid(logits).cpu().numpy())
@@ -481,14 +495,14 @@ def mean_proxy_eval(model, generator, loader, device, args):
 
         if args.backbone == "vanilla_gt":
             logits, _ = model(batch, proxy_embeddings=mean_p,
-                              precomputed_dense=(dense_x, dense_mask))
+                              precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
         elif args.backbone == "hybrid":
             logits, _ = model(batch, dist_masks_batch, node_masks_batch,
                               proxy_embeddings=mean_p,
                               precomputed_dense=(dense_x, dense_mask),
-                              precomputed_gred=gred_h)
+                              precomputed_gred=gred_h, readout_scope=args.readout_scope)
         else:
-            logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+            logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
 
         all_preds.append(torch.sigmoid(logits).cpu().numpy())
         all_labels.append(batch.y.cpu().numpy())
@@ -557,11 +571,11 @@ def run_stage1(args):
 
             optimizer.zero_grad()
             if args.backbone == "vanilla_gt":
-                logits, _ = model(batch)
+                logits, _ = model(batch, readout_scope=args.readout_scope)
             elif args.backbone == "gred":
-                logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
             elif args.backbone == "hybrid":
-                logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
             loss = loss_fn(logits, batch.y)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.s1_grad_clip)
@@ -589,9 +603,9 @@ def run_stage1(args):
                     node_masks_batch = None
 
                 if args.backbone == "vanilla_gt":
-                    logits, _ = model(batch)
+                    logits, _ = model(batch, readout_scope=args.readout_scope)
                 else:
-                    logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                    logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
                 val_losses.append(loss_fn(logits, batch.y).item())
                 val_preds.append(torch.sigmoid(logits).cpu().numpy())
                 val_labels.append(batch.y.cpu().numpy())
@@ -624,9 +638,9 @@ def run_stage1(args):
                         node_masks_batch = None
 
                     if args.backbone == "vanilla_gt":
-                        logits, _ = model(batch)
+                        logits, _ = model(batch, readout_scope=args.readout_scope)
                     else:
-                        logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
                     test_preds.append(torch.sigmoid(logits).cpu().numpy())
                     test_labels.append(batch.y.cpu().numpy())
             test_ap = compute_macro_ap(np.concatenate(test_preds), np.concatenate(test_labels))
@@ -756,6 +770,8 @@ def run_stage2(args, model_path):
         epoch_cos_sims = []
         epoch_entropies = []
         epoch_grad_norms = []
+        epoch_novelty_losses = []
+        epoch_diversity_losses = []
         last_dense_x = last_dense_mask = None  # for entropy diagnostic
 
         for batch_data in train_loader:
@@ -781,16 +797,24 @@ def run_stage2(args, model_path):
             # Multi-point proxy path
             if model.multi_point_proxy is not None:
                 if args.backbone == "vanilla_gt":
-                    logits, _ = model(batch, precomputed_dense=(dense_x, dense_mask))
+                    logits, _ = model(batch, precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
                 elif args.backbone == "hybrid":
                     logits, _ = model(batch, dist_masks_batch, node_masks_batch,
                                       precomputed_dense=(dense_x, dense_mask),
-                                      precomputed_gred=gred_h)
+                                      precomputed_gred=gred_h, readout_scope=args.readout_scope)
                 elif args.backbone == "gred":
-                    logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                    logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
                 aux_loss = getattr(model, '_last_mp_aux_loss', None)
                 if aux_loss is not None and not isinstance(aux_loss, torch.Tensor):
                     aux_loss = torch.tensor(aux_loss, device=batch.x.device)
+                # For multi-point proxy, skip novelty and diversity loss
+                task_loss = loss_fn(logits, batch.y)
+                loss = task_loss
+                if aux_loss is not None:
+                    loss = loss + aux_loss
+                novelty_loss_val = 0.0
+                diversity_loss_val = 0.0
+                proxies = None
             else:
                 # Standard single-point proxy path
                 proxies, aux_loss = _generate_proxies(
@@ -798,20 +822,58 @@ def run_stage2(args, model_path):
 
                 # Forward through frozen model with generated proxies
                 if args.backbone == "vanilla_gt":
-                    logits, _ = model(batch, proxy_embeddings=proxies,
-                                      precomputed_dense=(dense_x, dense_mask))
+                    logits, node_emb = model(batch, proxy_embeddings=proxies,
+                                      precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
                 elif args.backbone == "hybrid":
-                    logits, _ = model(batch, dist_masks_batch, node_masks_batch,
+                    logits, node_emb = model(batch, dist_masks_batch, node_masks_batch,
                                       proxy_embeddings=proxies,
                                       precomputed_dense=(dense_x, dense_mask),
-                                      precomputed_gred=gred_h)
+                                      precomputed_gred=gred_h, readout_scope=args.readout_scope)
                 elif args.backbone == "gred":
-                    logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                    logits, node_emb = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
+                    node_emb = None  # GRED has no proxy path, no novelty loss
 
-            loss = loss_fn(logits, batch.y)
-            # Add aux_loss if any (e.g., orthogonality regularization for graph_coarsening)
-            if aux_loss is not None:
-                loss = loss + aux_loss
+                task_loss = loss_fn(logits, batch.y)
+                loss = task_loss
+                if aux_loss is not None:
+                    loss = loss + aux_loss
+
+                # Novelty loss (if enabled)
+                novelty_loss_val = 0.0
+                if (args.novelty_alpha > 0.0 or args.novelty_alpha_node > 0.0) and args.backbone != "gred":
+                    # Get logits without proxies in no_grad
+                    with torch.no_grad():
+                        if args.backbone == "vanilla_gt":
+                            logits_without, node_emb_without = model(
+                                batch, precomputed_dense=(dense_x, dense_mask),
+                                disable_proxy_injection=True
+                            , readout_scope=args.readout_scope)
+                        elif args.backbone == "hybrid":
+                            logits_without, node_emb_without = model(
+                                batch, dist_masks_batch, node_masks_batch,
+                                precomputed_dense=(dense_x, dense_mask),
+                                precomputed_gred=gred_h,
+                                disable_proxy_injection=True
+                            , readout_scope=args.readout_scope)
+                    # Compute novelty loss
+                    nov_loss, nov_metrics = novelty_loss(
+                        task_loss, logits, logits_without,
+                        node_emb_with=node_emb,
+                        node_emb_without=node_emb_without,
+                        mask=batch.batch_mask if hasattr(batch, 'batch_mask') else None,
+                        alpha=args.novelty_alpha,
+                        alpha_node=args.novelty_alpha_node,
+                        temperature=args.novelty_temperature
+                    )
+                    loss = loss + nov_loss
+                    novelty_loss_val = nov_loss.item()
+
+                # Diversity loss (if enabled)
+                diversity_loss_val = 0.0
+                if args.diversity_weight > 0.0 and proxies is not None:
+                    div_loss = proxy_diversity_loss(proxies)
+                    loss = loss + args.diversity_weight * div_loss
+                    diversity_loss_val = (args.diversity_weight * div_loss).item()
 
             loss.backward()
 
@@ -827,7 +889,10 @@ def run_stage2(args, model_path):
             scheduler.step()
 
             train_losses.append(loss.item())
-            epoch_cos_sims.append(_proxy_cosine_sim(proxies))
+            if proxies is not None:
+                epoch_cos_sims.append(_proxy_cosine_sim(proxies))
+            epoch_novelty_losses.append(novelty_loss_val)
+            epoch_diversity_losses.append(diversity_loss_val)
 
             # Save tensors for attention entropy (score_based only, last batch)
             if args.generator == "score_based":
@@ -835,8 +900,10 @@ def run_stage2(args, model_path):
                 last_dense_mask = dense_mask.detach()
 
         mean_train_loss = float(np.mean(train_losses))
-        mean_cos_sim = float(np.mean(epoch_cos_sims))
+        mean_cos_sim = float(np.mean(epoch_cos_sims)) if epoch_cos_sims else float('nan')
         mean_grad_norm = float(np.mean(epoch_grad_norms))
+        mean_novelty_loss = float(np.mean(epoch_novelty_losses))
+        mean_diversity_loss = float(np.mean(epoch_diversity_losses))
 
         if args.generator == "score_based" and last_dense_x is not None:
             attn_entropy = _attention_entropy(generator, last_dense_x, last_dense_mask)
@@ -865,7 +932,8 @@ def run_stage2(args, model_path):
                 f"val_AP={val_ap:.4f} mean_AP={mean_ap:.4f} delta={proxy_delta:+.4f} | "
                 f"test_AP={test_ap:.4f} | "
                 f"cos_sim={mean_cos_sim:.4f} grad_norm={mean_grad_norm:.4f} "
-                f"attn_entr={attn_entropy:.4f}",
+                f"attn_entr={attn_entropy:.4f} | "
+                f"novelty_loss={mean_novelty_loss:.4f} diversity_loss={mean_diversity_loss:.4f}",
                 flush=True,
             )
 
@@ -901,7 +969,8 @@ def run_stage2(args, model_path):
             elapsed = time.time() - epoch_start
             print(f"Epoch {epoch:3d}/{args.s2_max_epochs} [{elapsed:.1f}s] | "
                   f"task_loss={mean_train_loss:.4f} | "
-                  f"cos_sim={mean_cos_sim:.4f} grad_norm={mean_grad_norm:.4f}",
+                  f"cos_sim={mean_cos_sim:.4f} grad_norm={mean_grad_norm:.4f} | "
+                  f"novelty_loss={mean_novelty_loss:.4f} diversity_loss={mean_diversity_loss:.4f}",
                   flush=True)
 
     diag_path = os.path.join(args.save_dir, "stage2_diagnostics.pkl")
@@ -1048,6 +1117,8 @@ def run_stage3(args, model_path, generator_path):
         model.train()
         generator.train()
         train_losses, all_preds, all_labels = [], [], []
+        epoch_novelty_losses = []
+        epoch_diversity_losses = []
 
         for batch_data in train_loader:
             if is_gred:
@@ -1073,23 +1144,31 @@ def run_stage3(args, model_path, generator_path):
 
                 if use_proxy:
                     if args.backbone == "vanilla_gt":
-                        logits, _ = model(batch)
+                        logits, _ = model(batch, readout_scope=args.readout_scope)
                     elif args.backbone == "hybrid":
-                        logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
                     elif args.backbone == "gred":
-                        logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
                     aux_loss = getattr(model, '_last_mp_aux_loss', None)
                     if aux_loss is not None and not isinstance(aux_loss, torch.Tensor):
                         aux_loss = torch.tensor(aux_loss, device=batch.x.device)
                 else:
                     # Without proxies, model is frozen in phase A, so this shouldn't happen
                     if args.backbone == "vanilla_gt":
-                        logits, _ = model(batch)
+                        logits, _ = model(batch, readout_scope=args.readout_scope)
                     elif args.backbone == "hybrid":
-                        logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
                     elif args.backbone == "gred":
-                        logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
                     aux_loss = None
+
+                # For multi-point proxy, skip novelty and diversity loss
+                task_loss = loss_fn(logits, batch.y)
+                loss = task_loss
+                if aux_loss is not None:
+                    loss = loss + aux_loss
+                novelty_loss_val = 0.0
+                diversity_loss_val = 0.0
             else:
                 # Standard single-point proxy path
                 dense_x, dense_mask = model.encode_dense(batch)
@@ -1110,27 +1189,71 @@ def run_stage3(args, model_path, generator_path):
                     proxies, aux_loss = _generate_proxies(
                         model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
                     if args.backbone == "vanilla_gt":
-                        logits, _ = model(batch, proxy_embeddings=proxies,
-                                          precomputed_dense=(dense_x, dense_mask))
+                        logits, node_emb = model(batch, proxy_embeddings=proxies,
+                                          precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
                     elif args.backbone == "hybrid":
-                        logits, _ = model(batch, dist_masks_batch, node_masks_batch,
+                        logits, node_emb = model(batch, dist_masks_batch, node_masks_batch,
                                           proxy_embeddings=proxies,
                                           precomputed_dense=(dense_x, dense_mask),
-                                          precomputed_gred=gred_h)
+                                          precomputed_gred=gred_h, readout_scope=args.readout_scope)
                     elif args.backbone == "gred":
-                        logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+                        logits, node_emb = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
+                        node_emb = None  # GRED has no proxy path
+
+                    task_loss = loss_fn(logits, batch.y)
+                    loss = task_loss
+                    if aux_loss is not None:
+                        loss = loss + aux_loss
+
+                    # Novelty loss (if enabled)
+                    novelty_loss_val = 0.0
+                    if (args.novelty_alpha > 0.0 or args.novelty_alpha_node > 0.0) and args.backbone != "gred":
+                        # Get logits without proxies in no_grad
+                        with torch.no_grad():
+                            if args.backbone == "vanilla_gt":
+                                logits_without, node_emb_without = model(
+                                    batch, precomputed_dense=(dense_x, dense_mask),
+                                    disable_proxy_injection=True
+                                , readout_scope=args.readout_scope)
+                            elif args.backbone == "hybrid":
+                                logits_without, node_emb_without = model(
+                                    batch, dist_masks_batch, node_masks_batch,
+                                    precomputed_dense=(dense_x, dense_mask),
+                                    precomputed_gred=gred_h,
+                                    disable_proxy_injection=True
+                                , readout_scope=args.readout_scope)
+                        # Compute novelty loss
+                        nov_loss, nov_metrics = novelty_loss(
+                            task_loss, logits, logits_without,
+                            node_emb_with=node_emb,
+                            node_emb_without=node_emb_without,
+                            mask=batch.batch_mask if hasattr(batch, 'batch_mask') else None,
+                            alpha=args.novelty_alpha,
+                            alpha_node=args.novelty_alpha_node,
+                            temperature=args.novelty_temperature
+                        )
+                        loss = loss + nov_loss
+                        novelty_loss_val = nov_loss.item()
+
+                    # Diversity loss (if enabled)
+                    diversity_loss_val = 0.0
+                    if args.diversity_weight > 0.0 and proxies is not None:
+                        div_loss = proxy_diversity_loss(proxies)
+                        loss = loss + args.diversity_weight * div_loss
+                        diversity_loss_val = (args.diversity_weight * div_loss).item()
                 else:
                     if args.backbone == "vanilla_gt":
-                        logits, _ = model(batch, precomputed_dense=(dense_x, dense_mask))
+                        logits, _ = model(batch, precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
                     else:
                         logits, _ = model(batch, dist_masks_batch, node_masks_batch,
                                           precomputed_dense=(dense_x, dense_mask),
-                                          precomputed_gred=gred_h)
+                                          precomputed_gred=gred_h, readout_scope=args.readout_scope)
+                    task_loss = loss_fn(logits, batch.y)
+                    loss = task_loss
                     aux_loss = None
-
-            loss = loss_fn(logits, batch.y)
-            if aux_loss is not None:
-                loss = loss + aux_loss
+                    # When use_proxy=False (proxy dropout), skip novelty and diversity
+                    novelty_loss_val = 0.0
+                    diversity_loss_val = 0.0
 
             loss.backward()
 
@@ -1144,9 +1267,13 @@ def run_stage3(args, model_path, generator_path):
             train_losses.append(loss.item())
             all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
             all_labels.append(batch.y.cpu().numpy())
+            epoch_novelty_losses.append(novelty_loss_val)
+            epoch_diversity_losses.append(diversity_loss_val)
 
         train_ap = compute_macro_ap(np.concatenate(all_preds), np.concatenate(all_labels))
         train_loss = float(np.mean(train_losses))
+        mean_novelty_loss = float(np.mean(epoch_novelty_losses))
+        mean_diversity_loss = float(np.mean(epoch_diversity_losses))
 
         val_ap, val_loss = downstream_eval(model, generator, val_loader, args.device, args)
         test_ap, _ = downstream_eval(model, generator, test_loader, args.device, args)
@@ -1161,7 +1288,8 @@ def run_stage3(args, model_path, generator_path):
             f"Epoch {epoch:3d}/{args.s3_max_epochs} [{phase}][{elapsed:.1f}s{mem_str}] | "
             f"train_loss={train_loss:.4f} train_AP={train_ap:.4f} | "
             f"val_loss={val_loss:.4f} val_AP={val_ap:.4f} | "
-            f"test_AP={test_ap:.4f}",
+            f"test_AP={test_ap:.4f} | "
+            f"novelty_loss={mean_novelty_loss:.4f} diversity_loss={mean_diversity_loss:.4f}",
             flush=True,
         )
 
@@ -1223,4 +1351,3 @@ if __name__ == "__main__":
             run_stage3(args, model_path, generator_path)
 
     print("\nAll requested stages complete.", flush=True)
-

@@ -141,6 +141,41 @@ def novelty_loss(
 
 
 # ================================================================
+# PROXY DIVERSITY LOSS
+# ================================================================
+
+def proxy_diversity_loss(
+    proxies: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Penalise high cosine similarity among generated proxies.
+
+    Computes the mean off-diagonal pairwise cosine similarity across the batch
+    and returns it as a scalar loss.  Minimising this loss pushes proxies apart
+    in the embedding space (towards orthogonality).
+
+    Args:
+        proxies: (B, M, d) generated proxy embeddings.
+        eps:     numerical stability for normalisation.
+
+    Returns:
+        Scalar loss in [-1, 1] (typically [0, 1]).  When ``M < 2`` the result
+        is 0 — no pairs to repel.
+    """
+    B, M, d = proxies.shape
+    if M < 2:
+        return proxies.new_zeros(())
+
+    p_normed = F.normalize(proxies, p=2, dim=-1, eps=eps)   # (B, M, d)
+    sim = torch.bmm(p_normed, p_normed.transpose(1, 2))      # (B, M, M)
+
+    # Off-diagonal mask
+    off_diag = ~torch.eye(M, dtype=torch.bool, device=proxies.device)
+    off_diag_sim = sim[:, off_diag]                          # (B, M*(M-1))
+    return off_diag_sim.mean()
+
+
+# ================================================================
 # LOGGING HELPERS
 # ================================================================
 
@@ -164,4 +199,3 @@ def inter_proxy_cosine_stats(
     off_diag = ~torch.eye(M, dtype=torch.bool, device=proxies.device)
     off_diag_sim = sim[:, off_diag]                          # (B, M*(M-1))
     return off_diag_sim.mean().detach(), off_diag_sim.std().detach()
-

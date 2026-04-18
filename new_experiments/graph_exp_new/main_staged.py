@@ -34,6 +34,7 @@ from generators import (
 )
 from metrics import compute_macro_ap
 from mmd import mmd_squared, cross_sample_moment_loss, prior_moment_loss
+from losses import novelty_loss, inter_proxy_cosine_stats, proxy_diversity_loss
 from optim_utils import (
     build_grouped_optimizer_and_scheduler,
     build_warmup_cosine_scheduler,
@@ -85,7 +86,7 @@ def build_parser():
     p.add_argument("--num_proxies", type=int, default=4)
     p.add_argument("--s2_proxy_lr", type=float, default=5e-2)
     p.add_argument("--s2_num_steps", type=int, default=75)
-    p.add_argument("--s2_mmd_lambda", type=float, default=0.01)
+    p.add_argument("--s2_mmd_lambda", type=float, default=0.0)
     p.add_argument("--s2_cross_moment_lambda", type=float, default=0.5,
                    help="Weight for intra-batch cross-sample moment matching")
     p.add_argument("--s2_prior_moment_lambda", type=float, default=1,
@@ -162,7 +163,20 @@ def build_parser():
     p.add_argument("--s4_grad_clip", type=float, default=1.0)
     p.add_argument("--s4_weight_decay", type=float, default=1e-4)
 
+    # Novelty loss hyperparameters (Stage 4)
+    p.add_argument("--novelty_temperature", type=float, default=1.0,
+                   help="Sigmoid temperature for output-level novelty.")
+    p.add_argument("--novelty_alpha", type=float, default=0.0,
+                   help="Weight for output_penalty. 0 disables novelty loss.")
+    p.add_argument("--novelty_alpha_node", type=float, default=0.0,
+                   help="Weight for node_penalty. 0 disables node-level novelty.")
+
+    # Proxy diversity loss
+    p.add_argument("--diversity_weight", type=float, default=0.0,
+                   help="Weight for proxy diversity loss (minimize inter-proxy cosine similarity). 0 disables.")
+
     # Common
+    p.add_argument("--readout_scope", type=str, default="all_tokens", help="all_tokens or nodes_only")
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--lr_min", type=float, default=1e-7,
@@ -399,12 +413,12 @@ def downstream_eval(model, generator, loader, device, args):
 
         # Multi-point proxy path: model handles generation internally
         if getattr(model, 'multi_point_proxy', None) is not None:
-            logits, _ = model(batch)
+            logits, _ = model(batch, readout_scope=args.readout_scope)
         else:
             # Single-point proxy path: generate proxies externally
             proxy_emb, dense_x, dense_mask = generate_proxies(model, generator, batch, args)
             logits, _ = model(batch, proxy_embeddings=proxy_emb,
-                              precomputed_dense=(dense_x, dense_mask))
+                              precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
 
         loss = loss_fn(logits, batch.y)
         losses.append(loss.item())
@@ -463,7 +477,7 @@ def run_stage1(args):
         for batch in train_loader:
             batch = batch.to(args.device)
             optimizer.zero_grad()
-            logits, _ = model(batch)
+            logits, _ = model(batch, readout_scope=args.readout_scope)
             loss = loss_fn(logits, batch.y)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.s1_grad_clip)
@@ -483,7 +497,7 @@ def run_stage1(args):
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(args.device)
-                logits, _ = model(batch)
+                logits, _ = model(batch, readout_scope=args.readout_scope)
                 val_losses.append(loss_fn(logits, batch.y).item())
                 val_preds.append(torch.sigmoid(logits).cpu().numpy())
                 val_labels.append(batch.y.cpu().numpy())
@@ -508,7 +522,7 @@ def run_stage1(args):
             with torch.no_grad():
                 for batch in test_loader:
                     batch = batch.to(args.device)
-                    logits, _ = model(batch)
+                    logits, _ = model(batch, readout_scope=args.readout_scope)
                     test_preds.append(torch.sigmoid(logits).cpu().numpy())
                     test_labels.append(batch.y.cpu().numpy())
             test_ap = compute_macro_ap(
@@ -562,7 +576,7 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
 
     # Base predictions (no proxies)
     with torch.no_grad():
-        base_logits, _ = model(batch, precomputed_dense=(dense_x, dense_mask))
+        base_logits, _ = model(batch, precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
         base_loss = _per_sample_bce(base_logits, batch.y)
         base_correct = _count_correct(base_logits, batch.y)
 
@@ -576,7 +590,7 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
     for step in range(args.s2_num_steps):
         opt.zero_grad()
         logits, _ = model(batch, proxy_embeddings=proxy,
-                          precomputed_dense=(dense_x, dense_mask))
+                          precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
         task_loss = _per_sample_bce(logits, batch.y)
 
         # Per-graph MMD regularization
@@ -722,7 +736,7 @@ def run_stage2(args, model_path):
             # Collect predictions for AP logging (using best proxies)
             with torch.no_grad():
                 best_logits, _ = model(batch, proxy_embeddings=best_proxy,
-                                       precomputed_dense=(dense_x, dense_mask))
+                                       precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
                 ap_preds.append(torch.sigmoid(best_logits).cpu().numpy())
                 ap_labels.append(batch.y.cpu().numpy())
 
@@ -934,7 +948,7 @@ def run_stage3(args, model_path, proxy_pairs_path):
             else:
                 # PMA has no reconstruction loss — fall back to downstream task loss
                 logits, _ = model(pyg_batch, proxy_embeddings=proxy_emb,
-                                  precomputed_dense=(encoder_embs, emb_masks))
+                                  precomputed_dense=(encoder_embs, emb_masks), readout_scope=args.readout_scope)
                 train_loss = nn.functional.binary_cross_entropy_with_logits(
                     logits, pyg_batch.y)
 
@@ -1030,6 +1044,12 @@ def run_stage4(args, model_path, generator_path):
     print("STAGE 4: End-to-End Finetune", flush=True)
     print(f"  LR transformer={args.s4_lr_transformer}, "
           f"LR generator={args.s4_lr_generator}", flush=True)
+    if args.novelty_alpha > 0 or args.novelty_alpha_node > 0:
+        print(f"  Novelty loss: alpha={args.novelty_alpha}, "
+              f"alpha_node={args.novelty_alpha_node}, "
+              f"temperature={args.novelty_temperature}", flush=True)
+    if args.diversity_weight > 0:
+        print(f"  Diversity loss: weight={args.diversity_weight}", flush=True)
     print("=" * 60, flush=True)
 
     train_loader, val_loader, test_loader, _, _, _ = get_loaders(
@@ -1084,6 +1104,7 @@ def run_stage4(args, model_path, generator_path):
     )
 
     loss_fn = nn.BCEWithLogitsLoss()
+    use_novelty = args.novelty_alpha > 0 or args.novelty_alpha_node > 0
 
     best_val_ap = 0.0
     best_epoch = -1
@@ -1098,6 +1119,9 @@ def run_stage4(args, model_path, generator_path):
         generator.train()
         train_losses = []
         all_preds, all_labels = [], []
+        novelty_losses_log = []
+        diversity_losses_log = []
+        inter_proxy_cosine_log = []
 
         for batch in train_loader:
             batch = batch.to(args.device)
@@ -1105,15 +1129,32 @@ def run_stage4(args, model_path, generator_path):
 
             # Multi-point proxy path: model handles generation internally
             if getattr(model, 'multi_point_proxy', None) is not None:
-                logits, _ = model(batch)
-                loss = loss_fn(logits, batch.y)
-                # Optionally add auxiliary loss from multi-point proxy
+                logits, _ = model(batch, readout_scope=args.readout_scope)
+                task_loss = loss_fn(logits, batch.y)
+                loss = task_loss
+
+                # Novelty loss for multi-point path
+                if use_novelty:
+                    with torch.no_grad():
+                        logits_without, _ = model(batch, disable_proxy_injection=True, readout_scope=args.readout_scope)
+                    # Extract node embeddings with and without proxies
+                    # Note: This requires a forward pass, which we'll need to refactor
+                    # For now, we'll skip detailed node embeddings for multi-point
+                    node_penalty_term = torch.tensor(0.0, device=batch.y.device)
+                    output_penalty_term = torch.sigmoid(logits) - torch.sigmoid(logits_without)
+                    output_penalty_term = output_penalty_term.pow(2).mean()
+                    novelty_component = (args.novelty_alpha * output_penalty_term +
+                                        args.novelty_alpha_node * node_penalty_term)
+                    loss = loss + novelty_component
+                    novelty_losses_log.append(novelty_component.item())
+
+                # Aux loss from multi-point proxy
                 aux_loss = getattr(model, '_last_mp_aux_loss', None)
                 if aux_loss is not None:
                     if not isinstance(aux_loss, torch.Tensor):
                         aux_loss = torch.tensor(aux_loss, device=batch.x.device)
-                    # aux_loss is already weighted by decay factors; add it
                     loss = loss + aux_loss
+
             else:
                 # Single-point proxy path: generate proxies externally
                 # Encode once
@@ -1137,10 +1178,48 @@ def run_stage4(args, model_path, generator_path):
 
                 # Forward through transformer with proxies
                 logits, _ = model(batch, proxy_embeddings=proxy_emb,
-                                  precomputed_dense=(dense_x, dense_mask))
+                                  precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
 
-                # Task loss only — no proxy matching loss
-                loss = loss_fn(logits, batch.y)
+                # Task loss
+                task_loss = loss_fn(logits, batch.y)
+                loss = task_loss
+
+                # Novelty loss: requires forward without proxies
+                if use_novelty:
+                    with torch.no_grad():
+                        logits_without, _ = model(batch, precomputed_dense=(dense_x, dense_mask),
+                                                   disable_proxy_injection=True, readout_scope=args.readout_scope)
+                        # Get node embeddings without proxies
+                        node_emb_without = model.layers[-1].output if hasattr(model.layers[-1], 'output') else None
+
+                    # Compute novelty loss with the novelty_loss function
+                    batch_mask = _dense_mask_to_batch_vec(dense_mask)
+                    node_emb_with = model.layers[-1].output if hasattr(model.layers[-1], 'output') else None
+
+                    novelty_component = novelty_loss(
+                        task_loss=task_loss,
+                        logits_with=logits,
+                        logits_without=logits_without,
+                        node_emb_with=node_emb_with,
+                        node_emb_without=node_emb_without,
+                        mask=batch_mask,
+                        alpha=args.novelty_alpha,
+                        alpha_node=args.novelty_alpha_node,
+                        temperature=args.novelty_temperature,
+                    )
+                    loss = loss + novelty_component
+                    novelty_losses_log.append(novelty_component.item())
+
+                # Proxy diversity loss
+                if args.diversity_weight > 0:
+                    diversity_component = proxy_diversity_loss(proxy_emb)
+                    loss = loss + args.diversity_weight * diversity_component
+                    diversity_losses_log.append(diversity_component.item())
+
+                # Log inter-proxy cosine stats
+                with torch.no_grad():
+                    cosine_stats = inter_proxy_cosine_stats(proxy_emb)
+                    inter_proxy_cosine_log.append(cosine_stats)
 
             loss.backward()
             nn.utils.clip_grad_norm_(
@@ -1172,13 +1251,30 @@ def run_stage4(args, model_path, generator_path):
             mem_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
             mem_str = f" mem={mem_mb:.0f}MB"
             torch.cuda.reset_peak_memory_stats()
-        print(
-            f"Epoch {epoch:3d}/{args.s4_max_epochs} [{elapsed:.1f}s{mem_str}] | "
-            f"train_loss={train_loss:.4f} train_AP={train_ap:.4f} | "
-            f"val_loss={val_loss:.4f} val_AP={val_ap:.4f} | "
-            f"test_AP={test_ap:.4f}",
-            flush=True,
-        )
+
+        # Build log message
+        log_line = (f"Epoch {epoch:3d}/{args.s4_max_epochs} [{elapsed:.1f}s{mem_str}] | "
+                    f"train_loss={train_loss:.4f} train_AP={train_ap:.4f} | "
+                    f"val_loss={val_loss:.4f} val_AP={val_ap:.4f} | "
+                    f"test_AP={test_ap:.4f}")
+
+        # Add novelty loss to log if it was computed
+        if novelty_losses_log:
+            avg_novelty = float(np.mean(novelty_losses_log))
+            log_line += f" | novelty_loss={avg_novelty:.4f}"
+
+        # Add diversity loss to log if it was computed
+        if diversity_losses_log:
+            avg_diversity = float(np.mean(diversity_losses_log))
+            log_line += f" | diversity_loss={avg_diversity:.4f}"
+
+        # Add inter-proxy cosine stats to log if available
+        if inter_proxy_cosine_log:
+            avg_cosine_mean = np.mean([s['mean'] for s in inter_proxy_cosine_log])
+            avg_cosine_std = np.mean([s['std'] for s in inter_proxy_cosine_log])
+            log_line += f" | inter_proxy_cosine_mean={avg_cosine_mean:.4f} std={avg_cosine_std:.4f}"
+
+        print(log_line, flush=True)
 
         # Early stopping on val AP
         if val_ap > best_val_ap:

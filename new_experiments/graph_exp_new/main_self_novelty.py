@@ -46,7 +46,7 @@ from generators import (
     MultiPointProxyWrapper,
 )
 from metrics import compute_macro_ap
-from losses import novelty_loss, inter_proxy_cosine_stats
+from losses import novelty_loss, inter_proxy_cosine_stats, proxy_diversity_loss
 from optim_utils import (
     build_grouped_optimizer_and_scheduler,
     build_warmup_cosine_scheduler,
@@ -135,6 +135,10 @@ def build_parser():
                    help="Weight for node_penalty = 2 - node_novelty. "
                         "Set 0 to disable node-level novelty.")
 
+    # Proxy diversity loss
+    p.add_argument("--diversity_weight", type=float, default=0.0,
+                   help="Weight for proxy diversity loss (minimize inter-proxy cosine similarity). 0 disables.")
+
     # Generator architecture
     p.add_argument("--gen_hidden_dim", type=int, default=256)
     p.add_argument("--gen_num_layers", type=int, default=4)
@@ -179,6 +183,7 @@ def build_parser():
     p.add_argument("--proxy_aux_loss_decay", type=float, default=1.0)
 
     # Common
+    p.add_argument("--readout_scope", type=str, default="all_tokens", help="all_tokens or nodes_only")
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--lr_min", type=float, default=1e-7)
@@ -391,16 +396,16 @@ def _forward_with_proxies(model, batch, dist_masks, node_masks,
     if mp_mode:
         if args.backbone == "vanilla_gt":
             logits, node_emb = model(
-                batch, precomputed_dense=(dense_x, dense_mask)
-            )
+                batch, precomputed_dense=(dense_x, dense_mask),
+                readout_scope=args.readout_scope)
         elif args.backbone == "hybrid":
             logits, node_emb = model(
                 batch, dist_masks, node_masks,
                 precomputed_dense=(dense_x, dense_mask),
                 precomputed_gred=gred_h,
-            )
+                readout_scope=args.readout_scope)
         elif args.backbone == "gred":
-            logits, node_emb = model(batch, dist_masks, node_masks)
+            logits, node_emb = model(batch, dist_masks, node_masks, readout_scope=args.readout_scope)
         aux = getattr(model, "_last_mp_aux_loss", None)
         if aux is not None and not isinstance(aux, torch.Tensor):
             aux = torch.tensor(float(aux), device=dense_x.device)
@@ -409,17 +414,17 @@ def _forward_with_proxies(model, batch, dist_masks, node_masks,
             logits, node_emb = model(
                 batch, proxy_embeddings=proxies,
                 precomputed_dense=(dense_x, dense_mask),
-            )
+                readout_scope=args.readout_scope)
         elif args.backbone == "hybrid":
             logits, node_emb = model(
                 batch, dist_masks, node_masks,
                 proxy_embeddings=proxies,
                 precomputed_dense=(dense_x, dense_mask),
                 precomputed_gred=gred_h,
-            )
+                readout_scope=args.readout_scope)
         elif args.backbone == "gred":
             # Standalone GRED has no proxy path; fall through.
-            logits, node_emb = model(batch, dist_masks, node_masks)
+            logits, node_emb = model(batch, dist_masks, node_masks, readout_scope=args.readout_scope)
         aux = None
     return logits, node_emb, aux
 
@@ -432,16 +437,16 @@ def _forward_without_proxies(model, batch, dist_masks, node_masks,
             batch,
             precomputed_dense=(dense_x, dense_mask),
             disable_proxy_injection=True,
-        )
+            readout_scope=args.readout_scope)
     elif args.backbone == "hybrid":
         logits, node_emb = model(
             batch, dist_masks, node_masks,
             precomputed_dense=(dense_x, dense_mask),
             precomputed_gred=gred_h,
             disable_proxy_injection=True,
-        )
+            readout_scope=args.readout_scope)
     elif args.backbone == "gred":
-        logits, node_emb = model(batch, dist_masks, node_masks)
+        logits, node_emb = model(batch, dist_masks, node_masks, readout_scope=args.readout_scope)
     return logits, node_emb
 
 
@@ -557,9 +562,9 @@ def run_stage1(args):
 
             optimizer.zero_grad()
             if args.backbone == "vanilla_gt":
-                logits, _ = model(batch)
+                logits, _ = model(batch, readout_scope=args.readout_scope)
             else:
-                logits, _ = model(batch, dist_masks, node_masks)
+                logits, _ = model(batch, dist_masks, node_masks, readout_scope=args.readout_scope)
             loss = loss_fn(logits, batch.y)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.s1_grad_clip)
@@ -586,9 +591,9 @@ def run_stage1(args):
                     batch = batch_data.to(args.device)
                     dist_masks = node_masks = None
                 if args.backbone == "vanilla_gt":
-                    logits, _ = model(batch)
+                    logits, _ = model(batch, readout_scope=args.readout_scope)
                 else:
-                    logits, _ = model(batch, dist_masks, node_masks)
+                    logits, _ = model(batch, dist_masks, node_masks, readout_scope=args.readout_scope)
                 val_losses.append(loss_fn(logits, batch.y).item())
                 val_preds.append(torch.sigmoid(logits).cpu().numpy())
                 val_labels.append(batch.y.cpu().numpy())
@@ -695,6 +700,7 @@ def run_stage2(args, model_path):
         train_node_novelty = []
         train_output_penalty = []
         train_node_penalty = []
+        train_diversity_loss = []
         inter_proxy_mean = []
         inter_proxy_std = []
 
@@ -760,6 +766,13 @@ def run_stage2(args, model_path):
                 temperature=args.novelty_temperature,
             )
 
+            # Proxy diversity loss
+            if args.diversity_weight > 0 and proxies is not None:
+                div_loss = proxy_diversity_loss(proxies)
+                total = total + args.diversity_weight * div_loss
+            else:
+                div_loss = torch.tensor(0.0, device=total.device)
+
             # Aux loss from generator (e.g. graph_coarsening orthogonality)
             if aux_loss is not None:
                 total = total + aux_loss
@@ -784,6 +797,7 @@ def run_stage2(args, model_path):
             if "node_novelty" in metrics:
                 train_node_novelty.append(metrics["node_novelty"].item())
                 train_node_penalty.append(metrics["node_penalty"].item())
+            train_diversity_loss.append(div_loss.item())
 
             if proxies is not None:
                 mean_s, std_s = inter_proxy_cosine_stats(proxies)
@@ -796,6 +810,7 @@ def run_stage2(args, model_path):
         mean_out_pen = float(np.mean(train_output_penalty))
         mean_node_nov = float(np.mean(train_node_novelty)) if train_node_novelty else float("nan")
         mean_node_pen = float(np.mean(train_node_penalty)) if train_node_penalty else float("nan")
+        mean_div_loss = float(np.mean(train_diversity_loss)) if train_diversity_loss else float("nan")
         mean_ip = float(np.mean(inter_proxy_mean)) if inter_proxy_mean else float("nan")
         std_ip = float(np.mean(inter_proxy_std)) if inter_proxy_std else float("nan")
 
@@ -814,6 +829,7 @@ def run_stage2(args, model_path):
                 f"total={mean_total:.4f} task={mean_task:.4f} | "
                 f"out_nov={mean_out_nov:.4f} out_pen={mean_out_pen:.4f} | "
                 f"node_nov={mean_node_nov:.4f} node_pen={mean_node_pen:.4f} | "
+                f"div_loss={mean_div_loss:.4f} | "
                 f"ip_mean={mean_ip:.4f} ip_std={std_ip:.4f} | "
                 f"val_AP={val_ap:.4f} test_AP={test_ap:.4f}",
                 flush=True,
@@ -824,6 +840,7 @@ def run_stage2(args, model_path):
                 "total_loss": mean_total, "task_loss": mean_task,
                 "output_novelty": mean_out_nov, "output_penalty": mean_out_pen,
                 "node_novelty": mean_node_nov, "node_penalty": mean_node_pen,
+                "diversity_loss": mean_div_loss,
                 "inter_proxy_cos_mean": mean_ip, "inter_proxy_cos_std": std_ip,
                 "val_ap": val_ap, "test_ap": test_ap,
             })
@@ -936,6 +953,7 @@ def run_stage3(args, model_path, generator_path):
         train_task_losses, train_total_losses = [], []
         train_output_novelty, train_output_penalty = [], []
         train_node_novelty, train_node_penalty = [], []
+        train_diversity_loss = []
         inter_proxy_mean, inter_proxy_std = [], []
         all_preds, all_labels = [], []
 
@@ -995,6 +1013,14 @@ def run_stage3(args, model_path, generator_path):
                 alpha_node=args.novelty_alpha_node,
                 temperature=args.novelty_temperature,
             )
+
+            # Proxy diversity loss
+            if args.diversity_weight > 0 and proxies is not None:
+                div_loss = proxy_diversity_loss(proxies)
+                total = total + args.diversity_weight * div_loss
+            else:
+                div_loss = torch.tensor(0.0, device=total.device)
+
             if aux_loss is not None:
                 total = total + aux_loss
             if mp_aux is not None:
@@ -1020,6 +1046,7 @@ def run_stage3(args, model_path, generator_path):
             if "node_novelty" in metrics:
                 train_node_novelty.append(metrics["node_novelty"].item())
                 train_node_penalty.append(metrics["node_penalty"].item())
+            train_diversity_loss.append(div_loss.item())
             if proxies is not None:
                 m_s, s_s = inter_proxy_cosine_stats(proxies)
                 inter_proxy_mean.append(m_s.item())
@@ -1035,6 +1062,7 @@ def run_stage3(args, model_path, generator_path):
         mean_out_pen = float(np.mean(train_output_penalty))
         mean_node_nov = float(np.mean(train_node_novelty)) if train_node_novelty else float("nan")
         mean_node_pen = float(np.mean(train_node_penalty)) if train_node_penalty else float("nan")
+        mean_div_loss = float(np.mean(train_diversity_loss)) if train_diversity_loss else float("nan")
         mean_ip = float(np.mean(inter_proxy_mean)) if inter_proxy_mean else float("nan")
         std_ip = float(np.mean(inter_proxy_std)) if inter_proxy_std else float("nan")
 
@@ -1051,6 +1079,7 @@ def run_stage3(args, model_path, generator_path):
             f"total={mean_total:.4f} task={mean_task:.4f} train_AP={train_ap:.4f} | "
             f"out_nov={mean_out_nov:.4f} out_pen={mean_out_pen:.4f} | "
             f"node_nov={mean_node_nov:.4f} node_pen={mean_node_pen:.4f} | "
+            f"div_loss={mean_div_loss:.4f} | "
             f"ip_mean={mean_ip:.4f} ip_std={std_ip:.4f} | "
             f"val_AP={val_ap:.4f} test_AP={test_ap:.4f}",
             flush=True,
@@ -1061,6 +1090,7 @@ def run_stage3(args, model_path, generator_path):
             "total_loss": mean_total, "task_loss": mean_task, "train_ap": train_ap,
             "output_novelty": mean_out_nov, "output_penalty": mean_out_pen,
             "node_novelty": mean_node_nov, "node_penalty": mean_node_pen,
+            "diversity_loss": mean_div_loss,
             "inter_proxy_cos_mean": mean_ip, "inter_proxy_cos_std": std_ip,
             "val_ap": val_ap, "test_ap": test_ap,
         })
@@ -1114,4 +1144,3 @@ if __name__ == "__main__":
             raise ValueError("Stage 3 requires both --model_path and --generator_path "
                              "(or run stages 1 and 2 first).")
         run_stage3(args, model_path, generator_path)
-
