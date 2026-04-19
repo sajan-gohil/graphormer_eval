@@ -136,7 +136,7 @@ def build_parser():
                         "Set 0 to disable node-level novelty.")
 
     # Proxy diversity loss
-    p.add_argument("--diversity_weight", type=float, default=0.0,
+    p.add_argument("--diversity_weight", type=float, default=1.0,
                    help="Weight for proxy diversity loss (minimize inter-proxy cosine similarity). 0 disables.")
 
     # Generator architecture

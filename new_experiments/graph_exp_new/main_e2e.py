@@ -58,7 +58,7 @@ def build_parser():
     p.add_argument("--dropout", type=float, default=0.3)
 
     # Laplacian positional encoding
-    p.add_argument("--use_lap_pe", action=argparse.BooleanOptionalAction, default=True,
+    p.add_argument("--use_lap_pe", action="store_true", default=False,
                    help="Add Laplacian eigenvector positional encodings to node features")
     p.add_argument("--lap_pe_dim", type=int, default=32,
                    help="Number of Laplacian eigenvectors for positional encoding")
@@ -673,8 +673,8 @@ def run_e2e(args):
             if args.diversity_weight > 0 and proxy_emb is not None:
                 train_diversity_losses.append(proxy_diversity_loss(proxy_emb).item())
                 mean_cos, std_cos = inter_proxy_cosine_stats(proxy_emb)
-                train_inter_proxy_means.append(mean_cos)
-                train_inter_proxy_stds.append(std_cos)
+                train_inter_proxy_means.append(mean_cos.cpu())
+                train_inter_proxy_stds.append(std_cos.cpu())
 
             all_train_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
             all_train_labels.append(batch.y.cpu().numpy())
