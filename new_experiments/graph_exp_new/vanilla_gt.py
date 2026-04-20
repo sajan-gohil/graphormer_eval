@@ -8,7 +8,7 @@ from torch_geometric.nn import global_mean_pool
 from torch_geometric.utils import degree
 from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
 from torchmetrics.classification import MultilabelAveragePrecision
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 from torch_geometric.utils import scatter
 import numpy as np
 
@@ -59,16 +59,18 @@ class MultiHeadAttentionLayer(torch.nn.Module):
         self.layer_norm = torch.nn.LayerNorm(hidden_dim)
         self.layer_norm_2 = torch.nn.LayerNorm(hidden_dim)
 
-    def forward(self, x):
+    def forward(self, x, xk=None):
         if len(x.shape) < 3:
             x = x.unsqueeze(0)
+            if xk:
+                xk = xk.unsqueeze(0)
+        if xk is None:xk = x
         batch_size = x.shape[0]
-        num_nodes = x.shape[1]
         residual = x
         x = self.layer_norm(x)
-        q = self.wq(x).reshape(batch_size, num_nodes, self.num_heads, self.hidden_dim//self.num_heads).transpose(-3, -2)
-        k = self.wk(x).reshape(batch_size, num_nodes, self.num_heads, self.hidden_dim//self.num_heads).transpose(-3, -2)
-        v = self.wv(x).reshape(batch_size, num_nodes, self.num_heads, self.hidden_dim//self.num_heads).transpose(-3, -2)
+        q = self.wq(x).reshape(batch_size, x.shape[1], self.num_heads, self.hidden_dim//self.num_heads).transpose(-3, -2)
+        k = self.wk(xk).reshape(batch_size, xk.shape[1], self.num_heads, self.hidden_dim//self.num_heads).transpose(-3, -2)
+        v = self.wv(xk).reshape(batch_size, xk.shape[1], self.num_heads, self.hidden_dim//self.num_heads).transpose(-3, -2)
         qk = torch.matmul(q, k.transpose(-2, -1))/torch.sqrt(torch.tensor(self.hidden_dim))
         qk = torch.nn.functional.softmax(qk, dim=-1)
         qkv = torch.matmul(qk, v)
@@ -94,21 +96,60 @@ class MultiHeadAttention(torch.nn.Module):
             torch.nn.Linear(hidden_dim//2, output_dim),
         )
 
-    def forward(self, batch):
+    def attend_proxies(self, generator, dense_x, dense_mask):    
+        proxies = generator(dense_x)
+        # x-> proxies @ proxies -> x
+        node_proxy_matmul = torch.matmul(dense_x, proxies.transpose(-2, -1))
+        node_proxy_z = torch.nn.functional.softmax(node_proxy_matmul, dim=-1)  # N,M
+        proxy_node_z = torch.nn.functional.softmax(node_proxy_matmul.transpose(-2, -1), dim=-1)  # M,N
+        # attn_score = torch.matmul(node_proxy_z, proxy_node_z)  # N,N
+        # out_val = torch.matmul(attn_score, dense_x)  # N,d
+        out_val = torch.matmul(node_proxy_z, torch.matmul(proxy_node_z, dense_x))
+        return proxies, out_val
+
+    def forward(self, batch, generators=None):
+        if not generators: generators = {}
         x, edge_index, edge_attr, batch_map = batch.x, batch.edge_index, batch.edge_attr, batch.batch
         x = self.encoder(batch.x, batch.edge_index, batch.edge_attr)
         dense_x, dense_mask = torch_geometric.utils.to_dense_batch(x, batch.batch)
-        for layer in self.layers:
+        if 0 in generators:
+            proxies, dense_x = self.attend_proxies(generators[0], dense_x, dense_mask)
+        for layer_idx, layer in enumerate(self.layers):
+            if layer_idx+1 in generators:
+                proxies, dense_x = self.attend_proxies(generators[layer_idx+1], dense_x, dense_mask)
             attn_scores, dense_x = layer(dense_x)
+
         node_embeddings = dense_x[dense_mask]
         pooled = torch_geometric.nn.global_mean_pool(node_embeddings, batch.batch)
         outputs = self.final(pooled)
         return outputs, node_embeddings
 
 
+class ScoreBasedGenerator(torch.nn.Module):
+    def __init__(self, hidden_dim=512, num_proxies=16):
+        super().__init__()
+        self.squeeze = torch.nn.Sequential(
+            torch.nn.Linear(hidden_dim, hidden_dim//2),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim//2, num_proxies),
+        )
+
+    def forward(self, x):
+        score_logits = self.squeeze(x)  # B, N, d -> B, N, M
+        scores = torch.nn.functional.softmax(score_logits, dim=1)
+        proxies = torch.bmm(scores.transpose(-1, -2), x)  # M,N @ N,d
+        return proxies
+
+
 model = MultiHeadAttention()
 model.to("cuda" if torch.cuda.is_available() else "cpu")
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-5)
+generators = {idx: ScoreBasedGenerator() for idx in range(4)}
+generator_params = []
+for k,v in generators.items():
+    v.to("cuda" if torch.cuda.is_available() else "cpu")
+    generator_params.append({"params": v.parameters(), "lr": 3e-5})
+
+optimizer = torch.optim.AdamW([{"params": model.parameters(), "lr": 3e-5}]+generator_params)
 loss_function = torch.nn.BCEWithLogitsLoss()
 metric = MultilabelAveragePrecision(num_labels=10)
 
@@ -130,7 +171,7 @@ for epoch in range(500):
     for batch in tqdm(train_loader, desc="Train set"):
         batch.to("cuda" if torch.cuda.is_available() else "cpu")
         optimizer.zero_grad()
-        outputs, node_embeddings = model(batch)
+        outputs, node_embeddings = model(batch, generators)
         loss = loss_function(outputs, batch.y)
         loss.backward()
         optimizer.step()
@@ -143,7 +184,7 @@ for epoch in range(500):
     with torch.inference_mode():
         for batch in tqdm(val_loader, desc="Val set"):
             batch.to("cuda" if torch.cuda.is_available() else "cpu")
-            outputs, node_embeddings = model(batch)
+            outputs, node_embeddings = model(batch, generators)
             loss = loss_function(outputs, batch.y)
             metric.update(torch.nn.functional.sigmoid(outputs), batch.y.long())
             epoch_val_losses.append(loss.item())
@@ -154,7 +195,7 @@ for epoch in range(500):
     with torch.inference_mode():
         for batch in tqdm(test_loader, desc="Test set"):
             batch.to("cuda" if torch.cuda.is_available() else "cpu")
-            outputs, node_embeddings = model(batch)
+            outputs, node_embeddings = model(batch, generators)
             loss = loss_function(outputs, batch.y)
             metric.update(torch.nn.functional.sigmoid(outputs), batch.y.long())
             epoch_test_losses.append(loss.item())
