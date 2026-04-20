@@ -561,10 +561,18 @@ def run_stage1(args):
                 dist_masks = node_masks = None
 
             optimizer.zero_grad()
+            with torch.no_grad():  # Random proxies
+                # proxy shape = (B, M, d). B = number of unique graphs in batch
+                proxy_batch_size = batch.num_graphs
+                proxies = torch.randn(proxy_batch_size, args.num_proxies, args.hidden_dim).to(args.device)
+                if np.random.rand() < 0.5:
+                    proxies = None
+
             if args.backbone == "vanilla_gt":
-                logits, _ = model(batch, readout_scope=args.readout_scope)
+                logits, _ = model(batch, readout_scope=args.readout_scope, proxy_embeddings=proxies)
             else:
-                logits, _ = model(batch, dist_masks, node_masks, readout_scope=args.readout_scope)
+                logits, _ = model(batch, dist_masks, node_masks, readout_scope=args.readout_scope, proxy_embeddings=proxies)
+
             loss = loss_fn(logits, batch.y)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.s1_grad_clip)
@@ -816,7 +824,7 @@ def run_stage2(args, model_path):
 
         if epoch % args.s2_eval_every == 0:
             val_ap, val_loss = downstream_eval(model, generator, val_loader, args.device, args)
-            test_ap, _ = downstream_eval(model, generator, test_loader, args.device, args)
+            test_ap, test_loss = downstream_eval(model, generator, test_loader, args.device, args)
 
             elapsed = time.time() - t0
             mem = ""
@@ -829,9 +837,9 @@ def run_stage2(args, model_path):
                 f"total={mean_total:.4f} task={mean_task:.4f} | "
                 f"out_nov={mean_out_nov:.4f} out_pen={mean_out_pen:.4f} | "
                 f"node_nov={mean_node_nov:.4f} node_pen={mean_node_pen:.4f} | "
-                f"div_loss={mean_div_loss:.4f} | "
                 f"ip_mean={mean_ip:.4f} ip_std={std_ip:.4f} | "
-                f"val_AP={val_ap:.4f} test_AP={test_ap:.4f}",
+                f"val_loss={val_loss:.4f} val_AP={val_ap:.4f} | "
+                f"test_loss={test_loss:.4f} test_AP={test_ap:.4f}",
                 flush=True,
             )
 
@@ -1067,7 +1075,7 @@ def run_stage3(args, model_path, generator_path):
         std_ip = float(np.mean(inter_proxy_std)) if inter_proxy_std else float("nan")
 
         val_ap, val_loss = downstream_eval(model, generator, val_loader, args.device, args)
-        test_ap, _ = downstream_eval(model, generator, test_loader, args.device, args)
+        test_ap, test_loss = downstream_eval(model, generator, test_loader, args.device, args)
 
         elapsed = time.time() - t0
         mem = ""
@@ -1079,9 +1087,9 @@ def run_stage3(args, model_path, generator_path):
             f"total={mean_total:.4f} task={mean_task:.4f} train_AP={train_ap:.4f} | "
             f"out_nov={mean_out_nov:.4f} out_pen={mean_out_pen:.4f} | "
             f"node_nov={mean_node_nov:.4f} node_pen={mean_node_pen:.4f} | "
-            f"div_loss={mean_div_loss:.4f} | "
             f"ip_mean={mean_ip:.4f} ip_std={std_ip:.4f} | "
-            f"val_AP={val_ap:.4f} test_AP={test_ap:.4f}",
+            f"val_loss={val_loss:.4f} val_AP={val_ap:.4f} | "
+            f"test_loss={test_loss:.4f} test_AP={test_ap:.4f}",
             flush=True,
         )
 

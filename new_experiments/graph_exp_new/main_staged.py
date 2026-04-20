@@ -93,6 +93,8 @@ def build_parser():
                    help="Weight for fixed-prior moment regularization")
     p.add_argument("--s2_prior_target_var", type=float, default=-1.0,
                    help="Target variance for prior loss; <=0 estimates from train embeddings")
+    p.add_argument("--s2_novelty_alpha", type=float, default=0.5,
+                   help="Weight for output-level novelty penalty in stage 2 proxy optimization")
     p.add_argument("--s2_num_restarts", type=int, default=50)
     p.add_argument("--s2_grad_clip", type=float, default=1.0)
     p.add_argument("--s2_loss_threshold", type=float, default=0.01,
@@ -559,12 +561,30 @@ def run_stage1(args):
 # STAGE 2 — OPTIMIZE PROXY EMBEDDINGS
 # ================================================================
 
+def _per_sample_output_novelty(logits_with, logits_without, temperature=1.0):
+    """Per-sample L2 novelty between sigmoid outputs, normalized by sqrt(C).
+
+    Returns (B,) tensor of novelty values in [0, 1].
+    """
+    p_with = torch.sigmoid(logits_with / temperature)
+    p_without = torch.sigmoid(logits_without / temperature)
+    diff = p_with - p_without                       # (B, C)
+    C = diff.shape[-1]
+    per_sample = torch.norm(diff, p=2, dim=-1) / (C ** 0.5)  # (B,)
+    return per_sample
+
+
 def _optimize_batch(model, batch, dense_x, dense_mask, args,
                     init_proxy=None):
     """
     Optimize proxy embeddings for a batch of graphs.
     Returns per-graph: best_proxy, base_loss, best_loss, base_correct,
-                       best_correct, best_mmd, best_cross, best_prior.
+                       best_correct, best_mmd, best_cross, best_prior,
+                       best_novelty, best_composite.
+
+    The saving criterion is the composite score:
+        composite = mean(task_loss, novelty_penalty, prior_moment_loss)
+    where novelty_penalty = 1 - output_novelty.
     """
     B = batch.y.size(0)
     device = batch.y.device
@@ -586,6 +606,10 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
     best_mmd = torch.full((B,), float("inf"), device=device)
     best_cross = torch.full((B,), float("inf"), device=device)
     best_prior = torch.full((B,), float("inf"), device=device)
+    best_novelty = torch.full((B,), float("inf"), device=device)
+    best_composite = torch.full((B,), float("inf"), device=device)
+
+    s2_novelty_alpha = getattr(args, 's2_novelty_alpha', 0.0)
 
     for step in range(args.s2_num_steps):
         opt.zero_grad()
@@ -605,24 +629,36 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
         prior_batch = prior_moment_loss(
             proxy, target_variance=args.s2_prior_target_var)
 
+        # Novelty: per-sample output novelty penalty
+        output_novelty = _per_sample_output_novelty(
+            logits, base_logits.detach(),
+            temperature=getattr(args, 'novelty_temperature', 1.0),
+        )
+        novelty_penalty = 1.0 - output_novelty  # (B,) in [0, 1]
+
         total = (
             task_loss
-            + args.s2_mmd_lambda * mmd_batch
+            # + args.s2_mmd_lambda * mmd_batch
             + args.s2_cross_moment_lambda * cross_batch
             + args.s2_prior_moment_lambda * prior_batch
+            + s2_novelty_alpha * novelty_penalty
         ).mean()
         total.backward()
         nn.utils.clip_grad_norm_([proxy], args.s2_grad_clip)
         opt.step()
 
         with torch.no_grad():
-            improved = (task_loss < best_loss) & (mmd_batch < best_mmd)
-            if (improved).any():
+            # Composite score: average of (task_loss, novelty_penalty, prior_loss)
+            composite = (task_loss + novelty_penalty + cross_batch) / 3.0
+            improved = composite < best_composite
+            if improved.any():
+                best_composite[improved] = composite[improved]
                 best_loss[improved] = task_loss[improved]
                 best_proxy[improved] = proxy.detach()[improved]
                 best_mmd[improved] = mmd_batch.detach()[improved]
                 best_cross[improved] = cross_batch.detach()[improved]
                 best_prior[improved] = prior_batch.detach()[improved]
+                best_novelty[improved] = novelty_penalty.detach()[improved]
                 cur_correct = _count_correct(logits, batch.y)
                 best_correct[improved] = cur_correct[improved]
 
@@ -635,6 +671,8 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
         best_mmd,
         best_cross,
         best_prior,
+        best_novelty,
+        best_composite,
     )
 
 
@@ -645,6 +683,9 @@ def run_stage2(args, model_path):
         f"MMD lambda: {args.s2_mmd_lambda}", flush=True)
     print(f"  Cross moment lambda: {args.s2_cross_moment_lambda}, "
         f"Prior moment lambda: {args.s2_prior_moment_lambda}", flush=True)
+    print(f"  Novelty alpha (stage 2): {args.s2_novelty_alpha}", flush=True)
+    print(f"  Saving criterion: lowest avg(task_loss, novelty_penalty, prior_loss)",
+          flush=True)
     print("=" * 60, flush=True)
 
     train_loader, _, _, train_ds, _, _ = get_loaders(
@@ -688,7 +729,8 @@ def run_stage2(args, model_path):
 
             (best_proxy, base_loss, best_loss,
              base_correct, best_correct, best_mmd,
-             best_cross, best_prior) = _optimize_batch(
+             best_cross, best_prior,
+             best_novelty, best_composite) = _optimize_batch(
                 model, batch, dense_x, dense_mask, args)
 
             # Extended optimization for non-improved graphs
@@ -717,7 +759,8 @@ def run_stage2(args, model_path):
 
                 (subset_best_proxy, _, subset_best_loss, _,
                  subset_best_correct, subset_best_mmd,
-                 subset_best_cross, subset_best_prior) = _optimize_batch(
+                 subset_best_cross, subset_best_prior,
+                 subset_best_novelty, subset_best_composite) = _optimize_batch(
                     model,
                     subset_batch,
                     subset_dense_x,
@@ -732,6 +775,8 @@ def run_stage2(args, model_path):
                 best_mmd[subset_mask] = subset_best_mmd
                 best_cross[subset_mask] = subset_best_cross
                 best_prior[subset_mask] = subset_best_prior
+                best_novelty[subset_mask] = subset_best_novelty
+                best_composite[subset_mask] = subset_best_composite
 
             # Collect predictions for AP logging (using best proxies)
             with torch.no_grad():
@@ -762,6 +807,8 @@ def run_stage2(args, model_path):
                         "mmd_loss": float(best_mmd[j]),
                         "cross_moment_loss": float(best_cross[j]),
                         "prior_moment_loss": float(best_prior[j]),
+                        "novelty_loss": float(best_novelty[j]),
+                        "composite_score": float(best_composite[j]),
                         "base_correct": bc,
                         "best_correct": oc,
                         "sample_idx": sid,
@@ -788,26 +835,27 @@ def run_stage2(args, model_path):
         with open(save_path, "wb") as f:
             pickle.dump(proxy_pairs, f)
 
-    # --- MMD-based filtering ---
-    print("\nFiltering by MMD outliers...", flush=True)
-    mmd_values = [p["mmd_loss"] for p in proxy_pairs]
-    if len(mmd_values) > 0:
-        finite_mmd_values = [v for v in mmd_values if np.isfinite(v)]
-        if len(finite_mmd_values) == 0:
-            print("  All MMD values were NaN or infinite; skipping outlier filtering.",
+    # --- Composite-score-based filtering ---
+    # composite_score = avg(task_loss, novelty_penalty, prior_moment_loss)
+    print("\nFiltering by composite score outliers...", flush=True)
+    composite_values = [p["composite_score"] for p in proxy_pairs]
+    if len(composite_values) > 0:
+        finite_values = [v for v in composite_values if np.isfinite(v)]
+        if len(finite_values) == 0:
+            print("  All composite scores were NaN or infinite; skipping outlier filtering.",
                 flush=True)
         else:
-            mmd_mean = float(np.mean(finite_mmd_values))
-            mmd_std = float(np.std(finite_mmd_values))
-            threshold = mmd_mean + 3 * mmd_std
+            comp_mean = float(np.mean(finite_values))
+            comp_std = float(np.std(finite_values))
+            threshold = comp_mean + 3 * comp_std
             before = len(proxy_pairs)
             proxy_pairs = [
                 p for p in proxy_pairs
-                if np.isfinite(p["mmd_loss"]) and p["mmd_loss"] <= threshold
+                if np.isfinite(p["composite_score"]) and p["composite_score"] <= threshold
             ]
             after = len(proxy_pairs)
-            print(f"  MMD mean={mmd_mean:.6f} std={mmd_std:.6f} threshold={threshold:.6f}",
-                flush=True)
+            print(f"  Composite mean={comp_mean:.6f} std={comp_std:.6f} "
+                  f"threshold={threshold:.6f}", flush=True)
             print(f"  Filtered: {before} -> {after} pairs ({before - after} removed)",
                 flush=True)
 
