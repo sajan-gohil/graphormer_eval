@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from data import get_loaders, ProxyTargetDataset, collate_with_proxies
-from models import GraphTransformer
+from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
 from generators import (
     ScoreBasedGenerator, FlowMatchingGenerator, GNNPoolingGenerator,
     PMAGenerator, GraphCoarseningGenerator, CrossAttentionRouter,
@@ -40,6 +40,13 @@ from optim_utils import (
     build_warmup_cosine_scheduler,
 )
 
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message="k >= N for N \\* N square matrix",
+    category=RuntimeWarning
+)
 
 # ================================================================
 # CONFIG
@@ -53,6 +60,11 @@ def build_parser():
     p.add_argument("--generator", type=str, default="score_based",
                    choices=["flow_matching", "score_based", "gnn_pooling",
                             "pma", "graph_coarsening"])
+
+    # Backbone
+    p.add_argument("--backbone", type=str, default="vanilla_gt",
+                   choices=["vanilla_gt", "gred", "hybrid"],
+                   help="Backbone architecture: vanilla_gt, gred, or hybrid")
 
     # Paths (for resuming individual stages)
     p.add_argument("--model_path", type=str, default=None,
@@ -74,6 +86,23 @@ def build_parser():
                    help="Add Laplacian eigenvector positional encodings to node features")
     p.add_argument("--lap_pe_dim", type=int, default=8,
                    help="Number of Laplacian eigenvectors for positional encoding")
+
+    # GRED-specific
+    p.add_argument("--state_dim", type=int, default=88,
+                   help="LRU complex state dimension (GRED/hybrid only)")
+    p.add_argument("--num_gred_layers", type=int, default=8,
+                   help="Number of GRED layers (GRED/hybrid only)")
+    p.add_argument("--num_transformer_layers", type=int, default=2,
+                   help="Number of transformer layers for proxy integration (hybrid only)")
+    p.add_argument("--gred_expand", type=int, default=1,
+                   help="FFN expansion factor for GRED DeepSets MLP")
+    p.add_argument("--r_min", type=float, default=0.0)
+    p.add_argument("--r_max", type=float, default=1.0)
+    p.add_argument("--max_phase", type=float, default=6.28)
+    p.add_argument("--gred_act", type=str, default="full-glu",
+                   choices=["full-glu", "half-glu"])
+    p.add_argument("--max_hops", type=int, default=40)
+    p.add_argument("--dist_mask_workers", type=int, default=8)
 
     # Stage 1
     p.add_argument("--s1_lr", type=float, default=1e-3)
@@ -256,15 +285,43 @@ def _build_multi_point_proxy(args, generator, router):
     )
 
 
-def _build_graph_transformer(args):
-    """Build GraphTransformer with optional cross-attention router."""
-    return GraphTransformer(
-        num_layers=args.num_layers, num_heads=args.num_heads,
-        hidden_dim=args.hidden_dim, output_dim=args.output_dim,
-        dropout=args.dropout,
-        lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
-        cross_attn_router=_build_cross_attn_router(args),
-    )
+def _uses_flat_interface(generator_name):
+    """True for generators that need flat (total_N, d) embeddings + edge_index."""
+    return generator_name in ("graph_coarsening", "gnn_pooling")
+
+
+def build_model(args):
+    """Build backbone model based on --backbone arg."""
+    lap_pe_dim = args.lap_pe_dim if args.use_lap_pe else 0
+    cross_attn_router = _build_cross_attn_router(args)
+    if args.backbone == "vanilla_gt":
+        return GraphTransformer(
+            num_layers=args.num_layers, num_heads=args.num_heads,
+            hidden_dim=args.hidden_dim, output_dim=args.output_dim,
+            dropout=args.dropout, lap_pe_dim=lap_pe_dim,
+            cross_attn_router=cross_attn_router,
+        )
+    elif args.backbone == "gred":
+        return GREDEncoder(
+            hidden_dim=args.hidden_dim, state_dim=args.state_dim,
+            num_layers=args.num_gred_layers, expand=args.gred_expand,
+            r_min=args.r_min, r_max=args.r_max, max_phase=args.max_phase,
+            dropout=args.dropout, act=args.gred_act, output_dim=args.output_dim,
+            lap_pe_dim=lap_pe_dim,
+        )
+    elif args.backbone == "hybrid":
+        return GREDHybridTransformer(
+            hidden_dim=args.hidden_dim, state_dim=args.state_dim,
+            num_gred_layers=args.num_gred_layers,
+            num_transformer_layers=args.num_transformer_layers,
+            num_heads=args.num_heads, expand=args.gred_expand,
+            r_min=args.r_min, r_max=args.r_max, max_phase=args.max_phase,
+            dropout=args.dropout, act=args.gred_act, output_dim=args.output_dim,
+            lap_pe_dim=lap_pe_dim,
+            cross_attn_router=cross_attn_router,
+        )
+    else:
+        raise ValueError(f"Unknown backbone: {args.backbone}")
 
 
 def _freeze(model):
@@ -305,8 +362,11 @@ def _estimate_empirical_proxy_prior_var(model, loader, device):
     sum_x = torch.zeros((), device=device)
     sum_x2 = torch.zeros((), device=device)
 
-    for batch in loader:
-        batch = batch.to(device)
+    for batch_data in loader:
+        if isinstance(batch_data, (tuple, list)):
+            batch = batch_data[0].to(device)
+        else:
+            batch = batch_data.to(device)
         dense_x, dense_mask = model.encode_dense(batch)
         nodes = dense_x[dense_mask]
         if nodes.numel() == 0:
@@ -384,6 +444,31 @@ def build_generator(args):
         raise ValueError(f"Unknown generator: {args.generator}")
 
 
+def _generate_proxies(model, generator, batch, dense_x, dense_mask, args,
+                      gred_h=None):
+    """
+    Generate proxy embeddings for a batch.
+    dense_x and dense_mask must be precomputed (possibly inside no_grad).
+    For hybrid backbone, gred_h provides GRED-encoded features for the generator.
+    Returns proxy_embeddings (B, M, d), aux_loss.
+    """
+    # For hybrid, generators consume GRED-encoded features (topology-aware)
+    gen_input = gred_h if gred_h is not None else dense_x
+    gen_mask = dense_mask
+
+    if _uses_flat_interface(args.generator):
+        flat_emb = gen_input[gen_mask]  # reconstruct flat from dense
+        proxies, aux_loss = generator(
+            flat_emb, mask=None,
+            edge_index=batch.edge_index,
+            batch_vec=batch.batch,
+            edge_attr=getattr(batch, "edge_attr", None),
+        )
+    else:
+        proxies, aux_loss = generator(gen_input, gen_mask)
+    return proxies, aux_loss
+
+
 def generate_proxies(model, generator, batch, args):
     """Generate proxies for a batch. Returns (proxy_emb (B,M,d), dense_x, dense_mask)."""
     dense_x, dense_mask = model.encode_dense(batch)
@@ -406,21 +491,53 @@ def generate_proxies(model, generator, batch, args):
 def downstream_eval(model, generator, loader, device, args):
     """Evaluate generated proxies through frozen transformer. Returns (AP, loss)."""
     model.eval()
-    generator.eval()
+    if generator is not None:
+        generator.eval()
     loss_fn = nn.BCEWithLogitsLoss()
     all_preds, all_labels, losses = [], [], []
+    is_gred = getattr(args, 'backbone', 'vanilla_gt') in ("gred", "hybrid")
 
-    for batch in loader:
-        batch = batch.to(device)
-
-        # Multi-point proxy path: model handles generation internally
-        if getattr(model, 'multi_point_proxy', None) is not None:
-            logits, _ = model(batch, readout_scope=args.readout_scope)
+    for batch_data in loader:
+        if is_gred:
+            batch, dist_masks_batch, node_masks_batch = batch_data
+            batch = batch.to(device)
+            dist_masks_batch = dist_masks_batch.to(device)
+            node_masks_batch = node_masks_batch.to(device)
         else:
-            # Single-point proxy path: generate proxies externally
-            proxy_emb, dense_x, dense_mask = generate_proxies(model, generator, batch, args)
-            logits, _ = model(batch, proxy_embeddings=proxy_emb,
-                              precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
+            batch = batch_data.to(device)
+            dist_masks_batch = None
+            node_masks_batch = None
+
+        # Multi-point proxy path
+        if hasattr(model, 'multi_point_proxy') and model.multi_point_proxy is not None:
+            if args.backbone == "vanilla_gt":
+                logits, _ = model(batch, readout_scope=args.readout_scope)
+            elif args.backbone == "gred":
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
+            elif args.backbone == "hybrid":
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
+        else:
+            # Standard single-point proxy path
+            dense_x, dense_mask = model.encode_dense(batch)
+
+            # For hybrid: run GRED encoding
+            gred_h = None
+            if args.backbone == "hybrid":
+                gred_h = model.encode_gred(dense_x, dist_masks_batch, node_masks_batch)
+
+            proxies, _ = _generate_proxies(
+                model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
+
+            if args.backbone == "vanilla_gt":
+                logits, _ = model(batch, proxy_embeddings=proxies,
+                                  precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
+            elif args.backbone == "gred":
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
+            elif args.backbone == "hybrid":
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch,
+                                  proxy_embeddings=proxies,
+                                  precomputed_dense=(dense_x, dense_mask),
+                                  precomputed_gred=gred_h, readout_scope=args.readout_scope)
 
         loss = loss_fn(logits, batch.y)
         losses.append(loss.item())
@@ -439,15 +556,19 @@ def downstream_eval(model, generator, loader, device, args):
 
 def run_stage1(args):
     print("\n" + "=" * 60, flush=True)
-    print("STAGE 1: Pretrain Graph Transformer", flush=True)
+    print("STAGE 1: Pretrain Model", flush=True)
+    print(f"  Backbone: {args.backbone}", flush=True)
     print("=" * 60, flush=True)
+    is_gred = args.backbone in ("gred", "hybrid")
 
     train_loader, val_loader, test_loader, _, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
+        use_dist_masks=is_gred, max_hops=args.max_hops,
+        dist_mask_workers=args.dist_mask_workers,
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
-    model = _build_graph_transformer(args).to(args.device)
+    model = build_model(args).to(args.device)
 
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
 
@@ -476,10 +597,24 @@ def run_stage1(args):
         train_losses = []
         all_preds, all_labels = [], []
 
-        for batch in train_loader:
-            batch = batch.to(args.device)
+        for batch_data in train_loader:
+            if is_gred:
+                batch, dist_masks_batch, node_masks_batch = batch_data
+                batch = batch.to(args.device)
+                dist_masks_batch = dist_masks_batch.to(args.device)
+                node_masks_batch = node_masks_batch.to(args.device)
+            else:
+                batch = batch_data.to(args.device)
+                dist_masks_batch = None
+                node_masks_batch = None
+
             optimizer.zero_grad()
-            logits, _ = model(batch, readout_scope=args.readout_scope)
+            if args.backbone == "vanilla_gt":
+                logits, _ = model(batch, readout_scope=args.readout_scope)
+            elif args.backbone == "gred":
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
+            elif args.backbone == "hybrid":
+                logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
             loss = loss_fn(logits, batch.y)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.s1_grad_clip)
@@ -497,9 +632,21 @@ def run_stage1(args):
         model.eval()
         val_preds, val_labels, val_losses = [], [], []
         with torch.no_grad():
-            for batch in val_loader:
-                batch = batch.to(args.device)
-                logits, _ = model(batch, readout_scope=args.readout_scope)
+            for batch_data in val_loader:
+                if is_gred:
+                    batch, dist_masks_batch, node_masks_batch = batch_data
+                    batch = batch.to(args.device)
+                    dist_masks_batch = dist_masks_batch.to(args.device)
+                    node_masks_batch = node_masks_batch.to(args.device)
+                else:
+                    batch = batch_data.to(args.device)
+                    dist_masks_batch = None
+                    node_masks_batch = None
+
+                if args.backbone == "vanilla_gt":
+                    logits, _ = model(batch, readout_scope=args.readout_scope)
+                else:
+                    logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
                 val_losses.append(loss_fn(logits, batch.y).item())
                 val_preds.append(torch.sigmoid(logits).cpu().numpy())
                 val_labels.append(batch.y.cpu().numpy())
@@ -522,9 +669,21 @@ def run_stage1(args):
             model.eval()
             test_preds, test_labels = [], []
             with torch.no_grad():
-                for batch in test_loader:
-                    batch = batch.to(args.device)
-                    logits, _ = model(batch, readout_scope=args.readout_scope)
+                for batch_data in test_loader:
+                    if is_gred:
+                        batch, dist_masks_batch, node_masks_batch = batch_data
+                        batch = batch.to(args.device)
+                        dist_masks_batch = dist_masks_batch.to(args.device)
+                        node_masks_batch = node_masks_batch.to(args.device)
+                    else:
+                        batch = batch_data.to(args.device)
+                        dist_masks_batch = None
+                        node_masks_batch = None
+
+                    if args.backbone == "vanilla_gt":
+                        logits, _ = model(batch, readout_scope=args.readout_scope)
+                    else:
+                        logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
                     test_preds.append(torch.sigmoid(logits).cpu().numpy())
                     test_labels.append(batch.y.cpu().numpy())
             test_ap = compute_macro_ap(
@@ -574,8 +733,35 @@ def _per_sample_output_novelty(logits_with, logits_without, temperature=1.0):
     return per_sample
 
 
+def _model_forward_s2(model, batch, dist_masks, node_masks, gred_h,
+                      proxy_embeddings, dense_x, dense_mask, args):
+    """
+    Unified model forward for Stage 2, routing to the correct backbone signature.
+    gred_h is pre-computed GRED-encoded features for hybrid (None otherwise).
+    """
+    backbone = getattr(args, 'backbone', 'vanilla_gt')
+    if backbone == 'vanilla_gt':
+        return model(batch, proxy_embeddings=proxy_embeddings,
+                     precomputed_dense=(dense_x, dense_mask),
+                     readout_scope=args.readout_scope)
+    elif backbone == 'gred':
+        return model(batch, dist_masks, node_masks,
+                     proxy_embeddings=proxy_embeddings,
+                     precomputed_dense=(dense_x, dense_mask),
+                     readout_scope=args.readout_scope)
+    elif backbone == 'hybrid':
+        return model(batch, dist_masks, node_masks,
+                     proxy_embeddings=proxy_embeddings,
+                     precomputed_dense=(dense_x, dense_mask),
+                     precomputed_gred=gred_h,
+                     readout_scope=args.readout_scope)
+    else:
+        raise ValueError(f"Unknown backbone: {backbone}")
+
+
 def _optimize_batch(model, batch, dense_x, dense_mask, args,
-                    init_proxy=None):
+                    init_proxy=None,
+                    dist_masks=None, node_masks=None, gred_h=None):
     """
     Optimize proxy embeddings for a batch of graphs.
     Returns per-graph: best_proxy, base_loss, best_loss, base_correct,
@@ -585,6 +771,10 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
     The saving criterion is the composite score:
         composite = mean(task_loss, novelty_penalty, prior_moment_loss)
     where novelty_penalty = 1 - output_novelty.
+
+    dist_masks, node_masks: required for gred/hybrid backbones.
+    gred_h: precomputed GRED-encoded features (B, max_N, d) for hybrid; avoids
+            re-running GRED layers on every step of the optimizer loop.
     """
     B = batch.y.size(0)
     device = batch.y.device
@@ -596,7 +786,9 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
 
     # Base predictions (no proxies)
     with torch.no_grad():
-        base_logits, _ = model(batch, precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
+        base_logits, _ = _model_forward_s2(
+            model, batch, dist_masks, node_masks, gred_h,
+            None, dense_x, dense_mask, args)
         base_loss = _per_sample_bce(base_logits, batch.y)
         base_correct = _count_correct(base_logits, batch.y)
 
@@ -613,8 +805,9 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
 
     for step in range(args.s2_num_steps):
         opt.zero_grad()
-        logits, _ = model(batch, proxy_embeddings=proxy,
-                          precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
+        logits, _ = _model_forward_s2(
+            model, batch, dist_masks, node_masks, gred_h,
+            proxy, dense_x, dense_mask, args)
         task_loss = _per_sample_bce(logits, batch.y)
 
         # Per-graph MMD regularization
@@ -679,6 +872,7 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
 def run_stage2(args, model_path):
     print("\n" + "=" * 60, flush=True)
     print("STAGE 2: Per-Graph Proxy Optimization", flush=True)
+    print(f"  Backbone: {args.backbone}", flush=True)
     print(f"  Restarts: {args.s2_num_restarts}, Steps: {args.s2_num_steps}, "
         f"MMD lambda: {args.s2_mmd_lambda}", flush=True)
     print(f"  Cross moment lambda: {args.s2_cross_moment_lambda}, "
@@ -687,14 +881,17 @@ def run_stage2(args, model_path):
     print(f"  Saving criterion: lowest avg(task_loss, novelty_penalty, prior_loss)",
           flush=True)
     print("=" * 60, flush=True)
+    is_gred = args.backbone in ("gred", "hybrid")
 
     train_loader, _, _, train_ds, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
+        use_dist_masks=is_gred, max_hops=args.max_hops,
+        dist_mask_workers=args.dist_mask_workers,
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
     # Load and freeze transformer
-    model = _build_graph_transformer(args).to(args.device)
+    model = build_model(args).to(args.device)
     ckpt = torch.load(model_path, map_location=args.device, weights_only=True)
     model.load_state_dict(ckpt["model_state"])
     _freeze(model)
@@ -716,22 +913,40 @@ def run_stage2(args, model_path):
     ap_preds, ap_labels = [], []
     samples_since_ap_log = 0
 
+    is_gred_s2 = args.backbone in ("gred", "hybrid")
+
     for restart in range(args.s2_num_restarts):
         processed = 0
         print(f"\n--- Restart {restart + 1}/{args.s2_num_restarts} ---", flush=True)
-
-        for batch in train_loader:
-            batch = batch.to(args.device)
+        for batch_data in train_loader:
+            if is_gred_s2:
+                batch, dist_masks_batch, node_masks_batch = batch_data
+                batch = batch.to(args.device)
+                dist_masks_batch = dist_masks_batch.to(args.device)
+                node_masks_batch = node_masks_batch.to(args.device)
+            else:
+                batch = batch_data.to(args.device)
+                dist_masks_batch = None
+                node_masks_batch = None
             B = batch.y.size(0)
 
             with torch.no_grad():
                 dense_x, dense_mask = model.encode_dense(batch)
+                # Pre-compute GRED-encoded features once per batch (hybrid only)
+                gred_h_batch = None
+                if args.backbone == "hybrid":
+                    gred_h_batch = model.encode_gred(
+                        dense_x, dist_masks_batch, node_masks_batch)
 
             (best_proxy, base_loss, best_loss,
              base_correct, best_correct, best_mmd,
              best_cross, best_prior,
              best_novelty, best_composite) = _optimize_batch(
-                model, batch, dense_x, dense_mask, args)
+                model, batch, dense_x, dense_mask, args,
+                dist_masks=dist_masks_batch,
+                node_masks=node_masks_batch,
+                gred_h=gred_h_batch,
+            )
 
             # Extended optimization for non-improved graphs
             not_improved_mask = torch.ones(B, dtype=torch.bool, device=args.device)
@@ -752,6 +967,12 @@ def run_stage2(args, model_path):
                 subset_mask = not_improved_mask
                 subset_dense_x = dense_x[subset_mask]
                 subset_dense_mask = dense_mask[subset_mask]
+                subset_dist_masks = (
+                    dist_masks_batch[subset_mask] if dist_masks_batch is not None else None)
+                subset_node_masks = (
+                    node_masks_batch[subset_mask] if node_masks_batch is not None else None)
+                subset_gred_h = (
+                    gred_h_batch[subset_mask] if gred_h_batch is not None else None)
                 subset_batch = SimpleNamespace(
                     batch=_dense_mask_to_batch_vec(subset_dense_mask),
                     y=batch.y[subset_mask],
@@ -767,6 +988,9 @@ def run_stage2(args, model_path):
                     subset_dense_mask,
                     args,
                     init_proxy=best_proxy[subset_mask],
+                    dist_masks=subset_dist_masks,
+                    node_masks=subset_node_masks,
+                    gred_h=subset_gred_h,
                 )
 
                 best_proxy[subset_mask] = subset_best_proxy
@@ -780,8 +1004,9 @@ def run_stage2(args, model_path):
 
             # Collect predictions for AP logging (using best proxies)
             with torch.no_grad():
-                best_logits, _ = model(batch, proxy_embeddings=best_proxy,
-                                       precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
+                best_logits, _ = _model_forward_s2(
+                    model, batch, dist_masks_batch, node_masks_batch, gred_h_batch,
+                    best_proxy, dense_x, dense_mask, args)
                 ap_preds.append(torch.sigmoid(best_logits).cpu().numpy())
                 ap_labels.append(batch.y.cpu().numpy())
 
@@ -877,15 +1102,19 @@ def run_stage2(args, model_path):
 def run_stage3(args, model_path, proxy_pairs_path):
     print("\n" + "=" * 60, flush=True)
     print(f"STAGE 3: Train Generator ({args.generator})", flush=True)
+    print(f"  Backbone: {args.backbone}", flush=True)
     print("=" * 60, flush=True)
+    is_gred = args.backbone in ("gred", "hybrid")
 
     _, val_loader, test_loader, train_ds, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
+        use_dist_masks=is_gred, max_hops=args.max_hops,
+        dist_mask_workers=args.dist_mask_workers,
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
     # Load and freeze transformer (without multi-point initially)
-    model = _build_graph_transformer(args).to(args.device)
+    model = build_model(args).to(args.device)
     ckpt = torch.load(model_path, map_location=args.device, weights_only=True)
     model.load_state_dict(ckpt["model_state"])
     _freeze(model)
@@ -1090,6 +1319,7 @@ def run_stage3(args, model_path, proxy_pairs_path):
 def run_stage4(args, model_path, generator_path):
     print("\n" + "=" * 60, flush=True)
     print("STAGE 4: End-to-End Finetune", flush=True)
+    print(f"  Backbone: {args.backbone}", flush=True)
     print(f"  LR transformer={args.s4_lr_transformer}, "
           f"LR generator={args.s4_lr_generator}", flush=True)
     if args.novelty_alpha > 0 or args.novelty_alpha_node > 0:
@@ -1099,14 +1329,17 @@ def run_stage4(args, model_path, generator_path):
     if args.diversity_weight > 0:
         print(f"  Diversity loss: weight={args.diversity_weight}", flush=True)
     print("=" * 60, flush=True)
+    is_gred = args.backbone in ("gred", "hybrid")
 
     train_loader, val_loader, test_loader, _, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
+        use_dist_masks=is_gred, max_hops=args.max_hops,
+        dist_mask_workers=args.dist_mask_workers,
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
     )
 
     # Load transformer from stage 1
-    model = _build_graph_transformer(args).to(args.device)
+    model = build_model(args).to(args.device)
     model_ckpt = torch.load(model_path, map_location=args.device, weights_only=True)
     model.load_state_dict(model_ckpt["model_state"])
 
@@ -1129,21 +1362,33 @@ def run_stage4(args, model_path, generator_path):
     _unfreeze(model)
     _unfreeze(generator)
 
-    # Differential LR groups
-    # When multi-point is active, generator is inside model, so don't add generator separately
-    param_groups = [
-        {"params": model.encoder.parameters(), "lr": args.s4_lr_transformer},
-        {"params": model.layers.parameters(), "lr": args.s4_lr_transformer},
-        {"params": model.head.parameters(), "lr": args.s4_lr_transformer},
-    ]
-    if getattr(model, 'multi_point_proxy', None) is None:
-        param_groups.append({"params": generator.parameters(), "lr": args.s4_lr_generator})
-    else:
-        # Multi-point wrapper is inside model, so its params are already covered above
-        # But we add it explicitly to ensure it gets the generator LR
-        param_groups.append({"params": model.multi_point_proxy.parameters(), "lr": args.s4_lr_generator})
+    # Differential LR groups — backbone-specific
+    if args.backbone == "vanilla_gt":
+        model_param_groups = [
+            {"params": model.encoder.parameters(), "lr": args.s4_lr_transformer},
+            {"params": model.layers.parameters(), "lr": args.s4_lr_transformer},
+            {"params": model.head.parameters(), "lr": args.s4_lr_transformer},
+        ]
+    elif args.backbone == "gred":
+        model_param_groups = [
+            {"params": model.encoder.parameters(), "lr": args.s4_lr_transformer},
+            {"params": model.layers.parameters(), "lr": args.s4_lr_transformer},
+            {"params": model.head.parameters(), "lr": args.s4_lr_transformer},
+        ]
+    elif args.backbone == "hybrid":
+        model_param_groups = [
+            {"params": model.encoder.parameters(), "lr": args.s4_lr_transformer},
+            {"params": model.gred_layers.parameters(), "lr": args.s4_lr_transformer},
+            {"params": model.transformer_layers.parameters(), "lr": args.s4_lr_transformer},
+            {"params": model.head.parameters(), "lr": args.s4_lr_transformer},
+        ]
 
-    optimizer = torch.optim.AdamW(param_groups, weight_decay=args.s4_weight_decay)
+    if getattr(model, 'multi_point_proxy', None) is None:
+        model_param_groups.append({"params": generator.parameters(), "lr": args.s4_lr_generator})
+    else:
+        model_param_groups.append({"params": model.multi_point_proxy.parameters(), "lr": args.s4_lr_generator})
+
+    optimizer = torch.optim.AdamW(model_param_groups, weight_decay=args.s4_weight_decay)
     scheduler = build_warmup_cosine_scheduler(
         optimizer=optimizer,
         total_steps=max(1, len(train_loader) * args.s4_max_epochs),
@@ -1171,23 +1416,38 @@ def run_stage4(args, model_path, generator_path):
         diversity_losses_log = []
         inter_proxy_cosine_log = []
 
-        for batch in train_loader:
-            batch = batch.to(args.device)
+        for batch_data in train_loader:
+            if is_gred:
+                batch, dist_masks_batch, node_masks_batch = batch_data
+                batch = batch.to(args.device)
+                dist_masks_batch = dist_masks_batch.to(args.device)
+                node_masks_batch = node_masks_batch.to(args.device)
+            else:
+                batch = batch_data.to(args.device)
+                dist_masks_batch = None
+                node_masks_batch = None
+
             optimizer.zero_grad()
 
             # Multi-point proxy path: model handles generation internally
             if getattr(model, 'multi_point_proxy', None) is not None:
-                logits, _ = model(batch, readout_scope=args.readout_scope)
+                if args.backbone == "vanilla_gt":
+                    logits, _ = model(batch, readout_scope=args.readout_scope)
+                elif args.backbone == "gred":
+                    logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
+                elif args.backbone == "hybrid":
+                    logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
                 task_loss = loss_fn(logits, batch.y)
                 loss = task_loss
 
                 # Novelty loss for multi-point path
                 if use_novelty:
                     with torch.no_grad():
-                        logits_without, _ = model(batch, disable_proxy_injection=True, readout_scope=args.readout_scope)
-                    # Extract node embeddings with and without proxies
-                    # Note: This requires a forward pass, which we'll need to refactor
-                    # For now, we'll skip detailed node embeddings for multi-point
+                        if args.backbone == "vanilla_gt":
+                            logits_without, _ = model(batch, disable_proxy_injection=True, readout_scope=args.readout_scope)
+                        else:
+                            logits_without, _ = model(batch, dist_masks_batch, node_masks_batch,
+                                                       disable_proxy_injection=True, readout_scope=args.readout_scope)
                     node_penalty_term = torch.tensor(0.0, device=batch.y.device)
                     output_penalty_term = torch.sigmoid(logits) - torch.sigmoid(logits_without)
                     output_penalty_term = output_penalty_term.pow(2).mean()
@@ -1208,35 +1468,43 @@ def run_stage4(args, model_path, generator_path):
                 # Encode once
                 dense_x, dense_mask = model.encode_dense(batch)
 
-                # Generate proxies (differentiable)
-                if args.generator in ("gnn_pooling", "graph_coarsening"):
-                    flat_emb = model.encode_nodes(batch)
-                    proxy_emb, _ = generator(
-                        flat_emb, mask=None,
-                        edge_index=batch.edge_index,
-                        batch_vec=batch.batch,
-                        edge_attr=batch.edge_attr,
-                    )
-                elif args.generator == "flow_matching":
-                    # Single Euler step, fully differentiable
-                    proxy_emb = generator.forward_differentiable(
-                        dense_x, dense_mask, euler_steps=args.euler_steps)
-                else:
-                    proxy_emb, _ = generator(dense_x, dense_mask)
+                gred_h = None
+                if args.backbone == "hybrid":
+                    gred_h = model.encode_gred(dense_x, dist_masks_batch, node_masks_batch)
 
-                # Forward through transformer with proxies
-                logits, _ = model(batch, proxy_embeddings=proxy_emb,
-                                  precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
+                # Generate proxies (differentiable)
+                proxy_emb, aux_gen_loss = _generate_proxies(
+                    model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
+
+                # Forward through model with proxies
+                if args.backbone == "vanilla_gt":
+                    logits, _ = model(batch, proxy_embeddings=proxy_emb,
+                                      precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)
+                elif args.backbone == "gred":
+                    logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
+                elif args.backbone == "hybrid":
+                    logits, _ = model(batch, dist_masks_batch, node_masks_batch,
+                                      proxy_embeddings=proxy_emb,
+                                      precomputed_dense=(dense_x, dense_mask),
+                                      precomputed_gred=gred_h, readout_scope=args.readout_scope)
 
                 # Task loss
                 task_loss = loss_fn(logits, batch.y)
                 loss = task_loss
+                if aux_gen_loss is not None:
+                    loss = loss + aux_gen_loss
 
                 # Novelty loss: requires forward without proxies
-                if use_novelty:
+                if use_novelty and args.backbone != "gred":
                     with torch.no_grad():
-                        logits_without, _ = model(batch, precomputed_dense=(dense_x, dense_mask),
-                                                   disable_proxy_injection=True, readout_scope=args.readout_scope)
+                        if args.backbone == "vanilla_gt":
+                            logits_without, _ = model(batch, precomputed_dense=(dense_x, dense_mask),
+                                                       disable_proxy_injection=True, readout_scope=args.readout_scope)
+                        elif args.backbone == "hybrid":
+                            logits_without, _ = model(batch, dist_masks_batch, node_masks_batch,
+                                                       precomputed_dense=(dense_x, dense_mask),
+                                                       precomputed_gred=gred_h,
+                                                       disable_proxy_injection=True, readout_scope=args.readout_scope)
                         # Get node embeddings without proxies
                         node_emb_without = model.layers[-1].output if hasattr(model.layers[-1], 'output') else None
 

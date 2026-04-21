@@ -19,38 +19,37 @@ python main_adversarial_distillation.py \
     --num_cycles 5 \
     --run_stage1 \
     --backbone vanilla_gt \
-    --generator graph_coarsening \
-    --num_proxies 32 \
-    --hidden_dim 256 \
-    --num_layers 5 \
+    --generator flow_matching \
+    --num_proxies 16 \
+    --hidden_dim 512 \
+    --num_layers 4 \
     --num_heads 8 \
     --num_gred_layers 8 \
     --num_transformer_layers 2 \
     --state_dim 88 \
-    --use_lap_pe --lap_pe_dim 8 \
     --batch_size 64 \
     --num_workers 4 \
     \
-    --s1_lr 1e-4 --s1_max_epochs 300 --s1_patience 50 \
-    --s2_lr 1e-4 --s2_max_epochs 500 --s2_patience 50 \
-    --s3_lr_gen 5e-4 --s3_lr_transformer 1e-4 --s3_max_epochs 500 --s3_patience 50 \
+    --s1_lr 3e-5 --s1_max_epochs 150 --s1_patience 15 \
+    --s2_lr 5e-5 --s2_max_epochs 1000 --s2_patience 100 \
+    --s3_lr_gen 3e-4 --s3_lr_transformer 5e-5 --s3_max_epochs 500 --s3_patience 50 --s3_grad_clip 0.5 \
+    --dropout 0.2 --s1_weight_decay 1e-3 \
     \
-    --novelty_temperature 1.0 \
-    --novelty_alpha 1.0 \
-    --novelty_alpha_node 1.0 \
-    --diversity_weight 1.0 \
+    --novelty_temperature 1 \
+    --novelty_alpha 0.1 \
+    --novelty_alpha_node 0.1 \
+    --diversity_weight 0.5 \
     \
-    --distill_lr 5e-5 \
-    --distill_max_epochs 300 \
-    --distill_patience 40 \
-    --distill_temperature 2.0 \
-    --distill_kl_weight 1.0 \
-    --distill_node_weight 1.0 \
-    --distill_graph_weight 0.5 \
-    --distill_task_weight 0.5 \
+    --distill_lr 1e-5 \
+    --distill_max_epochs 500 \
+    --distill_patience 80 \
+    --distill_temperature 1.5 \
+    --distill_kl_weight 0.5 \
+    --distill_node_weight 0.5 \
+    --distill_graph_weight 0.0001 \
+    --distill_task_weight 1 \
     \
     --gap_threshold 0.005 \
     --distill_gap_threshold 0.003 \
     \
-    --save_dir checkpoints_adv_distill \
-    "$@"
+    --save_dir checkpoints_adv_distill_6
