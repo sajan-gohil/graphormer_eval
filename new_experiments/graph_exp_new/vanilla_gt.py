@@ -17,9 +17,9 @@ train_dataset = LRGBDataset(root="./data", name="Peptides-func", split="train")
 val_dataset   = LRGBDataset(root="./data", name="Peptides-func", split="val")
 test_dataset  = LRGBDataset(root="./data", name="Peptides-func", split="test")
 
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-val_loader   = DataLoader(val_dataset, batch_size=16)
-test_loader  = DataLoader(test_dataset, batch_size=16)
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+val_loader   = DataLoader(val_dataset, batch_size=64)
+test_loader  = DataLoader(test_dataset, batch_size=64)
 
 
 class EmbedNode(torch.nn.Module):
@@ -84,7 +84,7 @@ class MultiHeadAttentionLayer(torch.nn.Module):
 
 
 class MultiHeadAttention(torch.nn.Module):
-    def __init__(self, num_layers=4, num_heads=8, hidden_dim=512, output_dim=10):
+    def __init__(self, num_layers=8, num_heads=8, hidden_dim=512, output_dim=10):
         super().__init__()
         self.encoder = EmbedNode(hidden_dim)
         self.layers = torch.nn.ModuleList([
@@ -95,6 +95,28 @@ class MultiHeadAttention(torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim//2, output_dim),
         )
+        self.in_ln = torch.nn.LayerNorm(hidden_dim)
+        self.interm_proj = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.out_ln = torch.nn.LayerNorm(hidden_dim)
+        self.out_ffn = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.proxy_sims = []
+        self.batch_proxy_sims = []
+
+    def attend_proxies(self, generator, dense_x, dense_mask):
+        proxies = self.in_ln(generator(dense_x))
+        proxies_normalized = F.normalize(proxies, p=2, dim=-1)
+        internal_proxy_sim = torch.matmul(proxies_normalized, proxies_normalized.transpose(-2, -1))
+        self.proxy_sims.append(torch.mean(internal_proxy_sim).detach().item())
+        self.batch_proxy_sims.append(torch.mean(internal_proxy_sim))
+
+        # x-> proxies @ proxies -> x
+        node_proxy_matmul = torch.matmul(dense_x, proxies.transpose(-2, -1))
+        node_proxy_z = torch.nn.functional.softmax(node_proxy_matmul, dim=-1)  # N,M
+        proxy_node_z = torch.nn.functional.softmax(node_proxy_matmul.transpose(-2, -1), dim=-1)  # M,N
+        out_val = torch.matmul(node_proxy_z, torch.matmul(proxy_node_z, dense_x))
+        out_val = self.interm_proj(out_val) + dense_x
+        out_val = self.out_ffn(self.out_ln(out_val)) + out_val
+        return proxies, out_val
 
     def attend_proxies(self, generator, dense_x, dense_mask):    
         proxies = generator(dense_x)
@@ -106,6 +128,7 @@ class MultiHeadAttention(torch.nn.Module):
         # out_val = torch.matmul(attn_score, dense_x)  # N,d
         out_val = torch.matmul(node_proxy_z, torch.matmul(proxy_node_z, dense_x))
         return proxies, out_val
+
 
     def forward(self, batch, generators=None):
         if not generators: generators = {}
@@ -126,7 +149,7 @@ class MultiHeadAttention(torch.nn.Module):
 
 
 class ScoreBasedGenerator(torch.nn.Module):
-    def __init__(self, hidden_dim=512, num_proxies=16):
+    def __init__(self, hidden_dim=512, num_proxies=128):
         super().__init__()
         self.squeeze = torch.nn.Sequential(
             torch.nn.Linear(hidden_dim, hidden_dim//2),
@@ -143,7 +166,8 @@ class ScoreBasedGenerator(torch.nn.Module):
 
 model = MultiHeadAttention()
 model.to("cuda" if torch.cuda.is_available() else "cpu")
-generators = {idx: ScoreBasedGenerator() for idx in range(4)}
+
+generators = {idx: ScoreBasedGenerator() for idx in range(8)}
 generator_params = []
 for k,v in generators.items():
     v.to("cuda" if torch.cuda.is_available() else "cpu")
@@ -155,30 +179,42 @@ metric = MultilabelAveragePrecision(num_labels=10)
 
 
 loss_dict = {
-    "epoch_train_ap": [],
-    "epoch_val_ap": [],
-    "epoch_test_ap": [],
-    "epoch_train_loss": [],
-    "epoch_val_loss": [],
-    "epoch_test_loss": [],
+    "train_ap": [],
+    "val_ap": [],
+    "test_ap": [],
+    "train_proxy_sims": [],
+    "val_proxy_sims": [],
+    "test_proxy_sims": [],
+    "train_loss": [],
+    "val_loss": [],
+    "test_loss": [],
+
 }
 for epoch in range(500):
     print("EPOCH ===================:", epoch)
     model.train()
-    epoch_train_losses = []
-    epoch_val_losses = []
-    epoch_test_losses = []
+    train_losses = []
+    val_losses = []
+    test_losses = []
     for batch in tqdm(train_loader, desc="Train set"):
         batch.to("cuda" if torch.cuda.is_available() else "cpu")
         optimizer.zero_grad()
         outputs, node_embeddings = model(batch, generators)
         loss = loss_function(outputs, batch.y)
+        loss += torch.mean(torch.stack(model.batch_proxy_sims))
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        for gen in generators.values():
+            torch.nn.utils.clip_grad_norm_(gen.parameters(), max_norm=1.0)
         optimizer.step()
         metric.update(torch.nn.functional.sigmoid(outputs), batch.y.long())
-        epoch_train_losses.append(loss.item())
-    loss_dict["epoch_train_loss"].append(np.mean(epoch_train_losses))
-    loss_dict["epoch_train_ap"].append(metric.compute())
+        train_losses.append(loss.item())
+        model.batch_proxy_sims = []
+
+    loss_dict["train_loss"].append(np.mean(train_losses))
+    loss_dict["train_ap"].append(metric.compute())
+    loss_dict["train_proxy_sims"].append(np.mean(model.proxy_sims))
+    model.proxy_sims = []
     metric.reset()
     model.eval()
     with torch.inference_mode():
@@ -187,10 +223,13 @@ for epoch in range(500):
             outputs, node_embeddings = model(batch, generators)
             loss = loss_function(outputs, batch.y)
             metric.update(torch.nn.functional.sigmoid(outputs), batch.y.long())
-            epoch_val_losses.append(loss.item())
-        loss_dict["epoch_val_loss"].append(np.mean(epoch_val_losses))
-        loss_dict["epoch_val_ap"].append(metric.compute())
+            val_losses.append(loss.item())
+        loss_dict["val_loss"].append(np.mean(val_losses))
+        loss_dict["val_ap"].append(metric.compute())
+        loss_dict["val_proxy_sims"].append(np.mean(model.proxy_sims))
+        model.proxy_sims = []
         metric.reset()
+        model.batch_proxy_sims = []
     model.eval()
     with torch.inference_mode():
         for batch in tqdm(test_loader, desc="Test set"):
@@ -198,8 +237,11 @@ for epoch in range(500):
             outputs, node_embeddings = model(batch, generators)
             loss = loss_function(outputs, batch.y)
             metric.update(torch.nn.functional.sigmoid(outputs), batch.y.long())
-            epoch_test_losses.append(loss.item())
-        loss_dict["epoch_test_loss"].append(np.mean(epoch_val_losses))
-        loss_dict["epoch_test_ap"].append(metric.compute())
+            test_losses.append(loss.item())
+        loss_dict["test_loss"].append(np.mean(test_losses))
+        loss_dict["test_ap"].append(metric.compute())
+        loss_dict["test_proxy_sims"].append(np.mean(model.proxy_sims))
+        model.proxy_sims = []
+        model.batch_proxy_sims = []
         metric.reset()
     print("EPOCH RESULTS:", {k:float(v[-1]) for k,v in loss_dict.items()})

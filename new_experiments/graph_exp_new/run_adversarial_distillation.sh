@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -eux pipefail
+
 # Adversarial Distillation Ratchet — sample run script.
 #
 # Runs the full cyclic pipeline:
