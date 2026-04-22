@@ -844,7 +844,7 @@ def _optimize_batch(model, batch, dense_x, dense_mask, args,
 
         with torch.no_grad():
             # Composite score: average of (task_loss, novelty_penalty, prior_loss)
-            composite = (task_loss + novelty_penalty + cross_batch) / 3.0
+            composite = (task_loss + novelty_penalty + prior_batch) / 3.0
             improved = composite < best_composite
             if improved.any():
                 best_composite[improved] = composite[improved]
@@ -1224,7 +1224,15 @@ def run_stage3(args, model_path, proxy_pairs_path):
 
             if aux_loss is not None:
                 # Reconstruction / regularization loss (MMD, CFM, ortho)
-                train_loss = aux_loss
+                # train_loss = aux_loss
+                # After generating proxy_emb from the generator:
+                with torch.no_grad():
+                    logits_with, _ = model(pyg_batch, proxy_embeddings=proxy_emb, 
+                           precomputed_dense=(encoder_embs, emb_masks),
+                           readout_scope=args.readout_scope)
+                task_loss_aux = nn.functional.binary_cross_entropy_with_logits(logits_with, pyg_batch.y)
+                train_loss = aux_loss + 0.5 * task_loss_aux  # joint objective
+
             else:
                 # PMA has no reconstruction loss — fall back to downstream task loss
                 logits, _ = model(pyg_batch, proxy_embeddings=proxy_emb,
