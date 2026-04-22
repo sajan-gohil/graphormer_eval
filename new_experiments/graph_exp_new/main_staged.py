@@ -585,6 +585,7 @@ def run_stage1(args):
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
+    best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     save_path = os.path.join(args.save_dir, "stage1_best.pt")
@@ -693,8 +694,9 @@ def run_stage1(args):
         print(log_line, flush=True)
 
         # Early stopping
-        if val_ap > best_val_ap:
+        if val_loss < best_val_loss:
             best_val_ap = val_ap
+            best_val_loss = val_loss
             best_epoch = epoch
             patience_counter = 0
             torch.save({
@@ -702,16 +704,16 @@ def run_stage1(args):
                 "epoch": epoch, "val_ap": val_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"  -> New best val AP={val_ap:.4f}, saved", flush=True)
+            print(f"  -> New best val loss={val_loss:.4f}, saved", flush=True)
         else:
             patience_counter += 1
             if patience_counter >= args.s1_patience:
                 print(f"Early stopping at epoch {epoch}. "
-                      f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+                      f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
                       flush=True)
                 break
 
-    print(f"Stage 1 done. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+    print(f"Stage 1 done. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
           flush=True)
     return save_path
 
@@ -1175,6 +1177,7 @@ def run_stage3(args, model_path, proxy_pairs_path):
         )
 
     best_val_ap = 0.0
+    best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     diagnostics = []  # (epoch, gen_loss, val_AP) for correlation analysis
@@ -1270,9 +1273,10 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 flush=True,
             )
 
-            # Early stopping on downstream val AP
-            if val_ap > best_val_ap:
+            # Early stopping on downstream val loss
+            if val_loss < best_val_loss:
                 best_val_ap = val_ap
+                best_val_loss = val_loss
                 best_epoch = epoch
                 patience_counter = 0
                 torch.save({
@@ -1280,12 +1284,12 @@ def run_stage3(args, model_path, proxy_pairs_path):
                     "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                     "args": vars(args),
                 }, save_path)
-                print(f"  -> New best downstream val AP={val_ap:.4f}", flush=True)
+                print(f"  -> New best downstream val loss={val_loss:.4f}", flush=True)
             else:
                 patience_counter += 1
                 if patience_counter >= args.s3_patience:
                     print(f"Early stopping at epoch {epoch}. "
-                          f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+                          f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
                           flush=True)
                     break
         else:
@@ -1306,7 +1310,7 @@ def run_stage3(args, model_path, proxy_pairs_path):
         print(f"Diagnostic: gen_loss vs downstream_val_AP correlation = {corr:.4f}",
               flush=True)
 
-    print(f"Stage 3 done. Best downstream val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+    print(f"Stage 3 done. Best downstream val loss={best_val_loss:.4f} at epoch {best_epoch}.",
           flush=True)
     print(f"Diagnostics saved to {diag_path}", flush=True)
     return save_path
@@ -1400,6 +1404,7 @@ def run_stage4(args, model_path, generator_path):
     use_novelty = args.novelty_alpha > 0 or args.novelty_alpha_node > 0
 
     best_val_ap = 0.0
+    best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     save_path = os.path.join(args.save_dir, "stage4_best.pt")
@@ -1592,9 +1597,10 @@ def run_stage4(args, model_path, generator_path):
 
         print(log_line, flush=True)
 
-        # Early stopping on val AP
-        if val_ap > best_val_ap:
+        # Early stopping on val loss
+        if val_loss < best_val_loss:
             best_val_ap = val_ap
+            best_val_loss = val_loss
             best_epoch = epoch
             patience_counter = 0
             torch.save({
@@ -1604,17 +1610,17 @@ def run_stage4(args, model_path, generator_path):
                 "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"  -> New best val AP={val_ap:.4f} (test={test_ap:.4f})",
+            print(f"  -> New best val loss={val_loss:.4f} (test={test_ap:.4f})",
                   flush=True)
         else:
             patience_counter += 1
             if patience_counter >= args.s4_patience:
                 print(f"Early stopping at epoch {epoch}. "
-                      f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+                      f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
                       flush=True)
                 break
 
-    print(f"Stage 4 done. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+    print(f"Stage 4 done. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
           flush=True)
     return save_path
 

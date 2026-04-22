@@ -716,6 +716,7 @@ def run_phase1(args):
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
+    best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     save_path = os.path.join(args.save_dir, "phase1_best.pt")
@@ -768,8 +769,9 @@ def run_phase1(args):
 
         print(log, flush=True)
 
-        if val_ap > best_val_ap:
+        if val_loss < best_val_loss:
             best_val_ap = val_ap
+            best_val_loss = val_loss
             best_epoch = epoch
             patience_counter = 0
             torch.save({
@@ -777,16 +779,16 @@ def run_phase1(args):
                 "epoch": epoch, "val_ap": val_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"  -> New best val AP={val_ap:.4f}, saved", flush=True)
+            print(f"  -> New best val loss={val_loss:.4f}, saved", flush=True)
         else:
             patience_counter += 1
             if patience_counter >= args.p1_patience:
                 print(f"Early stopping at epoch {epoch}. "
-                      f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+                      f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
                       flush=True)
                 break
 
-    print(f"Phase 1 done. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+    print(f"Phase 1 done. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
           flush=True)
     return save_path
 
@@ -847,6 +849,7 @@ def run_phase2(args, model_path):
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
+    best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     M = args.num_proxies
@@ -945,8 +948,9 @@ def run_phase2(args, model_path):
 
         print(log, flush=True)
 
-        if val_ap > best_val_ap:
+        if val_loss < best_val_loss:
             best_val_ap = val_ap
+            best_val_loss = val_loss
             best_epoch = epoch
             patience_counter = 0
             torch.save({
@@ -954,16 +958,16 @@ def run_phase2(args, model_path):
                 "epoch": epoch, "val_ap": val_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"  -> New best val AP={val_ap:.4f}, saved", flush=True)
+            print(f"  -> New best val loss={val_loss:.4f}, saved", flush=True)
         else:
             patience_counter += 1
             if patience_counter >= args.p2_patience:
                 print(f"Early stopping at epoch {epoch}. "
-                      f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+                      f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
                       flush=True)
                 break
 
-    print(f"Phase 2 done. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+    print(f"Phase 2 done. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
           flush=True)
     return save_path
 
@@ -1086,6 +1090,7 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
     M = args.num_proxies
 
     best_val_ap = 0.0
+    best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     diagnostics = []
@@ -1288,8 +1293,9 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
                 "val_ap": val_ap, "test_ap": test_ap,
             })
 
-            if val_ap > best_val_ap:
+            if val_loss < best_val_loss:
                 best_val_ap = val_ap
+                best_val_loss = val_loss
                 best_epoch = epoch
                 patience_counter = 0
                 torch.save({
@@ -1297,12 +1303,12 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
                     "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                     "args": vars(args),
                 }, save_path)
-                print(f"  -> New best val AP={val_ap:.4f}", flush=True)
+                print(f"  -> New best val loss={val_loss:.4f}", flush=True)
             else:
                 patience_counter += 1
                 if patience_counter >= args.p3_patience:
                     print(f"Early stopping at epoch {epoch}. "
-                          f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+                          f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
                           flush=True)
                     break
         else:
@@ -1314,7 +1320,7 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
     diag_path = os.path.join(args.save_dir, "phase3_diagnostics.pkl")
     with open(diag_path, "wb") as f:
         pickle.dump(diagnostics, f)
-    print(f"Phase 3 done. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+    print(f"Phase 3 done. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
           flush=True)
     return save_path
 
@@ -1567,6 +1573,7 @@ def run_phase5(args, phase1_model_path, generator_path):
     sched_b = None
 
     best_val_ap = 0.0
+    best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     current_phase = "A"
@@ -1815,8 +1822,9 @@ def run_phase5(args, phase1_model_path, generator_path):
             f"test_AP={test_ap:.4f}",
             flush=True)
 
-        if val_ap > best_val_ap:
+        if val_loss < best_val_loss:
             best_val_ap = val_ap
+            best_val_loss = val_loss
             best_epoch = epoch
             patience_counter = 0
             torch.save({
@@ -1825,17 +1833,17 @@ def run_phase5(args, phase1_model_path, generator_path):
                 "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"  -> New best val AP={val_ap:.4f} (test={test_ap:.4f})",
+            print(f"  -> New best val loss={val_loss:.4f} (test={test_ap:.4f})",
                   flush=True)
         else:
             patience_counter += 1
             if patience_counter >= args.p5_patience:
                 print(f"Early stopping at epoch {epoch}. "
-                      f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+                      f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
                       flush=True)
                 break
 
-    print(f"Phase 5 done. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.",
+    print(f"Phase 5 done. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.",
           flush=True)
     return save_path
 

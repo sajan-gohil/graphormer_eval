@@ -704,7 +704,7 @@ def run_stage1(args, cycle_dir):
     )
     loss_fn = nn.BCEWithLogitsLoss()
 
-    best_val_ap, best_epoch, patience = 0.0, -1, 0
+    best_val_ap, best_val_loss, best_epoch, patience = 0.0, float("inf"), -1, 0
     save_path = os.path.join(cycle_dir, "stage1_best.pt")
 
     for epoch in range(1, args.s1_max_epochs + 1):
@@ -775,22 +775,22 @@ def run_stage1(args, cycle_dir):
             flush=True,
         )
 
-        if val_ap > best_val_ap:
-            best_val_ap, best_epoch, patience = val_ap, epoch, 0
+        if val_loss < best_val_loss:
+            best_val_ap, best_val_loss, best_epoch, patience = val_ap, val_loss, epoch, 0
             torch.save({
                 "model_state": model.state_dict(),
                 "epoch": epoch, "val_ap": val_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"    -> New best val AP={val_ap:.4f}, saved", flush=True)
+            print(f"    -> New best val loss={val_loss:.4f}, saved", flush=True)
         else:
             patience += 1
             if patience >= args.s1_patience:
                 print(f"  Early stopping at epoch {epoch}. "
-                      f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+                      f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
                 break
 
-    print(f"Stage 1 done. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+    print(f"Stage 1 done. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
     return save_path
 
 
@@ -856,7 +856,7 @@ def run_stage2(args, model_path, cycle_dir, generator_path=None):
     )
     loss_fn = nn.BCEWithLogitsLoss()
 
-    best_val_ap, best_epoch, patience = 0.0, -1, 0
+    best_val_ap, best_val_loss, best_epoch, patience = 0.0, float("inf"), -1, 0
     diagnostics = []
     save_path = os.path.join(cycle_dir, "stage2_generator.pt")
 
@@ -997,19 +997,19 @@ def run_stage2(args, model_path, cycle_dir, generator_path=None):
                 "val_ap": val_ap, "test_ap": test_ap,
             })
 
-            if val_ap > best_val_ap:
-                best_val_ap, best_epoch, patience = val_ap, epoch, 0
+            if val_loss < best_val_loss:
+                best_val_ap, best_val_loss, best_epoch, patience = val_ap, val_loss, epoch, 0
                 torch.save({
                     "generator_state": generator.state_dict(),
                     "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                     "args": vars(args),
                 }, save_path)
-                print(f"    -> New best val AP={val_ap:.4f}", flush=True)
+                print(f"    -> New best val loss={val_loss:.4f}", flush=True)
             else:
                 patience += 1
                 if patience >= args.s2_patience:
                     print(f"  Early stopping at epoch {epoch}. "
-                          f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+                          f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
                     break
         else:
             elapsed = time.time() - t0
@@ -1021,7 +1021,7 @@ def run_stage2(args, model_path, cycle_dir, generator_path=None):
     diag_path = os.path.join(cycle_dir, "stage2_diagnostics.pkl")
     with open(diag_path, "wb") as f:
         pickle.dump(diagnostics, f)
-    print(f"Stage 2 done. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+    print(f"Stage 2 done. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
     return save_path
 
 
@@ -1085,7 +1085,7 @@ def run_stage3(args, model_path, generator_path, cycle_dir):
     )
     loss_fn = nn.BCEWithLogitsLoss()
 
-    best_val_ap, best_epoch, patience = 0.0, -1, 0
+    best_val_ap, best_val_loss, best_epoch, patience = 0.0, float("inf"), -1, 0
     diagnostics = []
     save_path = os.path.join(cycle_dir, "stage3_best.pt")
 
@@ -1225,26 +1225,26 @@ def run_stage3(args, model_path, generator_path, cycle_dir):
             "val_ap": val_ap, "test_ap": test_ap,
         })
 
-        if val_ap > best_val_ap:
-            best_val_ap, best_epoch, patience = val_ap, epoch, 0
+        if val_loss < best_val_loss:
+            best_val_ap, best_val_loss, best_epoch, patience = val_ap, val_loss, epoch, 0
             torch.save({
                 "model_state": model.state_dict(),
                 "generator_state": generator.state_dict(),
                 "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"    -> New best val AP={val_ap:.4f} (test={test_ap:.4f})", flush=True)
+            print(f"    -> New best val loss={val_loss:.4f} (test={test_ap:.4f})", flush=True)
         else:
             patience += 1
             if patience >= args.s3_patience:
                 print(f"  Early stopping at epoch {epoch}. "
-                      f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+                      f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
                 break
 
     diag_path = os.path.join(cycle_dir, "stage3_diagnostics.pkl")
     with open(diag_path, "wb") as f:
         pickle.dump(diagnostics, f)
-    print(f"Stage 3 done. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+    print(f"Stage 3 done. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
     return save_path
 
 
@@ -1318,7 +1318,7 @@ def run_distillation(args, teacher_model_path, teacher_generator_path, cycle_dir
         recurrent_lr_factor=args.recurrent_lr_factor,
     )
 
-    best_val_ap, best_epoch, patience = 0.0, -1, 0
+    best_val_ap, best_val_loss, best_epoch, patience = 0.0, float("inf"), -1, 0
     diagnostics = []
     save_path = os.path.join(cycle_dir, "distilled_best.pt")
 
@@ -1453,26 +1453,26 @@ def run_distillation(args, teacher_model_path, teacher_generator_path, cycle_dir
             "val_ap": val_ap, "test_ap": test_ap,
         })
 
-        if val_ap > best_val_ap:
-            best_val_ap, best_epoch, patience = val_ap, epoch, 0
+        if val_loss < best_val_loss:
+            best_val_ap, best_val_loss, best_epoch, patience = val_ap, val_loss, epoch, 0
             torch.save({
                 "model_state": student.state_dict(),
                 "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"    -> New best distilled val AP={val_ap:.4f} (test={test_ap:.4f})",
+            print(f"    -> New best distilled val loss={val_loss:.4f} (test={test_ap:.4f})",
                   flush=True)
         else:
             patience += 1
             if patience >= args.distill_patience:
                 print(f"  Distillation early stopping at epoch {epoch}. "
-                      f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+                      f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
                 break
 
     diag_path = os.path.join(cycle_dir, "distill_diagnostics.pkl")
     with open(diag_path, "wb") as f:
         pickle.dump(diagnostics, f)
-    print(f"Distillation done. Best val AP (M_base)={best_val_ap:.4f} at epoch {best_epoch}.",
+    print(f"Distillation done. Best val loss (M_base)={best_val_loss:.4f} at epoch {best_epoch}.",
           flush=True)
     return save_path, best_val_ap
 

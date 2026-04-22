@@ -594,6 +594,7 @@ def run_e2e(args):
 
     # Tracking
     best_val_ap = 0.0
+    best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     diagnostics = []  # (epoch, train_loss, val_AP) for correlation analysis
@@ -743,9 +744,10 @@ def run_e2e(args):
         )
         print(log_str, flush=True)
 
-        # --- Early stopping on val AP ---
-        if val_ap > best_val_ap:
+        # --- Early stopping on val loss ---
+        if val_loss < best_val_loss:
             best_val_ap = val_ap
+            best_val_loss = val_loss
             best_epoch = epoch
             patience_counter = 0
             ckpt = {
@@ -760,12 +762,12 @@ def run_e2e(args):
             }
             save_path = os.path.join(args.save_dir, "best_e2e.pt")
             torch.save(ckpt, save_path)
-            print(f"  -> New best val AP={val_ap:.4f} (test AP={test_ap:.4f}), saved to {save_path}", flush=True)
+            print(f"  -> New best val loss={val_loss:.4f} (test AP={test_ap:.4f}), saved to {save_path}", flush=True)
         else:
             patience_counter += 1
             if patience_counter >= args.patience:
                 print(f"Early stopping at epoch {epoch} (patience={args.patience}). "
-                      f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+                      f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
                 break
 
     # Save diagnostics
@@ -780,7 +782,7 @@ def run_e2e(args):
         corr = float(np.corrcoef(losses, aps)[0, 1])
         print(f"Diagnostic: train_loss vs val_AP correlation = {corr:.4f}", flush=True)
 
-    print(f"\nTraining complete. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+    print(f"\nTraining complete. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
     print(f"Diagnostics saved to {diag_path}", flush=True)
     return os.path.join(args.save_dir, "best_e2e.pt")
 
