@@ -68,9 +68,12 @@ run_generator_phases() {
         --p3_lr 1e-3 \
         --p3_max_epochs 200 \
         --p3_patience 50 \
-        --p3_recon_weight 1.0 \
+        --p3_recon_weight 0.05 \
         --p3_recon_anneal_to 0.1 \
         --p3_recon_anneal_epochs 100 \
+        --novelty_alpha 0.0 \
+        --novelty_alpha_node 0.0 \
+        --diversity_weight 0.0 \
         --save_dir "${EXP_DIR}"
 
     local GEN_PATH="${EXP_DIR}/phase3_generator.pt"
@@ -93,6 +96,10 @@ run_generator_phases() {
     echo "============================================================="
     echo "  ${BACKBONE_NAME} | ${EXP_NAME}: Phase 5 (E2E fine-tune)"
     echo "============================================================="
+    # NOTE: val_loss diverges by construction in Phase 5 (model becomes more
+    # confident → BCE inflates), so patience=100 and the checkpoint saved at
+    # best val_AP is what matters. Novelty/diversity losses are disabled here
+    # because Phase 5 is the augmentation stage, not the reconstruction stage.
     python3 main_indist.py \
         --phase 5 \
         ${BACKBONE_ARGS} \
@@ -101,10 +108,15 @@ run_generator_phases() {
         --num_proxies ${NUM_PROXIES} \
         --model_path "${P1_MODEL}" \
         --generator_path "${GEN_PATH}" \
+        --p5_lr_gen 2e-5 \
+        --p5_lr_model 1e-5 \
         --p5_phase_a_epochs 20 \
         --p5_max_epochs 200 \
-        --p5_patience 50 \
+        --p5_patience 100 \
         --p5_proxy_dropout 0.1 \
+        --novelty_alpha 0.0 \
+        --novelty_alpha_node 0.0 \
+        --diversity_weight 0.0 \
         --save_dir "${EXP_DIR}"
 }
 
