@@ -118,7 +118,7 @@ def build_parser():
     p.add_argument("--p3_patience", type=int, default=50)
     p.add_argument("--p3_grad_clip", type=float, default=1.0)
     p.add_argument("--p3_eval_every", type=int, default=1)
-    p.add_argument("--p3_recon_weight", type=float, default=1.0,
+    p.add_argument("--p3_recon_weight", type=float, default=0.05,
                    help="Initial weight for reconstruction loss")
     p.add_argument("--p3_recon_anneal_to", type=float, default=0.1,
                    help="Final weight for reconstruction loss after annealing")
@@ -131,9 +131,9 @@ def build_parser():
     p.add_argument(
         "--p5_phase_a_epochs", type=int, default=0,
         help="Deprecated: ignored (Phase 5 starts directly with joint training)")
-    p.add_argument("--p5_lr_gen", type=float, default=1e-4,
+    p.add_argument("--p5_lr_gen", type=float, default=1e-4/5,
                    help="Generator LR for Phase 5 (default: 0.1 * p3_lr)")
-    p.add_argument("--p5_lr_model", type=float, default=1e-4,
+    p.add_argument("--p5_lr_model", type=float, default=1e-5,
                    help="Model LR for Phase 5 (default: same as p5_lr_gen)")
     p.add_argument("--p5_proxy_dropout", type=float, default=0.1)
     p.add_argument("--p5_max_epochs", type=int, default=500)
@@ -522,8 +522,8 @@ def distribution_reconstruction_loss(generated, targets, valid_mask):
         if not valid_mask[b]:
             continue
 
-        gen_b = generated[b]   # (M, d)
-        tgt_b = targets[b]     # (M, d)
+        gen_b = F.normalize(generated[b], dim=-1)   # (M, d)
+        tgt_b = F.normalize(targets[b], dim=-1)     # (M, d)
         dist2 = torch.cdist(gen_b, tgt_b, p=2).pow(2)  # (M, M)
 
         # Symmetric Chamfer: generated->target and target->generated.

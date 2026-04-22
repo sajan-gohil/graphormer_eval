@@ -28,12 +28,12 @@ python main_adversarial_distillation.py \
     --num_gred_layers 8 \
     --num_transformer_layers 2 \
     --state_dim 88 \
-    --batch_size 64 \
+    --batch_size 128 \
     --num_workers 4 \
     \
-    --s1_lr 3e-5 --s1_max_epochs 100 --s1_patience 15 \
-    --s2_lr 5e-4 --s2_max_epochs 1000 --s2_patience 200 \
-    --s3_lr_gen 5e-4 --s3_lr_transformer 5e-4 --s3_max_epochs 500 --s3_patience 150 --s3_grad_clip 0.5 \
+    --s1_lr 3e-5 --s1_max_epochs 300 --s1_patience 50 \
+    --s2_lr 1e-4 --s2_max_epochs 1000 --s2_patience 500 \
+    --s3_lr_gen 5e-4 --s3_lr_transformer 1e-5 --s3_max_epochs 1000 --s3_patience 50 --s3_grad_clip 0.5 \
     --dropout 0.2 --s1_weight_decay 1e-3 \
     \
     --novelty_temperature 1 \
@@ -53,4 +53,4 @@ python main_adversarial_distillation.py \
     --gap_threshold 0.005 \
     --distill_gap_threshold 0.003 \
     \
-    --save_dir checkpoints_adv_distill_7
+    --save_dir checkpoints_adv_distill_8
