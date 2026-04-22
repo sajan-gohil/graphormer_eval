@@ -548,6 +548,7 @@ def run_stage1(args):
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
+    best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     save_path = os.path.join(args.save_dir, "stage1_best.pt")
@@ -648,8 +649,9 @@ def run_stage1(args):
 
         print(log_line, flush=True)
 
-        if val_ap > best_val_ap:
+        if val_loss < best_val_loss:
             best_val_ap = val_ap
+            best_val_loss = val_loss
             best_epoch = epoch
             patience_counter = 0
             torch.save({
@@ -657,15 +659,15 @@ def run_stage1(args):
                 "epoch": epoch, "val_ap": val_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"  -> New best val AP={val_ap:.4f}, saved", flush=True)
+            print(f"  -> New best val loss={val_loss:.4f}, saved", flush=True)
         else:
             patience_counter += 1
             if patience_counter >= args.s1_patience:
                 print(f"Early stopping at epoch {epoch}. "
-                      f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+                      f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
                 break
 
-    print(f"Stage 1 done. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+    print(f"Stage 1 done. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
     return save_path
 
 
@@ -757,6 +759,7 @@ def run_stage2(args, model_path):
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
+    best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     diagnostics = []
@@ -949,8 +952,9 @@ def run_stage2(args, model_path):
                 "attn_entropy": attn_entropy,
             })
 
-            if val_ap > best_val_ap:
+            if val_loss < best_val_loss:
                 best_val_ap = val_ap
+                best_val_loss = val_loss
                 best_epoch = epoch
                 patience_counter = 0
                 torch.save({
@@ -958,12 +962,12 @@ def run_stage2(args, model_path):
                     "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                     "args": vars(args),
                 }, save_path)
-                print(f"  -> New best val AP={val_ap:.4f}", flush=True)
+                print(f"  -> New best val loss={val_loss:.4f}", flush=True)
             else:
                 patience_counter += 1
                 if patience_counter >= args.s2_patience:
                     print(f"Early stopping at epoch {epoch}. "
-                          f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+                          f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
                     break
         else:
             elapsed = time.time() - epoch_start
@@ -976,7 +980,7 @@ def run_stage2(args, model_path):
     diag_path = os.path.join(args.save_dir, "stage2_diagnostics.pkl")
     with open(diag_path, "wb") as f:
         pickle.dump(diagnostics, f)
-    print(f"Stage 2 done. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+    print(f"Stage 2 done. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
     print(f"Diagnostics saved to {diag_path}", flush=True)
     return save_path
 
@@ -1057,6 +1061,7 @@ def run_stage3(args, model_path, generator_path):
     sched_b = None
 
     best_val_ap = 0.0
+    best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     phase = "A"
@@ -1293,8 +1298,9 @@ def run_stage3(args, model_path, generator_path):
             flush=True,
         )
 
-        if val_ap > best_val_ap:
+        if val_loss < best_val_loss:
             best_val_ap = val_ap
+            best_val_loss = val_loss
             best_epoch = epoch
             patience_counter = 0
             torch.save({
@@ -1303,15 +1309,15 @@ def run_stage3(args, model_path, generator_path):
                 "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"  -> New best val AP={val_ap:.4f} (test={test_ap:.4f})", flush=True)
+            print(f"  -> New best val loss={val_loss:.4f} (test={test_ap:.4f})", flush=True)
         else:
             patience_counter += 1
             if patience_counter >= args.s3_patience:
                 print(f"Early stopping at epoch {epoch}. "
-                      f"Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+                      f"Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
                 break
 
-    print(f"Stage 3 done. Best val AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+    print(f"Stage 3 done. Best val loss={best_val_loss:.4f} at epoch {best_epoch}.", flush=True)
     return save_path
 
 
