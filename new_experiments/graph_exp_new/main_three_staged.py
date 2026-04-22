@@ -127,12 +127,8 @@ def build_parser():
     p.add_argument("--s3_weight_decay", type=float, default=1e-4)
 
     # Novelty loss hyperparameters
-    p.add_argument("--novelty_temperature", type=float, default=1.0,
-                   help="Sigmoid temperature for output-level novelty.")
     p.add_argument("--novelty_alpha", type=float, default=0.0,
-                   help="Weight for output_penalty. 0 disables novelty loss.")
-    p.add_argument("--novelty_alpha_node", type=float, default=0.0,
-                   help="Weight for node_penalty. 0 disables node-level novelty.")
+                   help="Weight for novelty loss. 0 disables novelty loss.")
 
     # Proxy diversity loss
     p.add_argument("--diversity_weight", type=float, default=0.0,
@@ -843,33 +839,11 @@ def run_stage2(args, model_path):
 
                 # Novelty loss (if enabled)
                 novelty_loss_val = 0.0
-                if (args.novelty_alpha > 0.0 or args.novelty_alpha_node > 0.0) and args.backbone != "gred":
-                    # Get logits without proxies in no_grad
-                    with torch.no_grad():
-                        if args.backbone == "vanilla_gt":
-                            logits_without, node_emb_without = model(
-                                batch, precomputed_dense=(dense_x, dense_mask),
-                                disable_proxy_injection=True
-                            , readout_scope=args.readout_scope)
-                        elif args.backbone == "hybrid":
-                            logits_without, node_emb_without = model(
-                                batch, dist_masks_batch, node_masks_batch,
-                                precomputed_dense=(dense_x, dense_mask),
-                                precomputed_gred=gred_h,
-                                disable_proxy_injection=True
-                            , readout_scope=args.readout_scope)
-                    # Compute novelty loss
-                    nov_loss, nov_metrics = novelty_loss(
-                        task_loss, logits, logits_without,
-                        node_emb_with=node_emb,
-                        node_emb_without=node_emb_without,
-                        mask=batch.batch_mask if hasattr(batch, 'batch_mask') else None,
-                        alpha=args.novelty_alpha,
-                        alpha_node=args.novelty_alpha_node,
-                        temperature=args.novelty_temperature
-                    )
-                    loss = loss + nov_loss
-                    novelty_loss_val = nov_loss.item()
+                if args.novelty_alpha > 0.0 and args.backbone != "gred":
+                    # Compute novelty loss: proxy-node cosine similarity
+                    nov_loss = novelty_loss(proxies, dense_x, node_mask=dense_mask)
+                    loss = loss + args.novelty_alpha * nov_loss
+                    novelty_loss_val = (args.novelty_alpha * nov_loss).item()
 
                 # Diversity loss (if enabled)
                 diversity_loss_val = 0.0
@@ -1212,33 +1186,11 @@ def run_stage3(args, model_path, generator_path):
 
                     # Novelty loss (if enabled)
                     novelty_loss_val = 0.0
-                    if (args.novelty_alpha > 0.0 or args.novelty_alpha_node > 0.0) and args.backbone != "gred":
-                        # Get logits without proxies in no_grad
-                        with torch.no_grad():
-                            if args.backbone == "vanilla_gt":
-                                logits_without, node_emb_without = model(
-                                    batch, precomputed_dense=(dense_x, dense_mask),
-                                    disable_proxy_injection=True
-                                , readout_scope=args.readout_scope)
-                            elif args.backbone == "hybrid":
-                                logits_without, node_emb_without = model(
-                                    batch, dist_masks_batch, node_masks_batch,
-                                    precomputed_dense=(dense_x, dense_mask),
-                                    precomputed_gred=gred_h,
-                                    disable_proxy_injection=True
-                                , readout_scope=args.readout_scope)
-                        # Compute novelty loss
-                        nov_loss, nov_metrics = novelty_loss(
-                            task_loss, logits, logits_without,
-                            node_emb_with=node_emb,
-                            node_emb_without=node_emb_without,
-                            mask=batch.batch_mask if hasattr(batch, 'batch_mask') else None,
-                            alpha=args.novelty_alpha,
-                            alpha_node=args.novelty_alpha_node,
-                            temperature=args.novelty_temperature
-                        )
-                        loss = loss + nov_loss
-                        novelty_loss_val = nov_loss.item()
+                    if args.novelty_alpha > 0.0 and args.backbone != "gred":
+                        # Compute novelty loss: proxy-node cosine similarity
+                        nov_loss = novelty_loss(proxies, dense_x, node_mask=dense_mask)
+                        loss = loss + args.novelty_alpha * nov_loss
+                        novelty_loss_val = (args.novelty_alpha * nov_loss).item()
 
                     # Diversity loss (if enabled)
                     diversity_loss_val = 0.0

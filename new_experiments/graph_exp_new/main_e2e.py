@@ -156,12 +156,8 @@ def build_parser():
                    help="Geometric decay factor for multi-point aux losses.")
 
     # Novelty loss hyperparameters
-    p.add_argument("--novelty_temperature", type=float, default=1.0,
-                   help="Sigmoid temperature for output-level novelty.")
     p.add_argument("--novelty_alpha", type=float, default=0.0,
-                   help="Weight for output_penalty. 0 disables novelty loss.")
-    p.add_argument("--novelty_alpha_node", type=float, default=0.0,
-                   help="Weight for node_penalty. 0 disables node-level novelty.")
+                   help="Weight for novelty loss (proxy-node cosine similarity). 0 disables.")
 
     # Proxy diversity loss
     p.add_argument("--diversity_weight", type=float, default=0.0,
@@ -632,24 +628,16 @@ def run_e2e(args):
             )
             task_loss = loss_fn(logits, batch.y)
 
-            # Novelty loss
-            use_novelty = (args.novelty_alpha > 0 or args.novelty_alpha_node > 0) and use_proxies
-            if use_novelty:
-                with torch.no_grad():
-                    logits_without, _, _, node_emb_without, _ = forward_e2e(
-                        model, generator, batch, args, use_proxies=False,
-                        dist_masks=dist_masks_batch, node_masks=node_masks_batch)
-                node_w = node_emb_with if args.novelty_alpha_node > 0 else None
-                node_wo = node_emb_without if args.novelty_alpha_node > 0 else None
-                total_loss, nov_metrics = novelty_loss(
-                    task_loss, logits, logits_without.detach(),
-                    node_w, node_wo.detach() if node_wo is not None else None,
-                    mask=None, alpha=args.novelty_alpha,
-                    alpha_node=args.novelty_alpha_node,
-                    temperature=args.novelty_temperature)
-                total_loss = total_loss + args.mmd_lambda * mmd_loss + aux_loss
-            else:
-                total_loss = task_loss + args.mmd_lambda * mmd_loss + aux_loss
+            # Novelty loss (proxy-node cosine similarity)
+            use_novelty = args.novelty_alpha > 0 and use_proxies
+            novelty_loss_val = torch.tensor(0.0, device=batch.x.device)
+            if use_novelty and proxy_emb is not None:
+                # Compute dense node embeddings for novelty loss
+                dense_x, dense_mask = model.encode_dense(batch)
+                # novelty_loss(proxies, node_emb, node_mask=None, eps=1e-8) -> scalar
+                novelty_loss_val = novelty_loss(proxy_emb, dense_x, node_mask=dense_mask)
+
+            total_loss = task_loss + args.mmd_lambda * mmd_loss + aux_loss + args.novelty_alpha * novelty_loss_val
 
             # Diversity loss
             if args.diversity_weight > 0 and proxy_emb is not None:
@@ -668,8 +656,7 @@ def run_e2e(args):
 
             # Log novelty metrics
             if use_novelty:
-                if 'novelty_loss' in nov_metrics:
-                    train_novelty_losses.append(nov_metrics['novelty_loss'])
+                train_novelty_losses.append(novelty_loss_val.item())
             # Log diversity metrics
             if args.diversity_weight > 0 and proxy_emb is not None:
                 train_diversity_losses.append(proxy_diversity_loss(proxy_emb).item())

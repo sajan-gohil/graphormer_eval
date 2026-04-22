@@ -195,12 +195,8 @@ def build_parser():
     p.add_argument("--s4_weight_decay", type=float, default=1e-4)
 
     # Novelty loss hyperparameters (Stage 4)
-    p.add_argument("--novelty_temperature", type=float, default=1.0,
-                   help="Sigmoid temperature for output-level novelty.")
     p.add_argument("--novelty_alpha", type=float, default=0.0,
-                   help="Weight for output_penalty. 0 disables novelty loss.")
-    p.add_argument("--novelty_alpha_node", type=float, default=0.0,
-                   help="Weight for node_penalty. 0 disables node-level novelty.")
+                   help="Weight for proxy-node cosine similarity novelty loss. 0 disables novelty loss.")
 
     # Proxy diversity loss
     p.add_argument("--diversity_weight", type=float, default=0.0,
@@ -1334,10 +1330,8 @@ def run_stage4(args, model_path, generator_path):
     print(f"  Backbone: {args.backbone}", flush=True)
     print(f"  LR transformer={args.s4_lr_transformer}, "
           f"LR generator={args.s4_lr_generator}", flush=True)
-    if args.novelty_alpha > 0 or args.novelty_alpha_node > 0:
-        print(f"  Novelty loss: alpha={args.novelty_alpha}, "
-              f"alpha_node={args.novelty_alpha_node}, "
-              f"temperature={args.novelty_temperature}", flush=True)
+    if args.novelty_alpha > 0:
+        print(f"  Novelty loss: alpha={args.novelty_alpha}", flush=True)
     if args.diversity_weight > 0:
         print(f"  Diversity loss: weight={args.diversity_weight}", flush=True)
     print("=" * 60, flush=True)
@@ -1409,7 +1403,7 @@ def run_stage4(args, model_path, generator_path):
     )
 
     loss_fn = nn.BCEWithLogitsLoss()
-    use_novelty = args.novelty_alpha > 0 or args.novelty_alpha_node > 0
+    use_novelty = args.novelty_alpha > 0
 
     best_val_ap = 0.0
     best_val_loss = float("inf")
@@ -1453,7 +1447,7 @@ def run_stage4(args, model_path, generator_path):
                 task_loss = loss_fn(logits, batch.y)
                 loss = task_loss
 
-                # Novelty loss for multi-point path
+                # Novelty loss for multi-point path (proxy-output contrast)
                 if use_novelty:
                     with torch.no_grad():
                         if args.backbone == "vanilla_gt":
@@ -1461,11 +1455,9 @@ def run_stage4(args, model_path, generator_path):
                         else:
                             logits_without, _ = model(batch, dist_masks_batch, node_masks_batch,
                                                        disable_proxy_injection=True, readout_scope=args.readout_scope)
-                    node_penalty_term = torch.tensor(0.0, device=batch.y.device)
                     output_penalty_term = torch.sigmoid(logits) - torch.sigmoid(logits_without)
                     output_penalty_term = output_penalty_term.pow(2).mean()
-                    novelty_component = (args.novelty_alpha * output_penalty_term +
-                                        args.novelty_alpha_node * node_penalty_term)
+                    novelty_component = args.novelty_alpha * output_penalty_term
                     loss = loss + novelty_component
                     novelty_losses_log.append(novelty_component.item())
 
@@ -1507,37 +1499,15 @@ def run_stage4(args, model_path, generator_path):
                 if aux_gen_loss is not None:
                     loss = loss + aux_gen_loss
 
-                # Novelty loss: requires forward without proxies
+                # Novelty loss: proxy-node cosine similarity
                 if use_novelty and args.backbone != "gred":
-                    with torch.no_grad():
-                        if args.backbone == "vanilla_gt":
-                            logits_without, _ = model(batch, precomputed_dense=(dense_x, dense_mask),
-                                                       disable_proxy_injection=True, readout_scope=args.readout_scope)
-                        elif args.backbone == "hybrid":
-                            logits_without, _ = model(batch, dist_masks_batch, node_masks_batch,
-                                                       precomputed_dense=(dense_x, dense_mask),
-                                                       precomputed_gred=gred_h,
-                                                       disable_proxy_injection=True, readout_scope=args.readout_scope)
-                        # Get node embeddings without proxies
-                        node_emb_without = model.layers[-1].output if hasattr(model.layers[-1], 'output') else None
-
-                    # Compute novelty loss with the novelty_loss function
-                    batch_mask = _dense_mask_to_batch_vec(dense_mask)
-                    node_emb_with = model.layers[-1].output if hasattr(model.layers[-1], 'output') else None
-
                     novelty_component = novelty_loss(
-                        task_loss=task_loss,
-                        logits_with=logits,
-                        logits_without=logits_without,
-                        node_emb_with=node_emb_with,
-                        node_emb_without=node_emb_without,
-                        mask=batch_mask,
-                        alpha=args.novelty_alpha,
-                        alpha_node=args.novelty_alpha_node,
-                        temperature=args.novelty_temperature,
+                        proxies=proxy_emb,
+                        node_emb=dense_x,
+                        node_mask=dense_mask,
                     )
-                    loss = loss + novelty_component[0]
-                    novelty_losses_log.append(novelty_component[0].item())
+                    loss = loss + args.novelty_alpha * novelty_component
+                    novelty_losses_log.append(novelty_component.item())
 
                 # Proxy diversity loss
                 if args.diversity_weight > 0:

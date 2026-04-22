@@ -36,9 +36,7 @@ python main_adversarial_distillation.py \
     --s3_lr_gen 5e-4 --s3_lr_transformer 1e-5 --s3_max_epochs 1000 --s3_patience 50 --s3_grad_clip 0.5 \
     --dropout 0.2 --s1_weight_decay 1e-3 \
     \
-    --novelty_temperature 1 \
     --novelty_alpha 0.1 \
-    --novelty_alpha_node 0.1 \
     --diversity_weight 0.5 \
     \
     --distill_lr 5e-5 \

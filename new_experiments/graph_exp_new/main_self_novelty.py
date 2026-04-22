@@ -1,16 +1,15 @@
 """
 Self-Novelty Proxy Pipeline — main_self_novelty.py
 
-Proxy generator trained with a self-referential novelty signal: each batch
-runs the same current model twice (with proxies, without proxies) and
-penalises proxies that fail to shift the output distribution or the node
-representations away from the no-proxy baseline. Task loss keeps the shift
-task-useful; no teacher matching, no reconstruction targets.
+Proxy generator trained with a novelty signal: proxy–node cosine similarity
+is minimised so that proxies are pushed away from the existing node-embedding
+manifold. Task loss keeps the proxies task-useful. Single-pass — no dual
+with/without-proxy inference required.
 
 Stages:
     1. Pretrain backbone on full N-node graphs (standard BCE).
     2. Train generator with the frozen backbone using
-       task_loss + alpha * output_penalty + alpha_node * node_penalty.
+       task_loss + alpha * novelty_loss(proxies, node_emb).
     3. Joint finetune backbone + generator with the same loss.
 
 Usage:
@@ -126,14 +125,9 @@ def build_parser():
     p.add_argument("--s3_grad_clip", type=float, default=1.0)
     p.add_argument("--s3_weight_decay", type=float, default=1e-4)
 
-    # Novelty loss hyperparameters
-    p.add_argument("--novelty_temperature", type=float, default=1.0,
-                   help="Sigmoid temperature for output-level novelty. 1.0 = unscaled.")
+    # Novelty loss (proxy–node cosine similarity)
     p.add_argument("--novelty_alpha", type=float, default=1.0,
-                   help="Weight for output_penalty = 1 - output_novelty.")
-    p.add_argument("--novelty_alpha_node", type=float, default=1.0,
-                   help="Weight for node_penalty = 2 - node_novelty. "
-                        "Set 0 to disable node-level novelty.")
+                   help="Weight on proxy–node cosine similarity loss.")
 
     # Proxy diversity loss
     p.add_argument("--diversity_weight", type=float, default=1.0,
@@ -646,8 +640,7 @@ def run_stage2(args, model_path):
     print("\n" + "=" * 60, flush=True)
     print(f"STAGE 2: Train generator ({args.generator}) with self-novelty", flush=True)
     print(f"  Backbone: {args.backbone} (frozen)", flush=True)
-    print(f"  alpha={args.novelty_alpha} alpha_node={args.novelty_alpha_node} "
-          f"T={args.novelty_temperature}", flush=True)
+    print(f"  novelty_alpha={args.novelty_alpha}", flush=True)
     if _parse_insertion_layers(args.proxy_insertion_layers) is not None:
         print(f"  Multi-point insertion layers: {_parse_insertion_layers(args.proxy_insertion_layers)}", flush=True)
     print("=" * 60, flush=True)
@@ -704,10 +697,7 @@ def run_stage2(args, model_path):
 
         train_task_losses = []
         train_total_losses = []
-        train_output_novelty = []
-        train_node_novelty = []
-        train_output_penalty = []
-        train_node_penalty = []
+        train_novelty = []
         train_diversity_loss = []
         inter_proxy_mean = []
         inter_proxy_std = []
@@ -740,39 +730,21 @@ def run_stage2(args, model_path):
                 # Wrapper generates proxies internally during the with-proxies forward.
                 proxies, aux_loss = None, None
 
-            # ── With proxies (gradient)
-            logits_with, node_emb_with_flat, mp_aux = _forward_with_proxies(
+            # ── Forward with proxies
+            logits_with, _, mp_aux = _forward_with_proxies(
                 model, batch, dist_masks, node_masks,
                 proxies, dense_x, dense_mask, gred_h, args,
             )
 
-            # ── Without proxies (no gradient needed)
-            with torch.no_grad():
-                logits_without, node_emb_without_flat = _forward_without_proxies(
-                    model, batch, dist_masks, node_masks,
-                    dense_x, dense_mask, gred_h, args,
-                )
-
             # Task loss on the with-proxies forward
             task = loss_fn(logits_with, batch.y)
 
-            # Node-level novelty over original-N positions only.
-            # Both node_emb_* come back flat (total_N, d) aligned with dense_mask.
-            node_emb_with = node_emb_with_flat if args.novelty_alpha_node > 0 else None
-            node_emb_without = node_emb_without_flat if args.novelty_alpha_node > 0 else None
-
-            total, metrics = novelty_loss(
-                task_loss=task,
-                logits_with=logits_with,
-                logits_without=logits_without.detach(),
-                node_emb_with=node_emb_with,
-                node_emb_without=(node_emb_without.detach()
-                                  if node_emb_without is not None else None),
-                mask=None,                         # flat inputs
-                alpha=args.novelty_alpha,
-                alpha_node=args.novelty_alpha_node,
-                temperature=args.novelty_temperature,
-            )
+            # Proxy–node novelty (single-pass, no dual inference)
+            if proxies is not None and args.novelty_alpha > 0:
+                nov = novelty_loss(proxies, dense_x, dense_mask)
+            else:
+                nov = torch.tensor(0.0, device=task.device)
+            total = task + args.novelty_alpha * nov
 
             # Proxy diversity loss
             if args.diversity_weight > 0 and proxies is not None:
@@ -798,13 +770,9 @@ def run_stage2(args, model_path):
             optimizer.step()
             scheduler.step()
 
-            train_task_losses.append(metrics["task_loss"].item())
+            train_task_losses.append(task.detach().item())
             train_total_losses.append(total.item())
-            train_output_novelty.append(metrics["output_novelty"].item())
-            train_output_penalty.append(metrics["output_penalty"].item())
-            if "node_novelty" in metrics:
-                train_node_novelty.append(metrics["node_novelty"].item())
-                train_node_penalty.append(metrics["node_penalty"].item())
+            train_novelty.append(nov.detach().item())
             train_diversity_loss.append(div_loss.item())
 
             if proxies is not None:
@@ -814,10 +782,7 @@ def run_stage2(args, model_path):
 
         mean_task = float(np.mean(train_task_losses))
         mean_total = float(np.mean(train_total_losses))
-        mean_out_nov = float(np.mean(train_output_novelty))
-        mean_out_pen = float(np.mean(train_output_penalty))
-        mean_node_nov = float(np.mean(train_node_novelty)) if train_node_novelty else float("nan")
-        mean_node_pen = float(np.mean(train_node_penalty)) if train_node_penalty else float("nan")
+        mean_nov = float(np.mean(train_novelty))
         mean_div_loss = float(np.mean(train_diversity_loss)) if train_diversity_loss else float("nan")
         mean_ip = float(np.mean(inter_proxy_mean)) if inter_proxy_mean else float("nan")
         std_ip = float(np.mean(inter_proxy_std)) if inter_proxy_std else float("nan")
@@ -834,10 +799,8 @@ def run_stage2(args, model_path):
 
             print(
                 f"Epoch {epoch:3d}/{args.s2_max_epochs} [{elapsed:.1f}s{mem}] | "
-                f"total={mean_total:.4f} task={mean_task:.4f} | "
-                f"out_nov={mean_out_nov:.4f} out_pen={mean_out_pen:.4f} | "
-                f"node_nov={mean_node_nov:.4f} node_pen={mean_node_pen:.4f} | "
-                f"ip_mean={mean_ip:.4f} ip_std={std_ip:.4f} | "
+                f"total={mean_total:.4f} task={mean_task:.4f} novelty={mean_nov:.4f} | "
+                f"div={mean_div_loss:.4f} ip_mean={mean_ip:.4f} ip_std={std_ip:.4f} | "
                 f"val_loss={val_loss:.4f} val_AP={val_ap:.4f} | "
                 f"test_loss={test_loss:.4f} test_AP={test_ap:.4f}",
                 flush=True,
@@ -846,8 +809,7 @@ def run_stage2(args, model_path):
             diagnostics.append({
                 "epoch": epoch,
                 "total_loss": mean_total, "task_loss": mean_task,
-                "output_novelty": mean_out_nov, "output_penalty": mean_out_pen,
-                "node_novelty": mean_node_nov, "node_penalty": mean_node_pen,
+                "novelty": mean_nov,
                 "diversity_loss": mean_div_loss,
                 "inter_proxy_cos_mean": mean_ip, "inter_proxy_cos_std": std_ip,
                 "val_ap": val_ap, "test_ap": test_ap,
@@ -870,7 +832,7 @@ def run_stage2(args, model_path):
             elapsed = time.time() - t0
             print(f"Epoch {epoch:3d}/{args.s2_max_epochs} [{elapsed:.1f}s] | "
                   f"total={mean_total:.4f} task={mean_task:.4f} "
-                  f"out_nov={mean_out_nov:.4f} node_nov={mean_node_nov:.4f}",
+                  f"novelty={mean_nov:.4f}",
                   flush=True)
 
     diag_path = os.path.join(args.save_dir, "stage2_diagnostics.pkl")
@@ -890,8 +852,7 @@ def run_stage3(args, model_path, generator_path):
     print(f"STAGE 3: Joint finetune (backbone + generator)", flush=True)
     print(f"  Backbone: {args.backbone}", flush=True)
     print(f"  lr_gen={args.s3_lr_gen} lr_backbone={args.s3_lr_transformer}", flush=True)
-    print(f"  alpha={args.novelty_alpha} alpha_node={args.novelty_alpha_node} "
-          f"T={args.novelty_temperature}", flush=True)
+    print(f"  novelty_alpha={args.novelty_alpha}", flush=True)
     if _parse_insertion_layers(args.proxy_insertion_layers) is not None:
         print(f"  Multi-point insertion layers: {_parse_insertion_layers(args.proxy_insertion_layers)}", flush=True)
     print("=" * 60, flush=True)
@@ -959,8 +920,7 @@ def run_stage3(args, model_path, generator_path):
         generator.train()
 
         train_task_losses, train_total_losses = [], []
-        train_output_novelty, train_output_penalty = [], []
-        train_node_novelty, train_node_penalty = [], []
+        train_novelty = []
         train_diversity_loss = []
         inter_proxy_mean, inter_proxy_std = [], []
         all_preds, all_labels = [], []
@@ -975,7 +935,7 @@ def run_stage3(args, model_path, generator_path):
                 batch = batch_data.to(args.device)
                 dist_masks = node_masks = None
 
-            # With grad through model: encode once, reuse for both forwards
+            # With grad through model: encode once
             dense_x, dense_mask = model.encode_dense(batch)
             gred_h = None
             if args.backbone == "hybrid":
@@ -990,37 +950,20 @@ def run_stage3(args, model_path, generator_path):
             else:
                 proxies, aux_loss = None, None
 
-            # With-proxies (gradient flows end-to-end)
-            logits_with, node_emb_with_flat, mp_aux = _forward_with_proxies(
+            # Forward with proxies (gradient flows end-to-end)
+            logits_with, _, mp_aux = _forward_with_proxies(
                 model, batch, dist_masks, node_masks,
                 proxies, dense_x, dense_mask, gred_h, args,
             )
 
-            # Without-proxies (no grad; used only as novelty reference)
-            with torch.no_grad():
-                logits_without, node_emb_without_flat = _forward_without_proxies(
-                    model, batch, dist_masks, node_masks,
-                    dense_x.detach(), dense_mask,
-                    gred_h.detach() if gred_h is not None else None,
-                    args,
-                )
-
             task = loss_fn(logits_with, batch.y)
-            node_emb_with = node_emb_with_flat if args.novelty_alpha_node > 0 else None
-            node_emb_without = node_emb_without_flat if args.novelty_alpha_node > 0 else None
 
-            total, metrics = novelty_loss(
-                task_loss=task,
-                logits_with=logits_with,
-                logits_without=logits_without.detach(),
-                node_emb_with=node_emb_with,
-                node_emb_without=(node_emb_without.detach()
-                                  if node_emb_without is not None else None),
-                mask=None,
-                alpha=args.novelty_alpha,
-                alpha_node=args.novelty_alpha_node,
-                temperature=args.novelty_temperature,
-            )
+            # Proxy–node novelty (single-pass, no dual inference)
+            if proxies is not None and args.novelty_alpha > 0:
+                nov = novelty_loss(proxies, dense_x, dense_mask)
+            else:
+                nov = torch.tensor(0.0, device=task.device)
+            total = task + args.novelty_alpha * nov
 
             # Proxy diversity loss
             if args.diversity_weight > 0 and proxies is not None:
@@ -1047,13 +990,9 @@ def run_stage3(args, model_path, generator_path):
             optimizer.step()
             scheduler.step()
 
-            train_task_losses.append(metrics["task_loss"].item())
+            train_task_losses.append(task.detach().item())
             train_total_losses.append(total.item())
-            train_output_novelty.append(metrics["output_novelty"].item())
-            train_output_penalty.append(metrics["output_penalty"].item())
-            if "node_novelty" in metrics:
-                train_node_novelty.append(metrics["node_novelty"].item())
-                train_node_penalty.append(metrics["node_penalty"].item())
+            train_novelty.append(nov.detach().item())
             train_diversity_loss.append(div_loss.item())
             if proxies is not None:
                 m_s, s_s = inter_proxy_cosine_stats(proxies)
@@ -1066,10 +1005,7 @@ def run_stage3(args, model_path, generator_path):
         train_ap = compute_macro_ap(np.concatenate(all_preds), np.concatenate(all_labels))
         mean_task = float(np.mean(train_task_losses))
         mean_total = float(np.mean(train_total_losses))
-        mean_out_nov = float(np.mean(train_output_novelty))
-        mean_out_pen = float(np.mean(train_output_penalty))
-        mean_node_nov = float(np.mean(train_node_novelty)) if train_node_novelty else float("nan")
-        mean_node_pen = float(np.mean(train_node_penalty)) if train_node_penalty else float("nan")
+        mean_nov = float(np.mean(train_novelty))
         mean_div_loss = float(np.mean(train_diversity_loss)) if train_diversity_loss else float("nan")
         mean_ip = float(np.mean(inter_proxy_mean)) if inter_proxy_mean else float("nan")
         std_ip = float(np.mean(inter_proxy_std)) if inter_proxy_std else float("nan")
@@ -1085,8 +1021,7 @@ def run_stage3(args, model_path, generator_path):
         print(
             f"Epoch {epoch:3d}/{args.s3_max_epochs} [{elapsed:.1f}s{mem}] | "
             f"total={mean_total:.4f} task={mean_task:.4f} train_AP={train_ap:.4f} | "
-            f"out_nov={mean_out_nov:.4f} out_pen={mean_out_pen:.4f} | "
-            f"node_nov={mean_node_nov:.4f} node_pen={mean_node_pen:.4f} | "
+            f"novelty={mean_nov:.4f} div={mean_div_loss:.4f} | "
             f"ip_mean={mean_ip:.4f} ip_std={std_ip:.4f} | "
             f"val_loss={val_loss:.4f} val_AP={val_ap:.4f} | "
             f"test_loss={test_loss:.4f} test_AP={test_ap:.4f}",
@@ -1096,8 +1031,7 @@ def run_stage3(args, model_path, generator_path):
         diagnostics.append({
             "epoch": epoch,
             "total_loss": mean_total, "task_loss": mean_task, "train_ap": train_ap,
-            "output_novelty": mean_out_nov, "output_penalty": mean_out_pen,
-            "node_novelty": mean_node_nov, "node_penalty": mean_node_pen,
+            "novelty": mean_nov,
             "diversity_loss": mean_div_loss,
             "inter_proxy_cos_mean": mean_ip, "inter_proxy_cos_std": std_ip,
             "val_ap": val_ap, "test_ap": test_ap,

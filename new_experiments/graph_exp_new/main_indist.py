@@ -142,12 +142,8 @@ def build_parser():
     p.add_argument("--p5_weight_decay", type=float, default=5e-5)
 
     # Novelty loss hyperparameters
-    p.add_argument("--novelty_temperature", type=float, default=1.0,
-                   help="Sigmoid temperature for output-level novelty.")
     p.add_argument("--novelty_alpha", type=float, default=0.0,
-                   help="Weight for output_penalty. 0 disables novelty loss.")
-    p.add_argument("--novelty_alpha_node", type=float, default=0.0,
-                   help="Weight for node_penalty. 0 disables node-level novelty.")
+                   help="Weight for novelty loss. 0 disables novelty loss.")
 
     # Proxy diversity loss
     p.add_argument("--diversity_weight", type=float, default=0.0,
@@ -1177,36 +1173,10 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
                 l_task = loss_fn(logits, batch.y)
 
             # Novelty loss (when enabled)
-            use_novelty = (args.novelty_alpha > 0 or args.novelty_alpha_node > 0) and not args.p3_no_task_loss
-            nov_metrics = {}
-            if use_novelty:
-                # logits and node_emb_with from with-proxies forward above
-                # Need without-proxies forward through phase2_model
-                with torch.no_grad():
-                    if args.backbone == "vanilla_gt":
-                        logits_without, node_emb_without = phase2_model(
-                            batch, precomputed_dense=(sub_x, sub_mask))
-                    elif args.backbone == "hybrid":
-                        logits_without, node_emb_without = phase2_model(
-                            batch, sub_dm, sub_nm,
-                            precomputed_dense=(sub_x, sub_mask),
-                            precomputed_gred=gred_h)
-                    elif args.backbone == "gred":
-                        logits_without, node_emb_without = phase2_model(
-                            batch, sub_dm, sub_nm,
-                            precomputed_dense=(sub_x, sub_mask))
-
-                node_w = node_emb_with if args.novelty_alpha_node > 0 else None
-                node_wo = node_emb_without if args.novelty_alpha_node > 0 else None
-                # novelty_loss returns (total_loss, metrics_dict)
-                nov_total, nov_metrics = novelty_loss(
-                    l_task, logits, logits_without.detach(),
-                    node_w, node_wo.detach() if node_wo is not None else None,
-                    mask=None, alpha=args.novelty_alpha,
-                    alpha_node=args.novelty_alpha_node,
-                    temperature=args.novelty_temperature)
-                # nov_total already includes l_task, so replace l_task with novelty-augmented version
-                l_task = nov_total
+            if args.novelty_alpha > 0 and not args.p3_no_task_loss:
+                # Compute proxy-node cosine similarity
+                nov_loss = novelty_loss(proxies, node_emb_with, node_mask=sub_mask)
+                l_task = l_task + args.novelty_alpha * nov_loss
 
             # Proxy diversity loss
             diversity_loss = torch.tensor(0.0, device=args.device)
@@ -1668,29 +1638,14 @@ def run_phase5(args, phase1_model_path, generator_path):
                     raise ValueError("GRED backbone does not support proxy integration. Use 'hybrid'.")
 
                 # Novelty loss (when enabled)
-                use_novelty_mp = args.novelty_alpha > 0 or args.novelty_alpha_node > 0
-                if use_novelty_mp:
-                    with torch.no_grad():
-                        if args.backbone == "vanilla_gt":
-                            logits_without, node_emb_without = model(
-                                batch, readout_scope=args.readout_scope, disable_proxy_injection=True)
-                        elif args.backbone == "hybrid":
-                            logits_without, node_emb_without = model(
-                                batch, dist_masks_batch, node_masks_batch,
-                                readout_scope=args.readout_scope, disable_proxy_injection=True)
-
-                    node_w = node_emb_with if args.novelty_alpha_node > 0 else None
-                    node_wo = node_emb_without if args.novelty_alpha_node > 0 else None
-                    base_task_loss = loss_fn(logits, batch.y)
-                    nov_total, _ = novelty_loss(
-                        base_task_loss, logits, logits_without.detach(),
-                        node_w, node_wo.detach() if node_wo is not None else None,
-                        mask=None, alpha=args.novelty_alpha,
-                        alpha_node=args.novelty_alpha_node,
-                        temperature=args.novelty_temperature)
-                    loss = nov_total
-                else:
-                    loss = loss_fn(logits, batch.y)
+                loss = loss_fn(logits, batch.y)
+                if args.novelty_alpha > 0:
+                    # Get proxies from multi-point wrapper
+                    if hasattr(model.multi_point_proxy, '_last_proxies'):
+                        mp_proxies = model.multi_point_proxy._last_proxies
+                        # Compute proxy-node cosine similarity
+                        nov_loss = novelty_loss(mp_proxies, node_emb_with, node_mask=None)
+                        loss = loss + args.novelty_alpha * nov_loss
 
                 # Proxy diversity loss (proxies from multi-point wrapper)
                 if args.diversity_weight > 0 and hasattr(model.multi_point_proxy, '_last_proxies'):
@@ -1738,34 +1693,11 @@ def run_phase5(args, phase1_model_path, generator_path):
                             batch, dist_masks_batch, node_masks_batch)
 
                     # Novelty loss (when enabled)
-                    use_novelty_p5 = args.novelty_alpha > 0 or args.novelty_alpha_node > 0
-                    if use_novelty_p5:
-                        with torch.no_grad():
-                            if args.backbone == "vanilla_gt":
-                                logits_without, node_emb_without = model(
-                                    batch, precomputed_dense=(dense_x, dense_mask))
-                            elif args.backbone == "hybrid":
-                                logits_without, node_emb_without = model(
-                                    batch, dist_masks_batch, node_masks_batch,
-                                    precomputed_dense=(dense_x, dense_mask),
-                                    precomputed_gred=gred_h)
-                            elif args.backbone == "gred":
-                                logits_without, node_emb_without = model(
-                                    batch, dist_masks_batch, node_masks_batch,
-                                    precomputed_dense=(dense_x, dense_mask))
-
-                        node_w = node_emb_with if args.novelty_alpha_node > 0 else None
-                        node_wo = node_emb_without if args.novelty_alpha_node > 0 else None
-                        base_task_loss = loss_fn(logits, batch.y)
-                        nov_total, _ = novelty_loss(
-                            base_task_loss, logits, logits_without.detach(),
-                            node_w, node_wo.detach() if node_wo is not None else None,
-                            mask=None, alpha=args.novelty_alpha,
-                            alpha_node=args.novelty_alpha_node,
-                            temperature=args.novelty_temperature)
-                        loss = nov_total
-                    else:
-                        loss = loss_fn(logits, batch.y)
+                    loss = loss_fn(logits, batch.y)
+                    if args.novelty_alpha > 0:
+                        # Compute proxy-node cosine similarity
+                        nov_loss = novelty_loss(proxies, node_emb_with, node_mask=dense_mask)
+                        loss = loss + args.novelty_alpha * nov_loss
 
                     # Proxy diversity loss
                     if args.diversity_weight > 0:

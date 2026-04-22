@@ -1,24 +1,21 @@
 """
-Self-novelty losses for proxy generator training.
+Proxy–node novelty and diversity losses for proxy generator training.
 
-Drops in as a pluggable replacement for reconstruction / static-target losses in
-any pipeline: call ``novelty_loss(task_loss, logits_with, logits_without, ...)``
-with a with-proxies forward and a (detached) without-proxies forward of the
-same model, and add the returned total to the optimizer step.
+Primary loss:
+    novelty_loss(proxies, node_emb, node_mask)
+        → mean cosine similarity over the full (B, M, N) proxy–node matrix.
+        Minimising pushes proxy embeddings away from existing node
+        embeddings, forcing the generator to discover novel contributions.
 
-Formulation (from NOVELTY_LOSS_PROPOSAL.md):
-    output_novelty = || sigmoid(logits_with/T) - sigmoid(logits_without/T) ||_2 / sqrt(C)
-    node_novelty   = mean over original nodes of (1 - cos(emb_with, emb_without))
+    L = task_loss + alpha * novelty_loss(proxies, node_emb, node_mask)
 
-    output_penalty = 1 - output_novelty           # in [0, 1]
-    node_penalty   = 2 - node_novelty             # in [0, 2]
+Single-pass: no dual with/without-proxy inference required, so it works
+identically in every pipeline (staged, self-novelty, adversarial distillation).
 
-    L = task_loss + alpha * output_penalty + alpha_node * node_penalty
-
-Sigmoid + L2 is the multi-label-correct analog of softmax + JSD: outputs are
-independent per-class Bernoulli probabilities, not a simplex. The linear
-penalty form (not hinge) always has a gradient pushing novelty upward; task
-loss balances it against the "proxies must be useful" objective.
+Complementary diversity loss:
+    proxy_diversity_loss(proxies)
+        → mean off-diagonal inter-proxy cosine similarity.
+        Minimising pushes proxies apart from *each other*.
 """
 
 from typing import Optional, Tuple
@@ -28,116 +25,87 @@ import torch.nn.functional as F
 
 
 # ================================================================
-# NOVELTY PRIMITIVES
-# ================================================================
-
-def compute_output_novelty(
-    logits_with: torch.Tensor,
-    logits_without: torch.Tensor,
-    temperature: float = 1.0,
-) -> torch.Tensor:
-    """Per-sample L2 between sigmoid outputs, normalized by sqrt(C), averaged.
-
-    Args:
-        logits_with:    (B, C) logits from model with proxies.
-        logits_without: (B, C) logits from model without proxies (typically detached).
-        temperature:    sigmoid temperature. 1.0 = unscaled; >1 softens, <1 sharpens.
-
-    Returns:
-        Scalar in [0, 1].
-    """
-    p_with = torch.sigmoid(logits_with / temperature)
-    p_without = torch.sigmoid(logits_without / temperature)
-    diff = p_with - p_without                       # (B, C)
-    C = diff.shape[-1]
-    per_sample = torch.norm(diff, p=2, dim=-1) / (C ** 0.5)  # (B,)
-    return per_sample.mean()
-
-
-def compute_node_novelty(
-    node_emb_with: torch.Tensor,
-    node_emb_without: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
-    eps: float = 1e-8,
-) -> torch.Tensor:
-    """Mean cosine distance (1 - cos_sim) over original-node positions.
-
-    Accepts either dense ``(B, N, d)`` tensors (with ``mask``) or flat
-    ``(total_N, d)`` tensors (mask ignored). Proxy-token positions must not
-    appear in the inputs — pass the original-N slice only.
-
-    Returns scalar in [0, 2].
-    """
-    if node_emb_with.dim() == 3:
-        if mask is None:
-            raise ValueError("compute_node_novelty: dense input requires a mask")
-        a = node_emb_with[mask]
-        b = node_emb_without[mask]
-    else:
-        a = node_emb_with
-        b = node_emb_without
-
-    cos_sim = F.cosine_similarity(a, b, dim=-1, eps=eps)
-    return (1.0 - cos_sim).mean()
-
-
-# ================================================================
-# COMBINED LOSS
+# NOVELTY LOSS (Proxy–Node Cosine Similarity)
 # ================================================================
 
 def novelty_loss(
-    task_loss: torch.Tensor,
-    logits_with: torch.Tensor,
-    logits_without: torch.Tensor,
-    node_emb_with: Optional[torch.Tensor] = None,
-    node_emb_without: Optional[torch.Tensor] = None,
-    mask: Optional[torch.Tensor] = None,
-    alpha: float = 1.0,
-    alpha_node: float = 1.0,
-    temperature: float = 1.0,
-) -> Tuple[torch.Tensor, dict]:
-    """Combine a precomputed task loss with the self-novelty penalties.
+    proxies: torch.Tensor,
+    node_emb: torch.Tensor,
+    node_mask: Optional[torch.Tensor] = None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Mean cosine similarity across the full M×N proxy–node matrix.
 
-    Node-level term is included only when both ``node_emb_with`` and
-    ``node_emb_without`` are provided.
+    Computes the (B, M, N) pairwise cosine similarity between every proxy
+    and every real node, then averages over all valid pairs.  The result
+    is in [-1, 1] (cosine similarity's natural range); minimising it pushes
+    proxies away from the node embedding manifold.
+
+    Requires only proxy and node embeddings from a single forward pass —
+    no dual with/without-proxy inference — so it works identically in every
+    pipeline (staged, self-novelty, adversarial distillation).
+
+    Complements ``proxy_diversity_loss`` which pushes proxies apart from
+    *each other* but doesn't prevent them from clustering near existing
+    nodes.
 
     Args:
-        task_loss:         scalar tensor (e.g. BCEWithLogitsLoss output).
-        logits_with:       (B, C) tensor; carries gradient.
-        logits_without:    (B, C) tensor; pass a detached value.
-        node_emb_with:     (B, N, d) or (total_N, d) tensor; carries gradient.
-        node_emb_without:  same shape as ``node_emb_with``; detached.
-        mask:              (B, N) boolean mask if dense node embeddings are used.
-        alpha:             weight on output_penalty (default 1.0).
-        alpha_node:        weight on node_penalty (default 1.0).
-        temperature:       sigmoid temperature for output novelty.
+        proxies:   (B, M, d) generated proxy embeddings.
+        node_emb:  (B, N, d) node embeddings (dense, may be padded).
+        node_mask: (B, N) boolean — True = real node.  Required when
+                   ``node_emb`` contains padding.  If None, all positions
+                   are treated as real.
+        eps:       numerical stability for normalisation.
 
     Returns:
-        (total_loss, metrics) where ``metrics`` is a dict of detached floats
-        for logging: ``task_loss``, ``output_novelty``, ``output_penalty``,
-        and, when node embeddings are supplied, ``node_novelty``, ``node_penalty``.
+        Scalar in [-1, 1].
     """
-    output_novelty = compute_output_novelty(logits_with, logits_without, temperature)
-    output_penalty = 1.0 - output_novelty
+    p_norm = F.normalize(proxies, p=2, dim=-1, eps=eps)    # (B, M, d)
+    n_norm = F.normalize(node_emb, p=2, dim=-1, eps=eps)   # (B, N, d)
 
-    total = task_loss + alpha * output_penalty
+    # (B, M, N) cosine similarity for every proxy–node pair
+    sim = torch.bmm(p_norm, n_norm.transpose(1, 2))
 
-    metrics = {
-        "task_loss": task_loss.detach(),
-        "output_novelty": output_novelty.detach(),
-        "output_penalty": output_penalty.detach(),
-    }
+    if node_mask is not None:
+        # Zero out padding columns so they don't contribute to the mean
+        valid = node_mask.unsqueeze(1).float()          # (B, 1, N)
+        sim = sim * valid
+        return sim.sum() / (valid.sum() * proxies.shape[1]).clamp(min=1)
+    else:
+        return sim.mean()
 
-    if node_emb_with is not None and node_emb_without is not None:
-        node_novelty = compute_node_novelty(
-            node_emb_with, node_emb_without, mask=mask
-        )
-        node_penalty = 2.0 - node_novelty
-        total = total + alpha_node * node_penalty
-        metrics["node_novelty"] = node_novelty.detach()
-        metrics["node_penalty"] = node_penalty.detach()
 
-    return total, metrics
+def novelty_stats(
+    proxies: torch.Tensor,
+    node_emb: torch.Tensor,
+    node_mask: Optional[torch.Tensor] = None,
+    eps: float = 1e-8,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Logging stats for the M×N proxy–node cosine similarity (detached).
+
+    Returns:
+        mean_sim:     mean over all valid (proxy, node) pairs.
+        max_sim_mean: mean of per-proxy max similarity to any node.
+        max_sim_std:  std of per-proxy max similarities.
+    """
+    p_norm = F.normalize(proxies, p=2, dim=-1, eps=eps)
+    n_norm = F.normalize(node_emb, p=2, dim=-1, eps=eps)
+    sim = torch.bmm(p_norm, n_norm.transpose(1, 2))  # (B, M, N)
+
+    if node_mask is not None:
+        valid = node_mask.unsqueeze(1).float()                # (B, 1, N)
+        mean_sim = (sim * valid).sum() / (valid.sum() * proxies.shape[1]).clamp(min=1)
+        # For max: mask padding with -inf so it can't win
+        sim_for_max = sim.masked_fill(~node_mask.unsqueeze(1), -1e9)
+    else:
+        mean_sim = sim.mean()
+        sim_for_max = sim
+
+    max_per_proxy = sim_for_max.max(dim=-1).values  # (B, M)
+    max_sim_mean = max_per_proxy.mean().detach()
+    max_sim_std = max_per_proxy.std().detach()
+
+    return mean_sim.detach(), max_sim_mean, max_sim_std
 
 
 # ================================================================
