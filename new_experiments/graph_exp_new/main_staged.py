@@ -1523,8 +1523,8 @@ def run_stage4(args, model_path, generator_path):
                         alpha_node=args.novelty_alpha_node,
                         temperature=args.novelty_temperature,
                     )
-                    loss = loss + novelty_component
-                    novelty_losses_log.append(novelty_component.item())
+                    loss = loss + novelty_component[0]
+                    novelty_losses_log.append(novelty_component[0].item())
 
                 # Proxy diversity loss
                 if args.diversity_weight > 0:
@@ -1586,8 +1586,8 @@ def run_stage4(args, model_path, generator_path):
 
         # Add inter-proxy cosine stats to log if available
         if inter_proxy_cosine_log:
-            avg_cosine_mean = np.mean([s['mean'] for s in inter_proxy_cosine_log])
-            avg_cosine_std = np.mean([s['std'] for s in inter_proxy_cosine_log])
+            avg_cosine_mean = np.mean([s[0].cpu() for s in inter_proxy_cosine_log])
+            avg_cosine_std = np.mean([s[1].cpu() for s in inter_proxy_cosine_log])
             log_line += f" | inter_proxy_cosine_mean={avg_cosine_mean:.4f} std={avg_cosine_std:.4f}"
 
         print(log_line, flush=True)
