@@ -27,6 +27,7 @@ from data import get_loaders
 from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
 from generators import (
     ScoreBasedGenerator, GNNPoolingGenerator, PMAGenerator, GraphCoarseningGenerator,
+    GREDLayersGenerator,
     CrossAttentionRouter, MultiPointProxyWrapper,
 )
 from metrics import compute_macro_ap
@@ -53,7 +54,7 @@ def build_parser():
     p.add_argument("--stage", type=str, default="all",
                    choices=["1", "2", "3", "all"])
     p.add_argument("--generator", type=str, default="graph_coarsening",
-                   choices=["score_based", "pma", "graph_coarsening", "gnn_pooling"])
+                   choices=["score_based", "pma", "graph_coarsening", "gnn_pooling", "gred_layers"])
 
     # Backbone
     p.add_argument("--backbone", type=str, default="vanilla_gt",
@@ -357,12 +358,28 @@ def build_generator(args):
             dropout=args.gen_dropout,
             decode_mode=args.decode_mode,
         )
+    elif args.generator == "gred_layers":
+        return GREDLayersGenerator(
+            num_proxies=args.num_proxies,
+            input_dim=args.hidden_dim,
+            state_dim=args.state_dim,
+            num_gred_layers=args.gen_num_layers,
+            hidden_dim=args.gen_hidden_dim,
+            num_refine_layers=1,
+            num_heads=args.gen_num_heads,
+            expand=args.gred_expand,
+            r_min=args.r_min,
+            r_max=args.r_max,
+            max_phase=args.max_phase,
+            dropout=args.gen_dropout,
+            act=args.gred_act,
+        )
     else:
         raise ValueError(f"Unknown generator: {args.generator}")
 
 
 def _generate_proxies(model, generator, batch, dense_x, dense_mask, args,
-                      gred_h=None):
+                      gred_h=None, dist_masks=None, node_masks=None):
     """
     Generate proxy embeddings for a batch.
     dense_x and dense_mask must be precomputed (possibly inside no_grad).
@@ -382,7 +399,11 @@ def _generate_proxies(model, generator, batch, dense_x, dense_mask, args,
             edge_attr=getattr(batch, "edge_attr", None),
         )
     else:
-        proxies, aux_loss = generator(gen_input, gen_mask)
+        proxies, aux_loss = generator(
+            gen_input, gen_mask,
+            dist_masks=dist_masks,
+            node_masks=node_masks,
+        )
     return proxies, aux_loss
 
 
@@ -425,7 +446,11 @@ def downstream_eval(model, generator, loader, device, args):
                 gred_h = model.encode_gred(dense_x, dist_masks_batch, node_masks_batch)
 
             proxies, _ = _generate_proxies(
-                model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
+                model, generator, batch, dense_x, dense_mask, args,
+                gred_h=gred_h,
+                dist_masks=dist_masks_batch,
+                node_masks=node_masks_batch,
+            )
 
             if args.backbone == "vanilla_gt":
                 logits, _ = model(batch, proxy_embeddings=proxies,
@@ -485,7 +510,11 @@ def mean_proxy_eval(model, generator, loader, device, args):
             gred_h = model.encode_gred(dense_x, dist_masks_batch, node_masks_batch)
 
         proxies, _ = _generate_proxies(
-            model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
+            model, generator, batch, dense_x, dense_mask, args,
+            gred_h=gred_h,
+            dist_masks=dist_masks_batch,
+            node_masks=node_masks_batch,
+        )
         # Replace proxies with their mean (collapse to virtual-node equivalent)
         mean_p = proxies.mean(dim=1, keepdim=True).expand_as(proxies)
 
@@ -825,7 +854,11 @@ def run_stage2(args, model_path):
             else:
                 # Standard single-point proxy path
                 proxies, aux_loss = _generate_proxies(
-                    model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
+                    model, generator, batch, dense_x, dense_mask, args,
+                    gred_h=gred_h,
+                    dist_masks=dist_masks_batch,
+                    node_masks=node_masks_batch,
+                )
 
                 # Forward through frozen model with generated proxies
                 if args.backbone == "vanilla_gt":
@@ -1186,7 +1219,11 @@ def run_stage3(args, model_path, generator_path):
 
                 if use_proxy:
                     proxies, aux_loss = _generate_proxies(
-                        model, generator, batch, dense_x, dense_mask, args, gred_h=gred_h)
+                        model, generator, batch, dense_x, dense_mask, args,
+                        gred_h=gred_h,
+                        dist_masks=dist_masks_batch,
+                        node_masks=node_masks_batch,
+                    )
                     if args.backbone == "vanilla_gt":
                         logits, node_emb = model(batch, proxy_embeddings=proxies,
                                           precomputed_dense=(dense_x, dense_mask), readout_scope=args.readout_scope)

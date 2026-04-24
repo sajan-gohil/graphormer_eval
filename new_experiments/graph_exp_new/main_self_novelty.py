@@ -41,7 +41,7 @@ from data import get_loaders
 from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
 from generators import (
     ScoreBasedGenerator, FlowMatchingGenerator, GNNPoolingGenerator,
-    PMAGenerator, GraphCoarseningGenerator, CrossAttentionRouter,
+    PMAGenerator, GraphCoarseningGenerator, GREDLayersGenerator, CrossAttentionRouter,
     MultiPointProxyWrapper,
 )
 from metrics import compute_macro_ap
@@ -65,7 +65,7 @@ def build_parser():
                    choices=["1", "2", "3", "all"])
     p.add_argument("--generator", type=str, default="score_based",
                    choices=["score_based", "pma", "graph_coarsening",
-                            "gnn_pooling", "flow_matching"])
+                            "gnn_pooling", "flow_matching", "gred_layers"])
     p.add_argument("--backbone", type=str, default="vanilla_gt",
                    choices=["vanilla_gt", "gred", "hybrid"])
 
@@ -351,11 +351,28 @@ def build_generator(args):
             dropout=args.gen_dropout,
             euler_steps=args.euler_steps,
         )
+    elif args.generator == "gred_layers":
+        return GREDLayersGenerator(
+            num_proxies=args.num_proxies,
+            input_dim=args.hidden_dim,
+            state_dim=args.state_dim,
+            num_gred_layers=args.gen_num_layers,
+            hidden_dim=args.gen_hidden_dim,
+            num_refine_layers=1,
+            num_heads=args.gen_num_heads,
+            expand=args.gred_expand,
+            r_min=args.r_min,
+            r_max=args.r_max,
+            max_phase=args.max_phase,
+            dropout=args.gen_dropout,
+            act=args.gred_act,
+        )
     else:
         raise ValueError(f"Unknown generator: {args.generator}")
 
 
-def _generate_proxies(generator, batch, dense_x, dense_mask, args, gred_h=None):
+def _generate_proxies(generator, batch, dense_x, dense_mask, args, gred_h=None,
+                      dist_masks=None, node_masks=None):
     """Route the generator call based on its interface (flat vs dense)."""
     gen_input = gred_h if gred_h is not None else dense_x
     gen_mask = dense_mask
@@ -369,7 +386,11 @@ def _generate_proxies(generator, batch, dense_x, dense_mask, args, gred_h=None):
             edge_attr=getattr(batch, "edge_attr", None),
         )
     else:
-        proxies, aux = generator(gen_input, gen_mask)
+        proxies, aux = generator(
+            gen_input, gen_mask,
+            dist_masks=dist_masks,
+            node_masks=node_masks,
+        )
     return proxies, aux
 
 
@@ -487,7 +508,10 @@ def downstream_eval(model, generator, loader, device, args):
             proxies = None
         else:
             proxies, _ = _generate_proxies(
-                generator, batch, dense_x, dense_mask, args, gred_h=gred_h
+                generator, batch, dense_x, dense_mask, args,
+                gred_h=gred_h,
+                dist_masks=dist_masks,
+                node_masks=node_masks,
             )
 
         logits, _, _ = _forward_with_proxies(
@@ -733,7 +757,10 @@ def run_stage2(args, model_path):
             # Generate proxies (gradient flows through generator only)
             if multi_point is None:
                 proxies, aux_loss = _generate_proxies(
-                    generator, batch, dense_x, dense_mask, args, gred_h=gred_h
+                    generator, batch, dense_x, dense_mask, args,
+                    gred_h=gred_h,
+                    dist_masks=dist_masks,
+                    node_masks=node_masks,
                 )
             else:
                 # Wrapper generates proxies internally during the with-proxies forward.
@@ -967,7 +994,10 @@ def run_stage3(args, model_path, generator_path):
 
             if multi_point is None:
                 proxies, aux_loss = _generate_proxies(
-                    generator, batch, dense_x, dense_mask, args, gred_h=gred_h
+                    generator, batch, dense_x, dense_mask, args,
+                    gred_h=gred_h,
+                    dist_masks=dist_masks,
+                    node_masks=node_masks,
                 )
             else:
                 proxies, aux_loss = None, None
