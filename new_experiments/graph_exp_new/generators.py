@@ -191,13 +191,16 @@ class GREDLayersGenerator(BaseGenerator):
         if dist_masks is not None:
             effective_node_mask = node_masks if node_masks is not None else mask
             if effective_node_mask is None:
-                raise ValueError("GREDLayersGenerator needs a mask when dist_masks are provided.")
+                raise ValueError(
+                    "GREDLayersGenerator requires either node_masks or mask "
+                    "when dist_masks are provided."
+                )
             for layer in self.gred_layers:
                 x = layer(x, dist_masks, effective_node_mask)
 
         effective_mask = mask if mask is not None else node_masks
         if effective_mask is None:
-            raise ValueError("GREDLayersGenerator requires a valid node mask.")
+            raise ValueError("GREDLayersGenerator requires either mask or node_masks.")
 
         V = self.value_proj(x)  # (B, N, d)
         S = self.score_mlp(x)   # (B, N, M)

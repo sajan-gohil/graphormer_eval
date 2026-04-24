@@ -368,6 +368,7 @@ def build_generator(args):
             dropout=args.gen_dropout, decode_mode=args.decode_mode,
         )
     elif args.generator == "gred_layers":
+        max_phase = args.max_phase_lru if hasattr(args, "max_phase_lru") else args.max_phase
         return GREDLayersGenerator(
             num_proxies=args.num_proxies, input_dim=args.hidden_dim,
             state_dim=args.state_dim, num_gred_layers=args.gen_num_layers,
@@ -376,7 +377,7 @@ def build_generator(args):
             # main_indist uses --max_phase_lru (not --max_phase) to avoid
             # naming conflict with the existing --phase stage selector.
             r_min=args.r_min, r_max=args.r_max,
-            max_phase=getattr(args, "max_phase", args.max_phase_lru),
+            max_phase=max_phase,
             dropout=args.gen_dropout, act=args.gred_act,
         )
     else:
