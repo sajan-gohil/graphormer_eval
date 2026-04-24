@@ -19,16 +19,16 @@ set -eux pipefail
 python main_adversarial_distillation.py \
     --num_cycles 5 \
     --run_stage1 \
-    --backbone vanilla_gt \
+    --backbone hybrid \
     --generator flow_matching \
-    --num_proxies 16 \
+    --num_proxies 8 \
     --hidden_dim 512 \
-    --num_layers 4 \
+    --num_layers 2 \
     --num_heads 8 \
     --num_gred_layers 8 \
     --num_transformer_layers 2 \
     --state_dim 88 \
-    --batch_size 128 \
+    --batch_size 16 \
     --num_workers 4 \
     \
     --s1_lr 3e-5 --s1_max_epochs 300 --s1_patience 50 \
@@ -51,4 +51,4 @@ python main_adversarial_distillation.py \
     --gap_threshold 0.005 \
     --distill_gap_threshold 0.003 \
     \
-    --save_dir checkpoints_adv_distill_8
+    --save_dir checkpoints_adv_distill_gred_8

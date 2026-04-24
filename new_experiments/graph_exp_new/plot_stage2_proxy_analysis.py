@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import spearmanr
 from sklearn.manifold import TSNE
+from sklearn.mixture import GaussianMixture
 import torch
 
 
@@ -37,6 +38,18 @@ def parse_args():
     parser.add_argument("--out_dir", type=str, required=True)
     parser.add_argument("--bins", type=int, default=60)
     parser.add_argument("--dpi", type=int, default=160)
+    parser.add_argument(
+        "--gmm_k_max",
+        type=int,
+        default=10,
+        help="Maximum number of GMM components to try for BIC selection",
+    )
+    parser.add_argument(
+        "--gmm_n_init",
+        type=int,
+        default=5,
+        help="Number of GMM random initialisations per K (higher = more stable)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--tsne_perplexity",
@@ -48,7 +61,7 @@ def parse_args():
     parser.add_argument(
         "--tsne_max_points",
         type=int,
-        default=20000,
+        default=10000,
         help="Max total points used by t-SNE; <=0 means use all points",
     )
     parser.add_argument(
@@ -377,6 +390,359 @@ def _save_tsne_plot(enc_vecs, proxy_vecs, out_path, args):
     }
 
 
+# ---------------------------------------------------------------------------
+# GMM / BIC helpers
+# ---------------------------------------------------------------------------
+
+def _fit_gmm_bic(data_1d, k_max, n_init, seed):
+    """Fit GMMs with K=1..k_max on a 1-D array and return BIC scores.
+
+    Returns
+    -------
+    ks        : list[int]   – component counts tried
+    bics      : list[float] – BIC for each K
+    best_k    : int         – K with the lowest BIC
+    best_gmm  : GaussianMixture fitted with best_k components
+    """
+    finite = data_1d[np.isfinite(data_1d)].reshape(-1, 1)
+    if finite.shape[0] < 2:
+        return [], [], None, None
+
+    k_max_eff = min(k_max, finite.shape[0])
+    ks, bics = [], []
+    best_bic = np.inf
+    best_k = 1
+    best_gmm = None
+
+    for k in range(1, k_max_eff + 1):
+        gm = GaussianMixture(
+            n_components=k,
+            covariance_type="full",
+            n_init=n_init,
+            random_state=seed,
+            max_iter=300,
+        )
+        gm.fit(finite)
+        bic = gm.bic(finite)
+        ks.append(k)
+        bics.append(float(bic))
+        if bic < best_bic:
+            best_bic = bic
+            best_k = k
+            best_gmm = gm
+
+    return ks, bics, best_k, best_gmm
+
+
+def _save_gmm_bic_plot(ks, bics, best_k, title, path, dpi=160):
+    """Save a BIC-vs-K elbow plot with the selected K annotated."""
+    if not ks:
+        return
+    plt.figure(figsize=(7.0, 5.0))
+    plt.plot(ks, bics, marker="o", color="#2a9d8f", linewidth=2, markersize=7,
+             label="BIC")
+    plt.axvline(x=best_k, color="#e63946", linestyle="--", linewidth=1.5,
+                label=f"Best K={best_k}")
+    plt.scatter([best_k], [bics[best_k - 1]], color="#e63946", s=80, zorder=5)
+    plt.title(title)
+    plt.xlabel("Number of GMM components (K)")
+    plt.ylabel("BIC")
+    plt.xticks(ks)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(path, dpi=dpi)
+    plt.close()
+
+
+def _save_gmm_overlay_hist(data_1d, best_gmm, best_k, title, xlabel, path,
+                           bins=60, dpi=160):
+    """Histogram of data with fitted GMM density overlaid."""
+    finite = data_1d[np.isfinite(data_1d)]
+    if finite.size == 0 or best_gmm is None:
+        return
+    plt.figure(figsize=(7.5, 5.5))
+    counts, bin_edges, _ = plt.hist(
+        finite, bins=bins, density=True,
+        color="#457b9d", edgecolor="black", alpha=0.65, label="data"
+    )
+    x_grid = np.linspace(finite.min(), finite.max(), 500).reshape(-1, 1)
+    log_prob = best_gmm.score_samples(x_grid)
+    plt.plot(x_grid.ravel(), np.exp(log_prob), color="#e76f51", linewidth=2.5,
+             label=f"GMM K={best_k}")
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel("Density")
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(path, dpi=dpi)
+    plt.close()
+
+
+# ---------------------------------------------------------------------------
+# Learnability analysis
+# ---------------------------------------------------------------------------
+
+# Thresholds (1-D case; used for the heuristic verdict)
+_SEP_HARD      = 3.0   # min pairwise (mean_i - mean_j) / avg_std > this => well-separated modes
+_SEP_EASY      = 1.0   # < this => modes heavily overlap (like one blurry blob)
+_IMBAL_HARD    = 5.0   # max_weight / min_weight above this => rare modes exist
+_ENT_NORM_LOW  = 0.5   # normalised entropy below this => very unbalanced weights
+_K_VERY_HARD   = 5     # BIC selects this many or more components
+_K_HARD        = 3
+_CV_HIGH       = 1.0   # coefficient of variation of a component > this => very spread
+
+
+def _gmm_learnability_stats(best_k, best_gmm):
+    """Compute interpretable learnability stats for the best GMM.
+
+    Returns a dict with:
+      components        – per-component stats (mean, std, weight, cv, range_1sigma)
+      separation        – pairwise |mean_i - mean_j| / avg_sigma for all pairs
+      min_separation    – smallest of the above (worst case)
+      max_separation    – largest of the above
+      weight_entropy    – Shannon entropy of the weight vector (nats)
+      weight_entropy_norm – entropy / log(K)  in [0,1]; 1 = perfectly balanced
+      imbalance_ratio   – max_weight / min_weight
+      dominant_weight   – weight of the heaviest component
+      rare_mode_exists  – True if any component has weight < 0.05
+      modes_overlap     – True if min_separation < _SEP_EASY
+      modes_separated   – True if min_separation > _SEP_HARD
+      verdict           – plain-English learnability assessment
+      verdict_flags     – list of specific concern strings
+    """
+    if best_gmm is None or best_k < 1:
+        return {"status": "no_gmm"}
+
+    means   = best_gmm.means_.ravel()          # (K,)
+    weights = best_gmm.weights_                # (K,)
+    # For full covariance 1-D the shape is (K,1,1)
+    stds = np.sqrt(best_gmm.covariances_.reshape(best_k, -1)[:, 0])  # (K,)
+
+    # --- Per-component stats ------------------------------------------------
+    components = []
+    for i in range(best_k):
+        mu, sigma, w = float(means[i]), float(stds[i]), float(weights[i])
+        cv = abs(sigma / mu) if abs(mu) > 1e-12 else float("inf")
+        components.append({
+            "index":        i,
+            "mean":         round(mu, 6),
+            "std":          round(sigma, 6),
+            "weight":       round(w, 6),
+            "cv":           round(cv, 4),          # coefficient of variation
+            "range_1sigma": [round(mu - sigma, 6), round(mu + sigma, 6)],
+            "range_2sigma": [round(mu - 2*sigma, 6), round(mu + 2*sigma, 6)],
+        })
+
+    # --- Pairwise separation ------------------------------------------------
+    sep_pairs = []
+    for i in range(best_k):
+        for j in range(i + 1, best_k):
+            dist = abs(float(means[i]) - float(means[j]))
+            avg_sigma = (float(stds[i]) + float(stds[j])) / 2.0
+            ratio = dist / (avg_sigma + 1e-12)
+            sep_pairs.append({
+                "pair": [i, j],
+                "mean_distance": round(dist, 6),
+                "avg_sigma":     round(avg_sigma, 6),
+                "separation_ratio": round(ratio, 4),
+            })
+
+    all_ratios = [p["separation_ratio"] for p in sep_pairs] if sep_pairs else []
+    min_sep = float(min(all_ratios)) if all_ratios else float("nan")
+    max_sep = float(max(all_ratios)) if all_ratios else float("nan")
+
+    # --- Weight diversity ---------------------------------------------------
+    eps = 1e-12
+    w_entropy = float(-np.sum(weights * np.log(weights + eps)))
+    w_entropy_norm = w_entropy / (np.log(best_k) + eps) if best_k > 1 else 1.0
+    imbalance_ratio = float(np.max(weights) / (np.min(weights) + eps))
+    dominant_weight = float(np.max(weights))
+    rare_mode_exists = bool(np.any(weights < 0.05))
+
+    # --- Verdict ------------------------------------------------------------
+    flags = []
+    score = 0  # higher = harder
+
+    if best_k >= _K_VERY_HARD:
+        flags.append(f"HIGH MODE COUNT: K={best_k} (≥{_K_VERY_HARD}) — generator must cover many distinct target regions")
+        score += 3
+    elif best_k >= _K_HARD:
+        flags.append(f"MULTIMODAL: K={best_k} — generator needs to produce distinct clusters")
+        score += 1
+
+    if np.isfinite(min_sep) and min_sep > _SEP_HARD:
+        flags.append(f"WELL-SEPARATED MODES: min separation ratio={min_sep:.2f} (>{_SEP_HARD}) — "
+                     f"hard for a single-output generator; consider mixture-of-experts or multi-step sampling")
+        score += 2
+    elif np.isfinite(min_sep) and min_sep < _SEP_EASY:
+        flags.append(f"OVERLAPPING MODES: min separation ratio={min_sep:.2f} (<{_SEP_EASY}) — "
+                     f"blurry boundary; generator may blend modes (mean collapse risk)")
+        score += 1
+
+    if rare_mode_exists:
+        flags.append(f"RARE MODES PRESENT: min weight={np.min(weights):.4f} — "
+                     f"generator will likely under-sample these; expect mode drop")
+        score += 2
+
+    if imbalance_ratio > _IMBAL_HARD:
+        flags.append(f"SEVERE WEIGHT IMBALANCE: ratio={imbalance_ratio:.1f} — "
+                     f"training signal dominated by heavy components; rare modes starved")
+        score += 1
+
+    high_cv_comps = [c for c in components if np.isfinite(c["cv"]) and c["cv"] > _CV_HIGH]
+    if high_cv_comps:
+        flags.append(
+            f"HIGH WITHIN-COMPONENT SPREAD: components {[c['index'] for c in high_cv_comps]} have CV>{_CV_HIGH} — "
+            f"each mode itself is diffuse; high output variance needed"
+        )
+        score += 1
+
+    if score == 0:
+        verdict = "EASY — unimodal / well-overlapping, low imbalance: a standard MLP/GNN generator should handle this well"
+    elif score <= 2:
+        verdict = "MODERATE — some multimodality or imbalance; a larger generator with careful loss weighting is recommended"
+    elif score <= 4:
+        verdict = "HARD — multiple distinct modes and/or severe imbalance; consider: (a) per-mode loss weighting, " \
+                  "(b) flow-matching / diffusion generator, (c) conditional generation with mode label"
+    else:
+        verdict = "VERY HARD — distribution is highly complex (many separated modes, severe imbalance, or diffuse components); " \
+                  "a single deterministic generator will likely collapse to the mean. Use a stochastic / latent-variable model."
+
+    return {
+        "status":              "ok",
+        "best_k":              int(best_k),
+        "components":          components,
+        "separation_pairs":    sep_pairs,
+        "min_separation":      round(min_sep, 4) if np.isfinite(min_sep) else None,
+        "max_separation":      round(max_sep, 4) if np.isfinite(max_sep) else None,
+        "weight_entropy":      round(w_entropy, 6),
+        "weight_entropy_norm": round(float(w_entropy_norm), 4),
+        "imbalance_ratio":     round(imbalance_ratio, 4),
+        "dominant_weight":     round(dominant_weight, 4),
+        "rare_mode_exists":    rare_mode_exists,
+        "modes_overlap":       bool(np.isfinite(min_sep) and min_sep < _SEP_EASY),
+        "modes_separated":     bool(np.isfinite(min_sep) and min_sep > _SEP_HARD),
+        "verdict":             verdict,
+        "verdict_flags":       flags,
+        "learnability_score":  score,   # 0=easy … >=5=very hard
+    }
+
+
+def _save_gmm_component_profile(data_1d, best_gmm, best_k, learnability,
+                                title, xlabel, path, dpi=160):
+    """Bell-curve profile plot: one Gaussian per component, coloured by weight.
+
+    Annotates each component with its mean ± σ and weight.
+    A small rug of the raw data is drawn at the bottom.
+    """
+    if best_gmm is None:
+        return
+
+    finite = data_1d[np.isfinite(data_1d)]
+    if finite.size == 0:
+        return
+
+    means   = best_gmm.means_.ravel()
+    weights = best_gmm.weights_
+    stds    = np.sqrt(best_gmm.covariances_.reshape(best_k, -1)[:, 0])
+
+    x_min = min(finite.min(), (means - 3 * stds).min())
+    x_max = max(finite.max(), (means + 3 * stds).max())
+    x_grid = np.linspace(x_min, x_max, 600)
+
+    cmap   = plt.cm.get_cmap("plasma", best_k)
+    fig, ax = plt.subplots(figsize=(9.0, 5.5))
+
+    # Rug plot (thin, at y~0)
+    ax.plot(finite, np.full_like(finite, -0.002 * (1.0 / (stds.mean() + 1e-8))),
+            '|', color='#333333', alpha=0.15, markersize=4, label='data (rug)')
+
+    # Mixture density
+    log_prob = best_gmm.score_samples(x_grid.reshape(-1, 1))
+    ax.plot(x_grid, np.exp(log_prob), color='#222222', linewidth=2.0,
+            linestyle='--', label='mixture density', zorder=10)
+
+    # Per-component Gaussians
+    from scipy.stats import norm as _norm
+    for i in range(best_k):
+        mu, sigma, w = float(means[i]), float(stds[i]), float(weights[i])
+        y_comp = w * _norm.pdf(x_grid, mu, sigma)
+        col = cmap(i)
+        ax.fill_between(x_grid, y_comp, alpha=0.25, color=col)
+        ax.plot(x_grid, y_comp, color=col, linewidth=1.8,
+                label=f"K{i}: μ={mu:.3g}, σ={sigma:.3g}, w={w:.3f}")
+        # Annotate mean
+        peak_y = float(w * _norm.pdf(mu, mu, sigma))
+        ax.annotate(
+            f"K{i}\n" + ("★" if w == weights.max() else ""),
+            xy=(mu, peak_y), xytext=(0, 8), textcoords='offset points',
+            ha='center', fontsize=8, color=col,
+            arrowprops=dict(arrowstyle='->', color=col, lw=0.8),
+        )
+
+    # Verdict banner
+    ls = learnability.get("learnability_score", 0)
+    colors_banner = ["#2a9d8f", "#e9c46a", "#f4a261", "#e63946"]
+    banner_col = colors_banner[min(ls // 2, 3)]
+    verdict_short = learnability.get("verdict", "").split("—")[0].strip()
+    ax.set_title(f"{title}\n{verdict_short}", color=banner_col, fontweight='bold')
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Weighted density")
+    ax.legend(loc="upper right", fontsize=7, framealpha=0.7)
+    plt.tight_layout()
+    plt.savefig(path, dpi=dpi)
+    plt.close()
+
+
+def _run_gmm_analysis(data_1d, feature_name, out_dir, args):
+    """Full GMM pipeline for one scalar series; returns a result dict."""
+    ks, bics, best_k, best_gmm = _fit_gmm_bic(
+        data_1d, k_max=args.gmm_k_max, n_init=args.gmm_n_init, seed=args.seed
+    )
+    result = {"feature": feature_name, "k_max": args.gmm_k_max}
+    if not ks:
+        result["status"] = "skipped_insufficient_data"
+        return result
+
+    result["status"] = "ok"
+    result["ks"] = ks
+    result["bics"] = bics
+    result["best_k"] = int(best_k)
+    result["best_bic"] = float(bics[best_k - 1])
+    result["means"] = best_gmm.means_.ravel().tolist()
+    result["weights"] = best_gmm.weights_.tolist()
+    result["covariances"] = best_gmm.covariances_.ravel().tolist()
+
+    # --- Learnability analysis ---
+    learn = _gmm_learnability_stats(best_k, best_gmm)
+    result["learnability"] = learn
+
+    slug = feature_name.replace(" ", "_")
+    _save_gmm_bic_plot(
+        ks, bics, best_k,
+        title=f"GMM BIC – {feature_name}",
+        path=os.path.join(out_dir, f"gmm_bic_{slug}.png"),
+        dpi=args.dpi,
+    )
+    _save_gmm_overlay_hist(
+        data_1d, best_gmm, best_k,
+        title=f"GMM Fit – {feature_name} (K={best_k})",
+        xlabel=feature_name,
+        path=os.path.join(out_dir, f"gmm_overlay_{slug}.png"),
+        bins=args.bins,
+        dpi=args.dpi,
+    )
+    _save_gmm_component_profile(
+        data_1d, best_gmm, best_k, learn,
+        title=f"Component Profile – {feature_name}",
+        xlabel=feature_name,
+        path=os.path.join(out_dir, f"gmm_profile_{slug}.png"),
+        dpi=args.dpi,
+    )
+    return result
+
+
 def _dedupe_by_best_opt_loss(records):
     best_by_idx = {}
     kept_without_sample_idx = 0
@@ -588,6 +954,99 @@ def main():
     )
     stats_json["tsne"] = tsne_info
     stats_log.append(f"t-SNE: {tsne_info}")
+
+    # 5) GMM / BIC analysis
+    print("\nFitting GMMs (K=1..{}) for BIC model selection …".format(args.gmm_k_max),
+          flush=True)
+    gmm_results = {}
+
+    # Scalar loss series
+    for feat_name, arr in [
+        ("opt_loss",            opt_loss),
+        ("mmd_loss",            mmd_loss),
+        ("base_loss",           base_loss),
+        ("cross_moment_loss",   cross_loss),
+        ("prior_moment_loss",   prior_loss),
+        ("absolute_improvement", improvement),
+    ]:
+        print(f"  GMM BIC: {feat_name} …", flush=True)
+        r = _run_gmm_analysis(arr, feat_name, args.out_dir, args)
+        gmm_results[feat_name] = r
+        if r["status"] == "ok":
+            learn = r.get("learnability", {})
+            stats_log.append(
+                f"GMM BIC [{feat_name}]: best_k={r['best_k']} "
+                f"best_bic={r['best_bic']:.4f} "
+                f"means={[round(m,6) for m in r['means']]} "
+                f"weights={[round(w,4) for w in r['weights']]} "
+                f"| LEARNABILITY: {learn.get('verdict','?')} "
+                f"| min_sep={learn.get('min_sep_ratio', learn.get('min_separation','?'))} "
+                f"imbalance={learn.get('imbalance_ratio','?')} "
+                f"score={learn.get('learnability_score','?')}"
+            )
+            for flag in learn.get("verdict_flags", []):
+                stats_log.append(f"  FLAG [{feat_name}]: {flag}")
+            print(
+                f"    best_k={r['best_k']}  bic={r['best_bic']:.4f}  "
+                f"means={[round(m,4) for m in r['means']]}",
+                flush=True,
+            )
+            print(f"    LEARNABILITY: {learn.get('verdict','?')}", flush=True)
+            for flag in learn.get("verdict_flags", []):
+                print(f"      ⚑ {flag}", flush=True)
+        else:
+            stats_log.append(f"GMM BIC [{feat_name}]: {r['status']}")
+            print(f"    skipped – {r['status']}", flush=True)
+
+    # Proxy embedding norms (one scalar per sample)
+    if proxy_vecs.size > 0:
+        proxy_norms = np.linalg.norm(proxy_vecs, axis=1).astype(np.float64)
+        print("  GMM BIC: proxy_emb_norm …", flush=True)
+        r_pnorm = _run_gmm_analysis(proxy_norms, "proxy_emb_norm", args.out_dir, args)
+        gmm_results["proxy_emb_norm"] = r_pnorm
+        if r_pnorm["status"] == "ok":
+            learn_pn = r_pnorm.get("learnability", {})
+            stats_log.append(
+                f"GMM BIC [proxy_emb_norm]: best_k={r_pnorm['best_k']} "
+                f"best_bic={r_pnorm['best_bic']:.4f} "
+                f"| LEARNABILITY: {learn_pn.get('verdict','?')} "
+                f"score={learn_pn.get('learnability_score','?')}"
+            )
+            for flag in learn_pn.get("verdict_flags", []):
+                stats_log.append(f"  FLAG [proxy_emb_norm]: {flag}")
+            print(
+                f"    best_k={r_pnorm['best_k']}  bic={r_pnorm['best_bic']:.4f}",
+                flush=True,
+            )
+            print(f"    LEARNABILITY: {learn_pn.get('verdict','?')}", flush=True)
+            for flag in learn_pn.get("verdict_flags", []):
+                print(f"      ⚑ {flag}", flush=True)
+
+    # Encoder embedding norms
+    if enc_vecs.size > 0:
+        enc_norms = np.linalg.norm(enc_vecs, axis=1).astype(np.float64)
+        print("  GMM BIC: encoder_emb_norm …", flush=True)
+        r_enorm = _run_gmm_analysis(enc_norms, "encoder_emb_norm", args.out_dir, args)
+        gmm_results["encoder_emb_norm"] = r_enorm
+        if r_enorm["status"] == "ok":
+            learn_en = r_enorm.get("learnability", {})
+            stats_log.append(
+                f"GMM BIC [encoder_emb_norm]: best_k={r_enorm['best_k']} "
+                f"best_bic={r_enorm['best_bic']:.4f} "
+                f"| LEARNABILITY: {learn_en.get('verdict','?')} "
+                f"score={learn_en.get('learnability_score','?')}"
+            )
+            for flag in learn_en.get("verdict_flags", []):
+                stats_log.append(f"  FLAG [encoder_emb_norm]: {flag}")
+            print(
+                f"    best_k={r_enorm['best_k']}  bic={r_enorm['best_bic']:.4f}",
+                flush=True,
+            )
+            print(f"    LEARNABILITY: {learn_en.get('verdict','?')}", flush=True)
+            for flag in learn_en.get("verdict_flags", []):
+                print(f"      ⚑ {flag}", flush=True)
+
+    stats_json["gmm_bic"] = gmm_results
 
     # Save logs
     log_path = os.path.join(args.out_dir, "statistics_log.txt")

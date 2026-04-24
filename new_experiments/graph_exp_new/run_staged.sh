@@ -2,7 +2,25 @@
 set -eux pipefail
 
 
-python3 main_staged.py --backbone vanilla_gt --generator flow_matching --hidden_dim 512 --num_layers 4 --no-use_lap_pe --s1_lr 3e-5 --s1_patience 20 --s1_max_epochs 300 --num_proxies 4 --s2_num_steps 200 --s2_cross_moment_lambda 0.0 --s2_prior_moment_lambda 0.2 --s2_novelty_alpha 0.2 --s2_num_restarts 5 --s2_loss_threshold 0.01 --gen_dropout 0.1 --s3_lr 3e-5 --s3_max_epochs 500 --s3_patience 200 --denoiser_dim 512 --s4_lr_transformer 1e-5 --s4_lr_generator 1e-4 --s4_weight_decay 5e-4 --s4_grad_clip 0.5 --s4_max_epochs 1000 --s4_patience 100 --novelty_alpha 0.1 --novelty_alpha_node 0.1 --diversity_weight 0.1 --save_dir checkpoints_staged_novelty_vanilla_2_graph_coarsening/ --batch_size 64
+python3 main_staged.py --backbone vanilla_gt \
+    --generator flow_matching --hidden_dim 512 \
+    --num_layers 1 --no-use_lap_pe \
+    --s1_lr 3e-5 --s1_patience 20 --s1_max_epochs 300 \
+    --num_proxies 8 --s2_num_steps 200 \
+    --s2_cross_moment_lambda 0.0 \
+    --s2_prior_moment_lambda 2 \
+    --s2_novelty_alpha 0.2 --s2_num_restarts 5 \
+    --s2_prior_target_var 0.15 \
+    --s2_proxy_lr 5e-3 \
+    --s2_loss_threshold 0.01 --gen_dropout 0.1 \
+    --s3_lr 3e-5 --s3_max_epochs 500 --s3_patience 200 \
+    --denoiser_dim 512 --s4_lr_transformer 1e-5 \
+    --s4_lr_generator 1e-4 --s4_weight_decay 5e-4 \
+    --s4_grad_clip 0.5 --s4_max_epochs 1000 \
+    --s4_patience 100 --novelty_alpha 0.1 \
+    --diversity_weight 0.1 \
+    --save_dir checkpoints_staged_novelty_vanilla_3/ \
+    --batch_size 16
 # # =============================================================
 # # Staged experiments (Pipeline A)
 # # Varies: generator type
