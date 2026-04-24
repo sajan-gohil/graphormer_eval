@@ -101,7 +101,7 @@ def build_parser():
     # ── Backbone & generator architecture ──
     p.add_argument("--generator", type=str, default="score_based",
                    choices=["score_based", "pma", "graph_coarsening",
-                             "gnn_pooling", "flow_matching", "gred_layers"])
+                            "gnn_pooling", "flow_matching", "gred_layers"])
     p.add_argument("--backbone", type=str, default="vanilla_gt",
                    choices=["vanilla_gt", "gred", "hybrid"])
 
