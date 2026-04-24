@@ -25,7 +25,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from data import get_loaders, ProxyTargetDataset, collate_with_proxies
+from data import (
+    get_loaders,
+    ProxyTargetDataset,
+    collate_with_proxies,
+    _compute_dist_mask_single,
+)
 from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
 from generators import (
     ScoreBasedGenerator, FlowMatchingGenerator, GNNPoolingGenerator,
@@ -344,6 +349,29 @@ def _count_correct(logits, labels):
 def _dense_mask_to_batch_vec(dense_mask):
     counts = dense_mask.sum(dim=1).to(torch.long)
     return torch.arange(dense_mask.size(0), device=dense_mask.device).repeat_interleave(counts)
+
+
+def _build_dist_and_node_masks_for_batch(pyg_batch, max_hops, device):
+    """Build padded distance masks and node masks for a PyG batch."""
+    graphs = pyg_batch.to_data_list()
+    B = len(graphs)
+    max_N = max(g.x.size(0) for g in graphs)
+
+    dist_masks = torch.zeros(B, max_hops, max_N, max_N, device=device)
+    node_masks = torch.zeros(B, max_N, dtype=torch.bool, device=device)
+
+    for i, g in enumerate(graphs):
+        n = g.x.size(0)
+        adj = np.zeros((n, n), dtype=np.float32)
+        edge_index = g.edge_index.detach().cpu().numpy()
+        adj[edge_index[0], edge_index[1]] = 1.0
+
+        dm = _compute_dist_mask_single(adj, max_hops=max_hops)
+        k = dm.shape[0]
+        dist_masks[i, :k, :n, :n] = torch.from_numpy(dm.astype(np.float32)).to(device)
+        node_masks[i, :n] = True
+
+    return dist_masks, node_masks
 
 
 @torch.no_grad()
@@ -1191,6 +1219,12 @@ def run_stage3(args, model_path, proxy_pairs_path):
             encoder_embs = encoder_embs.to(args.device)
             emb_masks = emb_masks.to(args.device)
             target_proxies = target_proxies.to(args.device)
+            if is_gred:
+                dist_masks_batch, node_masks_batch = _build_dist_and_node_masks_for_batch(
+                    pyg_batch, args.max_hops, args.device
+                )
+            else:
+                dist_masks_batch, node_masks_batch = None, None
 
             # Optional target noise
             if args.target_noise_std > 0:
@@ -1223,16 +1257,49 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 # train_loss = aux_loss
                 # After generating proxy_emb from the generator:
                 with torch.no_grad():
-                    logits_with, _ = model(pyg_batch, proxy_embeddings=proxy_emb, 
-                           precomputed_dense=(encoder_embs, emb_masks),
-                           readout_scope=args.readout_scope)
+                    if args.backbone == "hybrid":
+                        logits_with, _ = model(
+                            pyg_batch, dist_masks_batch, node_masks_batch,
+                            proxy_embeddings=proxy_emb,
+                            precomputed_dense=(encoder_embs, emb_masks),
+                            readout_scope=args.readout_scope,
+                        )
+                    elif args.backbone == "gred":
+                        logits_with, _ = model(
+                            pyg_batch, dist_masks_batch, node_masks_batch,
+                            precomputed_dense=(encoder_embs, emb_masks),
+                            readout_scope=args.readout_scope,
+                        )
+                    else:
+                        logits_with, _ = model(
+                            pyg_batch, proxy_embeddings=proxy_emb,
+                            precomputed_dense=(encoder_embs, emb_masks),
+                            readout_scope=args.readout_scope,
+                        )
                 task_loss_aux = nn.functional.binary_cross_entropy_with_logits(logits_with, pyg_batch.y)
                 train_loss = aux_loss + 0.5 * task_loss_aux  # joint objective
 
             else:
                 # PMA has no reconstruction loss — fall back to downstream task loss
-                logits, _ = model(pyg_batch, proxy_embeddings=proxy_emb,
-                                  precomputed_dense=(encoder_embs, emb_masks), readout_scope=args.readout_scope)
+                if args.backbone == "hybrid":
+                    logits, _ = model(
+                        pyg_batch, dist_masks_batch, node_masks_batch,
+                        proxy_embeddings=proxy_emb,
+                        precomputed_dense=(encoder_embs, emb_masks),
+                        readout_scope=args.readout_scope,
+                    )
+                elif args.backbone == "gred":
+                    logits, _ = model(
+                        pyg_batch, dist_masks_batch, node_masks_batch,
+                        precomputed_dense=(encoder_embs, emb_masks),
+                        readout_scope=args.readout_scope,
+                    )
+                else:
+                    logits, _ = model(
+                        pyg_batch, proxy_embeddings=proxy_emb,
+                        precomputed_dense=(encoder_embs, emb_masks),
+                        readout_scope=args.readout_scope,
+                    )
                 train_loss = nn.functional.binary_cross_entropy_with_logits(
                     logits, pyg_batch.y)
 
