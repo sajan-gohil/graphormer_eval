@@ -41,7 +41,7 @@ from optim_utils import (
     build_warmup_cosine_scheduler,
 )
 from losses import novelty_loss, inter_proxy_cosine_stats, proxy_diversity_loss
-
+import torch.nn.functional as F
 
 # ================================================================
 # CONFIG
