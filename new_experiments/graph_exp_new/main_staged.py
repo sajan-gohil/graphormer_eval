@@ -718,9 +718,13 @@ def run_stage1(args):
         print(log_line, flush=True)
 
         # Early stopping
-        if val_loss < best_val_loss:
-            best_val_ap = val_ap
-            best_val_loss = val_loss
+        improved_val_loss = val_loss < best_val_loss
+        improved_val_ap = val_ap > best_val_ap
+        if improved_val_loss or improved_val_ap:
+            if improved_val_loss:
+                best_val_loss = val_loss
+            if improved_val_ap:
+                best_val_ap = val_ap
             best_epoch = epoch
             patience_counter = 0
             torch.save({
@@ -728,7 +732,10 @@ def run_stage1(args):
                 "epoch": epoch, "val_ap": val_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"  -> New best val loss={val_loss:.4f}, saved", flush=True)
+            print(
+                f"  -> New best metrics: val_loss={best_val_loss:.4f} val_AP={best_val_ap:.4f}, saved",
+                flush=True,
+            )
         else:
             patience_counter += 1
             if patience_counter >= args.s1_patience:
@@ -1202,6 +1209,7 @@ def run_stage3(args, model_path, proxy_pairs_path):
 
     best_val_ap = 0.0
     best_val_loss = float("inf")
+    best_gen_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     diagnostics = []  # (epoch, gen_loss, val_AP) for correlation analysis
@@ -1344,10 +1352,17 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 flush=True,
             )
 
-            # Early stopping on downstream val loss
-            if val_loss < best_val_loss:
-                best_val_ap = val_ap
-                best_val_loss = val_loss
+            # Early stopping on generator loss / downstream validation metrics
+            improved_gen_loss = mean_train_loss < best_gen_loss
+            improved_val_loss = val_loss < best_val_loss
+            improved_val_ap = val_ap > best_val_ap
+            if improved_gen_loss or improved_val_loss or improved_val_ap:
+                if improved_gen_loss:
+                    best_gen_loss = mean_train_loss
+                if improved_val_loss:
+                    best_val_loss = val_loss
+                if improved_val_ap:
+                    best_val_ap = val_ap
                 best_epoch = epoch
                 patience_counter = 0
                 torch.save({
@@ -1355,7 +1370,11 @@ def run_stage3(args, model_path, proxy_pairs_path):
                     "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                     "args": vars(args),
                 }, save_path)
-                print(f"  -> New best downstream val loss={val_loss:.4f}", flush=True)
+                print(
+                    f"  -> New best metrics: gen_loss={best_gen_loss:.4f} "
+                    f"val_loss={best_val_loss:.4f} val_AP={best_val_ap:.4f}",
+                    flush=True,
+                )
             else:
                 patience_counter += 1
                 if patience_counter >= args.s3_patience:
@@ -1474,6 +1493,7 @@ def run_stage4(args, model_path, generator_path):
 
     best_val_ap = 0.0
     best_val_loss = float("inf")
+    best_gen_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     save_path = os.path.join(args.save_dir, "stage4_best.pt")
@@ -1642,10 +1662,17 @@ def run_stage4(args, model_path, generator_path):
 
         print(log_line, flush=True)
 
-        # Early stopping on val loss
-        if val_loss < best_val_loss:
-            best_val_ap = val_ap
-            best_val_loss = val_loss
+        # Early stopping on generator loss / validation metrics
+        improved_gen_loss = train_loss < best_gen_loss
+        improved_val_loss = val_loss < best_val_loss
+        improved_val_ap = val_ap > best_val_ap
+        if improved_gen_loss or improved_val_loss or improved_val_ap:
+            if improved_gen_loss:
+                best_gen_loss = train_loss
+            if improved_val_loss:
+                best_val_loss = val_loss
+            if improved_val_ap:
+                best_val_ap = val_ap
             best_epoch = epoch
             patience_counter = 0
             torch.save({
@@ -1655,8 +1682,11 @@ def run_stage4(args, model_path, generator_path):
                 "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"  -> New best val loss={val_loss:.4f} (test={test_ap:.4f})",
-                  flush=True)
+            print(
+                f"  -> New best metrics: gen_loss={best_gen_loss:.4f} "
+                f"val_loss={best_val_loss:.4f} val_AP={best_val_ap:.4f} (test={test_ap:.4f})",
+                flush=True,
+            )
         else:
             patience_counter += 1
             if patience_counter >= args.s4_patience:

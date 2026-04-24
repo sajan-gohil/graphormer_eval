@@ -614,14 +614,23 @@ def run_stage1(args):
             flush=True,
         )
 
-        if val_loss < best_val_loss:
-            best_val_ap, best_val_loss, best_epoch, patience = val_ap, val_loss, epoch, 0
+        improved_val_loss = val_loss < best_val_loss
+        improved_val_ap = val_ap > best_val_ap
+        if improved_val_loss or improved_val_ap:
+            if improved_val_loss:
+                best_val_loss = val_loss
+            if improved_val_ap:
+                best_val_ap = val_ap
+            best_epoch, patience = epoch, 0
             torch.save({
                 "model_state": model.state_dict(),
                 "epoch": epoch, "val_ap": val_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"  -> New best val loss={val_loss:.4f}, saved", flush=True)
+            print(
+                f"  -> New best metrics: val_loss={best_val_loss:.4f} val_AP={best_val_ap:.4f}, saved",
+                flush=True,
+            )
         else:
             patience += 1
             if patience >= args.s1_patience:
@@ -687,7 +696,7 @@ def run_stage2(args, model_path):
     )
     loss_fn = nn.BCEWithLogitsLoss()
 
-    best_val_ap, best_val_loss, best_epoch, patience = 0.0, float("inf"), -1, 0
+    best_val_ap, best_val_loss, best_gen_loss, best_epoch, patience = 0.0, float("inf"), float("inf"), -1, 0
     diagnostics = []
     save_path = os.path.join(args.save_dir, "stage2_generator.pt")
 
@@ -815,14 +824,27 @@ def run_stage2(args, model_path):
                 "val_ap": val_ap, "test_ap": test_ap,
             })
 
-            if val_loss < best_val_loss:
-                best_val_ap, best_val_loss, best_epoch, patience = val_ap, val_loss, epoch, 0
+            improved_gen_loss = mean_total < best_gen_loss
+            improved_val_loss = val_loss < best_val_loss
+            improved_val_ap = val_ap > best_val_ap
+            if improved_gen_loss or improved_val_loss or improved_val_ap:
+                if improved_gen_loss:
+                    best_gen_loss = mean_total
+                if improved_val_loss:
+                    best_val_loss = val_loss
+                if improved_val_ap:
+                    best_val_ap = val_ap
+                best_epoch, patience = epoch, 0
                 torch.save({
                     "generator_state": generator.state_dict(),
                     "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                     "args": vars(args),
                 }, save_path)
-                print(f"  -> New best val loss={val_loss:.4f}", flush=True)
+                print(
+                    f"  -> New best metrics: gen_loss={best_gen_loss:.4f} "
+                    f"val_loss={best_val_loss:.4f} val_AP={best_val_ap:.4f}",
+                    flush=True,
+                )
             else:
                 patience += 1
                 if patience >= args.s2_patience:
@@ -910,7 +932,7 @@ def run_stage3(args, model_path, generator_path):
     )
     loss_fn = nn.BCEWithLogitsLoss()
 
-    best_val_ap, best_val_loss, best_epoch, patience = 0.0, float("inf"), -1, 0
+    best_val_ap, best_val_loss, best_gen_loss, best_epoch, patience = 0.0, float("inf"), float("inf"), -1, 0
     diagnostics = []
     save_path = os.path.join(args.save_dir, "stage3_best.pt")
 
@@ -1037,15 +1059,28 @@ def run_stage3(args, model_path, generator_path):
             "val_ap": val_ap, "test_ap": test_ap,
         })
 
-        if val_loss < best_val_loss:
-            best_val_ap, best_val_loss, best_epoch, patience = val_ap, val_loss, epoch, 0
+        improved_gen_loss = mean_total < best_gen_loss
+        improved_val_loss = val_loss < best_val_loss
+        improved_val_ap = val_ap > best_val_ap
+        if improved_gen_loss or improved_val_loss or improved_val_ap:
+            if improved_gen_loss:
+                best_gen_loss = mean_total
+            if improved_val_loss:
+                best_val_loss = val_loss
+            if improved_val_ap:
+                best_val_ap = val_ap
+            best_epoch, patience = epoch, 0
             torch.save({
                 "model_state": model.state_dict(),
                 "generator_state": generator.state_dict(),
                 "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
                 "args": vars(args),
             }, save_path)
-            print(f"  -> New best val loss={val_loss:.4f} (test={test_ap:.4f})", flush=True)
+            print(
+                f"  -> New best metrics: gen_loss={best_gen_loss:.4f} "
+                f"val_loss={best_val_loss:.4f} val_AP={best_val_ap:.4f} (test={test_ap:.4f})",
+                flush=True,
+            )
         else:
             patience += 1
             if patience >= args.s3_patience:

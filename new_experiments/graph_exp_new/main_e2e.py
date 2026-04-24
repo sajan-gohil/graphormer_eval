@@ -591,6 +591,7 @@ def run_e2e(args):
     # Tracking
     best_val_ap = 0.0
     best_val_loss = float("inf")
+    best_gen_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
     diagnostics = []  # (epoch, train_loss, val_AP) for correlation analysis
@@ -731,10 +732,17 @@ def run_e2e(args):
         )
         print(log_str, flush=True)
 
-        # --- Early stopping on val loss ---
-        if val_loss < best_val_loss:
-            best_val_ap = val_ap
-            best_val_loss = val_loss
+        improved_gen_loss = train_task < best_gen_loss
+        improved_val_loss = val_loss < best_val_loss
+        improved_val_ap = val_ap > best_val_ap
+
+        if improved_gen_loss or improved_val_loss or improved_val_ap:
+            if improved_gen_loss:
+                best_gen_loss = train_task
+            if improved_val_loss:
+                best_val_loss = val_loss
+            if improved_val_ap:
+                best_val_ap = val_ap
             best_epoch = epoch
             patience_counter = 0
             ckpt = {
@@ -749,7 +757,12 @@ def run_e2e(args):
             }
             save_path = os.path.join(args.save_dir, "best_e2e.pt")
             torch.save(ckpt, save_path)
-            print(f"  -> New best val loss={val_loss:.4f} (test AP={test_ap:.4f}), saved to {save_path}", flush=True)
+            print(
+                f"  -> New best metrics: gen_loss={best_gen_loss:.4f} "
+                f"val_loss={best_val_loss:.4f} val_AP={best_val_ap:.4f} "
+                f"(test AP={test_ap:.4f}), saved to {save_path}",
+                flush=True,
+            )
         else:
             patience_counter += 1
             if patience_counter >= args.patience:
