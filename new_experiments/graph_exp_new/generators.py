@@ -344,6 +344,10 @@ class FlowMatchingGenerator(BaseGenerator):
         # Project back to node_dim
         return self.output_proj(h)  # (B, M, node_dim)
 
+    def _null_condition(self, node_embeddings):
+        """Unconditional branch conditioning (classifier-free guidance)."""
+        return torch.zeros_like(node_embeddings)
+
     def forward(self, node_embeddings, mask, targets=None, **kwargs):
         B, N, d = node_embeddings.shape
         M = self.num_proxies
@@ -357,20 +361,32 @@ class FlowMatchingGenerator(BaseGenerator):
             x_t = (1 - t_expand) * x_0 + t_expand * targets  # interpolation
             u = targets - x_0  # conditional vector field
 
-            v = self._denoise(x_t, t, node_embeddings, mask)
-            aux_loss = F.mse_loss(v, u)
+            # Mixed guided + guidance-free training (one run each).
+            v_guided = self._denoise(x_t, t, node_embeddings, mask)
+            v_free = self._denoise(
+                x_t, t, self._null_condition(node_embeddings), mask
+            )
+            aux_loss = 0.5 * (F.mse_loss(v_guided, u) + F.mse_loss(v_free, u))
 
-            # Also generate proxies via Euler for return value
+            # Also generate proxies via Euler for return value:
+            # one guidance-free sample and one standard guided sample.
             with torch.no_grad():
-                proxy_embeddings = self._euler_sample(node_embeddings, mask)
+                _ = self._euler_sample(node_embeddings, mask, guidance_scale=0.0)
+                proxy_embeddings = self._euler_sample(
+                    node_embeddings, mask, guidance_scale=1.0
+                )
         else:
-            # Inference: Euler integration
-            proxy_embeddings = self._euler_sample(node_embeddings, mask)
+            # Inference: CFG Euler integration (w=1 => conditional generation,
+            # w>1 => extrapolation towards condition).
+            guidance_scale = float(kwargs.get("guidance_scale", 3.0))
+            proxy_embeddings = self._euler_sample(
+                node_embeddings, mask, guidance_scale=guidance_scale
+            )
             aux_loss = None
 
         return proxy_embeddings, aux_loss
 
-    def _euler_sample(self, node_embeddings, mask):
+    def _euler_sample(self, node_embeddings, mask, guidance_scale=1.0):
         """Generate proxies via Euler integration from t=0 to t=1."""
         B, N, d = node_embeddings.shape
         M = self.num_proxies
@@ -380,7 +396,14 @@ class FlowMatchingGenerator(BaseGenerator):
         for step in range(self.euler_steps):
             t_val = step * dt
             t = torch.full((B,), t_val, device=node_embeddings.device)
-            v = self._denoise(z, t, node_embeddings, mask)
+            v_cond = self._denoise(z, t, node_embeddings, mask)
+            if guidance_scale == 1.0:
+                v = v_cond
+            else:
+                v_free = self._denoise(
+                    z, t, self._null_condition(node_embeddings), mask
+                )
+                v = v_free + guidance_scale * (v_cond - v_free)
             z = z + dt * v
 
         return z  # (B, M, d)

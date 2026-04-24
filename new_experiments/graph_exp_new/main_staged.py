@@ -151,6 +151,8 @@ def build_parser():
     p.add_argument("--denoiser_layers", type=int, default=4)
     p.add_argument("--denoiser_heads", type=int, default=8)
     p.add_argument("--euler_steps", type=int, default=1)
+    p.add_argument("--guidance_scale", type=float, default=3.0,
+                   help="Flow-matching CFG scale at inference (w=1 conditional, w>1 extrapolative).")
     # GNN specific
     p.add_argument("--gnn_layers", type=int, default=4)
     p.add_argument("--gnn_type", type=str, default="GINE",
@@ -505,11 +507,14 @@ def _generate_proxies(model, generator, batch, dense_x, dense_mask, args,
             edge_attr=getattr(batch, "edge_attr", None),
         )
     else:
-        proxies, aux_loss = generator(
-            gen_input, gen_mask,
-            dist_masks=dist_masks,
-            node_masks=node_masks,
-        )
+        gen_kwargs = {
+            "dist_masks": dist_masks,
+            "node_masks": node_masks,
+        }
+        if args.generator == "flow_matching":
+            # Use conditional generation during training, configurable CFG at eval.
+            gen_kwargs["guidance_scale"] = args.guidance_scale if not model.training else 1.0
+        proxies, aux_loss = generator(gen_input, gen_mask, **gen_kwargs)
     return proxies, aux_loss
 
 
@@ -525,7 +530,9 @@ def generate_proxies(model, generator, batch, args):
             edge_attr=batch.edge_attr,
         )
     elif args.generator == "flow_matching":
-        proxy_emb = generator.generate(dense_x, dense_mask)
+        proxy_emb = generator.generate(
+            dense_x, dense_mask, guidance_scale=args.guidance_scale
+        )
     else:
         proxy_emb = generator.generate(dense_x, dense_mask)
     return proxy_emb, dense_x, dense_mask
@@ -812,6 +819,39 @@ def _model_forward_s2(model, batch, dist_masks, node_masks, gred_h,
                      precomputed_dense=(dense_x, dense_mask),
                      precomputed_gred=gred_h,
                      readout_scope=args.readout_scope)
+    else:
+        raise ValueError(f"Unknown backbone: {backbone}")
+
+
+def _model_forward_with_proxies(model, batch, dist_masks, node_masks, gred_h,
+                                proxy_embeddings, dense_x, dense_mask, args):
+    """
+    Unified model forward for Stage 3/4 task-loss probes with proxy embeddings.
+    For backbones that support proxy inputs, this always passes proxies via
+    model proxy injection (cross-attention when enabled, concat otherwise).
+    """
+    backbone = getattr(args, 'backbone', 'vanilla_gt')
+    if backbone == 'vanilla_gt':
+        return model(
+            batch,
+            proxy_embeddings=proxy_embeddings,
+            precomputed_dense=(dense_x, dense_mask),
+            readout_scope=args.readout_scope,
+        )
+    elif backbone == 'gred':
+        return model(
+            batch, dist_masks, node_masks,
+            precomputed_dense=(dense_x, dense_mask),
+            readout_scope=args.readout_scope,
+        )
+    elif backbone == 'hybrid':
+        return model(
+            batch, dist_masks, node_masks,
+            proxy_embeddings=proxy_embeddings,
+            precomputed_dense=(dense_x, dense_mask),
+            precomputed_gred=gred_h,
+            readout_scope=args.readout_scope,
+        )
     else:
         raise ValueError(f"Unknown backbone: {backbone}")
 
@@ -1185,6 +1225,11 @@ def run_stage3(args, model_path, proxy_pairs_path):
     multi_point_proxy = _build_multi_point_proxy(args, generator, cross_attn_router)
     if multi_point_proxy is not None:
         model.multi_point_proxy = multi_point_proxy
+    if getattr(args, "use_cross_attn_routing", False):
+        if getattr(model, "cross_attn_router", None) is None:
+            raise RuntimeError("Cross-attention routing enabled but cross_attn_router is missing.")
+        if multi_point_proxy is not None and getattr(model.multi_point_proxy, "routers", None) is None:
+            raise RuntimeError("Cross-attention routing enabled but multi-point proxy has no router.")
 
     # Proxy target dataset
     proxy_train_ds = ProxyTargetDataset(train_ds, proxy_pairs_path)
@@ -1257,6 +1302,12 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 )
             else:
                 dist_masks_batch, node_masks_batch = None, None
+            gred_h_batch = None
+            if args.backbone == "hybrid":
+                with torch.no_grad():
+                    gred_h_batch = model.encode_gred(
+                        encoder_embs, dist_masks_batch, node_masks_batch
+                    )
 
             # Optional target noise
             if args.target_noise_std > 0:
@@ -1289,49 +1340,40 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 # train_loss = aux_loss
                 # After generating proxy_emb from the generator:
                 with torch.no_grad():
-                    if args.backbone == "hybrid":
-                        logits_with, _ = model(
-                            pyg_batch, dist_masks_batch, node_masks_batch,
-                            proxy_embeddings=proxy_emb,
-                            precomputed_dense=(encoder_embs, emb_masks),
-                            readout_scope=args.readout_scope,
+                    if args.generator == "flow_matching":
+                        # Mixed guidance probing: one guidance-free run and one guided run.
+                        proxy_emb_free = active_gen.generate(
+                            encoder_embs, emb_masks, guidance_scale=0.0
                         )
-                    elif args.backbone == "gred":
-                        logits_with, _ = model(
-                            pyg_batch, dist_masks_batch, node_masks_batch,
-                            precomputed_dense=(encoder_embs, emb_masks),
-                            readout_scope=args.readout_scope,
+                        proxy_emb_guided = active_gen.generate(
+                            encoder_embs, emb_masks, guidance_scale=1.0
+                        )
+                        logits_free, _ = _model_forward_with_proxies(
+                            model, pyg_batch, dist_masks_batch, node_masks_batch, gred_h_batch,
+                            proxy_emb_free, encoder_embs, emb_masks, args,
+                        )
+                        logits_guided, _ = _model_forward_with_proxies(
+                            model, pyg_batch, dist_masks_batch, node_masks_batch, gred_h_batch,
+                            proxy_emb_guided, encoder_embs, emb_masks, args,
+                        )
+                        task_loss_aux = 0.5 * (
+                            nn.functional.binary_cross_entropy_with_logits(logits_free, pyg_batch.y) +
+                            nn.functional.binary_cross_entropy_with_logits(logits_guided, pyg_batch.y)
                         )
                     else:
-                        logits_with, _ = model(
-                            pyg_batch, proxy_embeddings=proxy_emb,
-                            precomputed_dense=(encoder_embs, emb_masks),
-                            readout_scope=args.readout_scope,
+                        logits_with, _ = _model_forward_with_proxies(
+                            model, pyg_batch, dist_masks_batch, node_masks_batch, gred_h_batch,
+                            proxy_emb, encoder_embs, emb_masks, args,
                         )
-                task_loss_aux = nn.functional.binary_cross_entropy_with_logits(logits_with, pyg_batch.y)
+                        task_loss_aux = nn.functional.binary_cross_entropy_with_logits(logits_with, pyg_batch.y)
                 train_loss = aux_loss + 0.5 * task_loss_aux  # joint objective
 
             else:
                 # PMA has no reconstruction loss — fall back to downstream task loss
-                if args.backbone == "hybrid":
-                    logits, _ = model(
-                        pyg_batch, dist_masks_batch, node_masks_batch,
-                        proxy_embeddings=proxy_emb,
-                        precomputed_dense=(encoder_embs, emb_masks),
-                        readout_scope=args.readout_scope,
-                    )
-                elif args.backbone == "gred":
-                    logits, _ = model(
-                        pyg_batch, dist_masks_batch, node_masks_batch,
-                        precomputed_dense=(encoder_embs, emb_masks),
-                        readout_scope=args.readout_scope,
-                    )
-                else:
-                    logits, _ = model(
-                        pyg_batch, proxy_embeddings=proxy_emb,
-                        precomputed_dense=(encoder_embs, emb_masks),
-                        readout_scope=args.readout_scope,
-                    )
+                logits, _ = _model_forward_with_proxies(
+                    model, pyg_batch, dist_masks_batch, node_masks_batch, gred_h_batch,
+                    proxy_emb, encoder_embs, emb_masks, args,
+                )
                 train_loss = nn.functional.binary_cross_entropy_with_logits(
                     logits, pyg_batch.y)
 
