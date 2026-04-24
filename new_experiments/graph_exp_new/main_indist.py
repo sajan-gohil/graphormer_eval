@@ -33,6 +33,7 @@ from data import get_loaders
 from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
 from generators import (
     ScoreBasedGenerator, GNNPoolingGenerator, PMAGenerator, GraphCoarseningGenerator,
+    GREDLayersGenerator,
     CrossAttentionRouter, MultiPointProxyWrapper,
 )
 from metrics import compute_macro_ap
@@ -54,7 +55,7 @@ def build_parser():
     p.add_argument("--phase", type=str, default="all",
                    choices=["1", "2", "3", "4", "5", "all"])
     p.add_argument("--generator", type=str, default="score_based",
-                   choices=["score_based", "pma", "graph_coarsening", "gnn_pooling"])
+                   choices=["score_based", "pma", "graph_coarsening", "gnn_pooling", "gred_layers"])
 
     # Backbone
     p.add_argument("--backbone", type=str, default="vanilla_gt",
@@ -366,6 +367,24 @@ def build_generator(args):
             decode_layers=args.decode_layers, idx_emb_dim=args.idx_emb_dim,
             dropout=args.gen_dropout, decode_mode=args.decode_mode,
         )
+    elif args.generator == "gred_layers":
+        if hasattr(args, "max_phase_lru"):
+            max_phase = args.max_phase_lru
+        elif hasattr(args, "max_phase"):
+            max_phase = args.max_phase
+        else:
+            raise ValueError("Missing max_phase parameter for gred_layers generator.")
+        return GREDLayersGenerator(
+            num_proxies=args.num_proxies, input_dim=args.hidden_dim,
+            state_dim=args.state_dim, num_gred_layers=args.gen_num_layers,
+            hidden_dim=args.gen_hidden_dim, num_refine_layers=1,
+            num_heads=args.gen_num_heads, expand=args.gred_expand,
+            # main_indist uses --max_phase_lru (not --max_phase) to avoid
+            # naming conflict with the existing --phase stage selector.
+            r_min=args.r_min, r_max=args.r_max,
+            max_phase=max_phase,
+            dropout=args.gen_dropout, act=args.gred_act,
+        )
     else:
         raise ValueError(f"Unknown generator: {args.generator}")
 
@@ -544,7 +563,8 @@ def hungarian_reconstruction_loss(generated, targets, valid_mask):
 # ================================================================
 
 def _generate_proxies(model, generator, batch, dense_x, dense_mask, args,
-                      gred_h=None, num_proxy_sets=1):
+                      gred_h=None, num_proxy_sets=1,
+                      dist_masks=None, node_masks=None):
     """Generate proxy embeddings for a batch. Handles flat vs dense interface."""
     gen_input = gred_h if gred_h is not None else dense_x
     gen_mask = dense_mask
@@ -564,7 +584,11 @@ def _generate_proxies(model, generator, batch, dense_x, dense_mask, args,
                 edge_attr=sub_edge_attr,
             )
         else:
-            proxies, aux_loss = generator(gen_input, gen_mask)
+            proxies, aux_loss = generator(
+                gen_input, gen_mask,
+                dist_masks=dist_masks,
+                node_masks=node_masks,
+            )
 
         proxy_list.append(proxies)
         if aux_loss is not None:
@@ -654,7 +678,9 @@ def evaluate_with_proxies(model, generator, loader, device, args,
 
                 proxies, _ = _generate_proxies(
                     model, generator, batch, dense_x, dense_mask, args,
-                    gred_h=gred_h, num_proxy_sets=proxy_multiplier)
+                    gred_h=gred_h, num_proxy_sets=proxy_multiplier,
+                    dist_masks=dist_masks_batch, node_masks=node_masks_batch,
+                )
 
                 if args.backbone == "vanilla_gt":
                     logits, _ = model(batch, proxy_embeddings=proxies,
@@ -1703,7 +1729,9 @@ def run_phase5(args, phase1_model_path, generator_path):
                 if use_proxy:
                     proxies, aux_loss = _generate_proxies(
                         model, generator, batch, dense_x, dense_mask, args,
-                        gred_h=gred_h, num_proxy_sets=args.proxy_multiplier)
+                        gred_h=gred_h, num_proxy_sets=args.proxy_multiplier,
+                        dist_masks=dist_masks_batch, node_masks=node_masks_batch,
+                    )
 
                     if args.backbone == "vanilla_gt":
                         logits, node_emb_with = model(
