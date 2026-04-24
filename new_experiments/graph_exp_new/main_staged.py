@@ -367,8 +367,8 @@ def _build_dist_and_node_masks_for_batch(pyg_batch, max_hops, device):
         adj[edge_index[0], edge_index[1]] = 1.0
 
         dm = _compute_dist_mask_single(adj, max_hops=max_hops)
-        k = dm.shape[0]
-        dist_masks[i, :k, :n, :n] = torch.from_numpy(dm.astype(np.float32)).to(device)
+        k_use = min(dm.shape[0], max_hops)
+        dist_masks[i, :k_use, :n, :n] = torch.from_numpy(dm[:k_use].astype(np.float32)).to(device)
         node_masks[i, :n] = True
 
     return dist_masks, node_masks
