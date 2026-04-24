@@ -125,6 +125,107 @@ class ScoreBasedGenerator(BaseGenerator):
 
 
 # ================================================================
+# GRED-LAYERS GENERATOR
+# ================================================================
+
+class GREDLayersGenerator(BaseGenerator):
+    """
+    Generator that first refines node embeddings with GRED layers, then applies
+    score-based proxy extraction.
+
+    If distance masks are not provided, it falls back to score-based extraction
+    on the input node embeddings so it remains usable across all pipelines.
+    """
+    def __init__(self, num_proxies, input_dim, state_dim=88, num_gred_layers=2,
+                 hidden_dim=128, num_refine_layers=1, num_heads=4, expand=1,
+                 r_min=0.0, r_max=1.0, max_phase=6.28, dropout=0.2,
+                 act="full-glu"):
+        super().__init__(num_proxies, input_dim)
+
+        # Lazy import avoids module-level circular imports (models -> generators).
+        from models import GREDLayer
+
+        self.gred_layers = nn.ModuleList([
+            GREDLayer(
+                hidden_dim=input_dim,
+                state_dim=state_dim,
+                expand=expand,
+                r_min=r_min,
+                r_max=r_max,
+                max_phase=max_phase,
+                dropout=dropout,
+                act=act,
+            )
+            for _ in range(num_gred_layers)
+        ])
+
+        self.value_proj = nn.Linear(input_dim, input_dim)
+        self.score_mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_proxies),
+        )
+
+        self.refinement_layers = nn.ModuleList()
+        for _ in range(num_refine_layers):
+            self.refinement_layers.append(nn.ModuleDict({
+                "norm1": nn.LayerNorm(input_dim),
+                "attn": nn.MultiheadAttention(
+                    input_dim, num_heads, dropout=dropout, batch_first=True
+                ),
+                "norm2": nn.LayerNorm(input_dim),
+                "ffn": nn.Sequential(
+                    nn.Linear(input_dim, input_dim * 4),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(input_dim * 4, input_dim),
+                ),
+            }))
+
+    def forward(self, node_embeddings, mask, targets=None, **kwargs):
+        dist_masks = kwargs.get("dist_masks", None)
+        node_masks = kwargs.get("node_masks", None)
+
+        x = node_embeddings
+        if dist_masks is not None:
+            effective_node_mask = node_masks if node_masks is not None else mask
+            if effective_node_mask is None:
+                raise ValueError("GREDLayersGenerator needs a mask when dist_masks are provided.")
+            for layer in self.gred_layers:
+                x = layer(x, dist_masks, effective_node_mask)
+
+        effective_mask = mask if mask is not None else node_masks
+        if effective_mask is None:
+            raise ValueError("GREDLayersGenerator requires a valid node mask.")
+
+        V = self.value_proj(x)  # (B, N, d)
+        S = self.score_mlp(x)   # (B, N, M)
+
+        S = S.masked_fill(~effective_mask.unsqueeze(-1), float("-inf"))
+        A = F.softmax(S, dim=1)  # (B, N, M)
+        A = torch.nan_to_num(A, nan=0.0)
+
+        proxy_embeddings = torch.bmm(A.transpose(1, 2), V)  # (B, M, d)
+
+        for layer in self.refinement_layers:
+            normed = layer["norm1"](proxy_embeddings)
+            attn_out, _ = layer["attn"](normed, normed, normed)
+            proxy_embeddings = proxy_embeddings + attn_out
+            proxy_embeddings = proxy_embeddings + layer["ffn"](layer["norm2"](proxy_embeddings))
+
+        aux_loss = None
+        if targets is not None:
+            batch_size = proxy_embeddings.shape[0]
+            mmd_losses = []
+            for i in range(batch_size):
+                mmd_losses.append(mmd_squared(proxy_embeddings[i], targets[i]))
+            aux_loss = torch.stack(mmd_losses).mean()
+
+        return proxy_embeddings, aux_loss
+
+
+# ================================================================
 # FLOW MATCHING GENERATOR (Pipeline A only)
 # ================================================================
 
