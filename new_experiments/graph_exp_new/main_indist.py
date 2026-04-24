@@ -368,7 +368,12 @@ def build_generator(args):
             dropout=args.gen_dropout, decode_mode=args.decode_mode,
         )
     elif args.generator == "gred_layers":
-        max_phase = args.max_phase_lru if hasattr(args, "max_phase_lru") else args.max_phase
+        if hasattr(args, "max_phase_lru"):
+            max_phase = args.max_phase_lru
+        elif hasattr(args, "max_phase"):
+            max_phase = args.max_phase
+        else:
+            raise ValueError("Missing max_phase parameter for gred_layers generator.")
         return GREDLayersGenerator(
             num_proxies=args.num_proxies, input_dim=args.hidden_dim,
             state_dim=args.state_dim, num_gred_layers=args.gen_num_layers,
