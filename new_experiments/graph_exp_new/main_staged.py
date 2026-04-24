@@ -431,6 +431,7 @@ def build_generator(args):
             denoiser_heads=args.denoiser_heads,
             dropout=args.gen_dropout,
             euler_steps=args.euler_steps,
+            guidance_scale_default=args.guidance_scale,
         )
     elif args.generator == "gnn_pooling":
         return GNNPoolingGenerator(
@@ -1227,9 +1228,15 @@ def run_stage3(args, model_path, proxy_pairs_path):
         model.multi_point_proxy = multi_point_proxy
     if getattr(args, "use_cross_attn_routing", False):
         if getattr(model, "cross_attn_router", None) is None:
-            raise RuntimeError("Cross-attention routing enabled but cross_attn_router is missing.")
+            raise RuntimeError(
+                "Cross-attention routing is enabled but model.cross_attn_router is missing. "
+                "Ensure the instantiated model includes cross-attention routing so proxies use N→M→N."
+            )
         if multi_point_proxy is not None and getattr(model.multi_point_proxy, "routers", None) is None:
-            raise RuntimeError("Cross-attention routing enabled but multi-point proxy has no router.")
+            raise RuntimeError(
+                "Cross-attention routing is enabled but multi-point proxy has no routers. "
+                "Ensure the multi-point wrapper is built with a CrossAttentionRouter."
+            )
 
     # Proxy target dataset
     proxy_train_ds = ProxyTargetDataset(train_ds, proxy_pairs_path)
@@ -1341,7 +1348,8 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 # After generating proxy_emb from the generator:
                 with torch.no_grad():
                     if args.generator == "flow_matching":
-                        # Mixed guidance probing: one guidance-free run and one guided run.
+                        # guidance_scale=0.0 -> fully guidance-free (unconditional),
+                        # guidance_scale=1.0 -> standard conditional generation.
                         proxy_emb_free = active_gen.generate(
                             encoder_embs, emb_masks, guidance_scale=0.0
                         )

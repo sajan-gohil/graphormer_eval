@@ -25,7 +25,7 @@ class BaseGenerator(ABC, nn.Module):
         self.hidden_dim = hidden_dim
 
     @abstractmethod
-    def forward(self, node_embeddings, mask, targets=None, **kwargs):
+    def forward(self, node_embeddings, mask, targets=None, guidance_scale=None, **kwargs):
         """
         Args:
             node_embeddings: (B, N, d) dense batched node embeddings.
@@ -282,10 +282,11 @@ class FlowMatchingGenerator(BaseGenerator):
     """
     def __init__(self, num_proxies, node_dim, denoiser_dim=128,
                  denoiser_layers=4, denoiser_heads=8, dropout=0.2,
-                 euler_steps=1):
+                 euler_steps=1, guidance_scale_default=3.0):
         super().__init__(num_proxies, node_dim)
         self.denoiser_dim = denoiser_dim
         self.euler_steps = euler_steps
+        self.guidance_scale_default = float(guidance_scale_default)
 
         # Projections if node_dim != denoiser_dim
         self.input_proj = nn.Linear(node_dim, denoiser_dim) if node_dim != denoiser_dim else nn.Identity()
@@ -345,7 +346,7 @@ class FlowMatchingGenerator(BaseGenerator):
         return self.output_proj(h)  # (B, M, node_dim)
 
     def _null_condition(self, node_embeddings):
-        """Unconditional branch conditioning (classifier-free guidance)."""
+        """Zero conditioning used for the guidance-free CFG branch."""
         return torch.zeros_like(node_embeddings)
 
     def forward(self, node_embeddings, mask, targets=None, **kwargs):
@@ -366,19 +367,19 @@ class FlowMatchingGenerator(BaseGenerator):
             v_free = self._denoise(
                 x_t, t, self._null_condition(node_embeddings), mask
             )
+            # Equal weighting keeps guided and guidance-free branches balanced.
             aux_loss = 0.5 * (F.mse_loss(v_guided, u) + F.mse_loss(v_free, u))
 
-            # Also generate proxies via Euler for return value:
-            # one guidance-free sample and one standard guided sample.
+            # Return a standard conditional sample for downstream probes.
             with torch.no_grad():
-                _ = self._euler_sample(node_embeddings, mask, guidance_scale=0.0)
                 proxy_embeddings = self._euler_sample(
                     node_embeddings, mask, guidance_scale=1.0
                 )
         else:
             # Inference: CFG Euler integration (w=1 => conditional generation,
             # w>1 => extrapolation towards condition).
-            guidance_scale = float(kwargs.get("guidance_scale", 3.0))
+            if guidance_scale is None:
+                guidance_scale = self.guidance_scale_default
             proxy_embeddings = self._euler_sample(
                 node_embeddings, mask, guidance_scale=guidance_scale
             )
