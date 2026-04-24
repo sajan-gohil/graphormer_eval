@@ -373,6 +373,8 @@ def build_generator(args):
             state_dim=args.state_dim, num_gred_layers=args.gen_num_layers,
             hidden_dim=args.gen_hidden_dim, num_refine_layers=1,
             num_heads=args.gen_num_heads, expand=args.gred_expand,
+            # main_indist uses --max_phase_lru (not --max_phase) to avoid
+            # naming conflict with the existing --phase stage selector.
             r_min=args.r_min, r_max=args.r_max,
             max_phase=getattr(args, "max_phase", args.max_phase_lru),
             dropout=args.gen_dropout, act=args.gred_act,
