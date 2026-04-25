@@ -153,6 +153,8 @@ def build_parser():
     p.add_argument("--euler_steps", type=int, default=1)
     p.add_argument("--guidance_scale", type=float, default=3.0,
                    help="Flow-matching CFG scale at inference (w=1 conditional, w>1 extrapolative).")
+    p.add_argument("--flow_uncond_train_prob", type=float, default=0.1,
+                   help="Probability of running unconditional flow-matching branch during training.")
     # GNN specific
     p.add_argument("--gnn_layers", type=int, default=4)
     p.add_argument("--gnn_type", type=str, default="GINE",
@@ -432,6 +434,7 @@ def build_generator(args):
             dropout=args.gen_dropout,
             euler_steps=args.euler_steps,
             guidance_scale_default=args.guidance_scale,
+            uncond_train_prob=args.flow_uncond_train_prob,
         )
     elif args.generator == "gnn_pooling":
         return GNNPoolingGenerator(
@@ -1323,6 +1326,10 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 targets = target_proxies
 
             optimizer.zero_grad()
+            flow_run_uncond = (
+                args.generator == "flow_matching"
+                and torch.rand(1).item() < args.flow_uncond_train_prob
+            )
 
             # Get the active generator (from wrapper if multi-point, else standalone)
             active_gen = model.multi_point_proxy.generators[0] if multi_point_proxy is not None else generator
@@ -1340,7 +1347,12 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 )
             else:
                 # Dense-interface generators (score_based, flow_matching, pma)
-                proxy_emb, aux_loss = active_gen(encoder_embs, emb_masks, targets=targets)
+                if args.generator == "flow_matching":
+                    proxy_emb, aux_loss = active_gen(
+                        encoder_embs, emb_masks, targets=targets, run_uncond=flow_run_uncond
+                    )
+                else:
+                    proxy_emb, aux_loss = active_gen(encoder_embs, emb_masks, targets=targets)
 
             if aux_loss is not None:
                 # Reconstruction / regularization loss (MMD, CFM, ortho)
@@ -1348,26 +1360,29 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 # After generating proxy_emb from the generator:
                 with torch.no_grad():
                     if args.generator == "flow_matching":
-                        # guidance_scale=0.0 -> fully guidance-free (unconditional),
-                        # guidance_scale=1.0 -> standard conditional generation.
-                        proxy_emb_free = active_gen.generate(
-                            encoder_embs, emb_masks, guidance_scale=0.0
-                        )
                         proxy_emb_guided = active_gen.generate(
                             encoder_embs, emb_masks, guidance_scale=1.0
-                        )
-                        logits_free, _ = _model_forward_with_proxies(
-                            model, pyg_batch, dist_masks_batch, node_masks_batch, gred_h_batch,
-                            proxy_emb_free, encoder_embs, emb_masks, args,
                         )
                         logits_guided, _ = _model_forward_with_proxies(
                             model, pyg_batch, dist_masks_batch, node_masks_batch, gred_h_batch,
                             proxy_emb_guided, encoder_embs, emb_masks, args,
                         )
-                        task_loss_aux = 0.5 * (
-                            nn.functional.binary_cross_entropy_with_logits(logits_free, pyg_batch.y) +
-                            nn.functional.binary_cross_entropy_with_logits(logits_guided, pyg_batch.y)
+                        task_loss_aux = nn.functional.binary_cross_entropy_with_logits(
+                            logits_guided, pyg_batch.y
                         )
+                        # Run unconditional guidance probe only some of the time.
+                        if flow_run_uncond:
+                            proxy_emb_free = active_gen.generate(
+                                encoder_embs, emb_masks, guidance_scale=0.0
+                            )
+                            logits_free, _ = _model_forward_with_proxies(
+                                model, pyg_batch, dist_masks_batch, node_masks_batch, gred_h_batch,
+                                proxy_emb_free, encoder_embs, emb_masks, args,
+                            )
+                            task_loss_aux = 0.5 * (
+                                task_loss_aux +
+                                nn.functional.binary_cross_entropy_with_logits(logits_free, pyg_batch.y)
+                            )
                     else:
                         logits_with, _ = _model_forward_with_proxies(
                             model, pyg_batch, dist_masks_batch, node_masks_batch, gred_h_batch,
