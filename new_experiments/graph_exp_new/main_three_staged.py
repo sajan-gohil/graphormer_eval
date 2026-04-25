@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from data import get_loaders
 from models import GraphTransformer, GREDEncoder, GREDHybridTransformer
 from generators import (
-    ScoreBasedGenerator, GNNPoolingGenerator, PMAGenerator, GraphCoarseningGenerator,
+    ScoreBasedGenerator, FlowMatchingGenerator, GNNPoolingGenerator, PMAGenerator, GraphCoarseningGenerator,
     GREDLayersGenerator,
     CrossAttentionRouter, MultiPointProxyWrapper,
 )
@@ -54,7 +54,7 @@ def build_parser():
     p.add_argument("--stage", type=str, default="all",
                    choices=["1", "2", "3", "all"])
     p.add_argument("--generator", type=str, default="graph_coarsening",
-                   choices=["score_based", "pma", "graph_coarsening", "gnn_pooling", "gred_layers"])
+                   choices=["flow_matching", "score_based", "pma", "graph_coarsening", "gnn_pooling", "gred_layers"])
 
     # Backbone
     p.add_argument("--backbone", type=str, default="vanilla_gt",
@@ -140,6 +140,15 @@ def build_parser():
     p.add_argument("--gen_num_layers", type=int, default=4)
     p.add_argument("--gen_num_heads", type=int, default=8)
     p.add_argument("--gen_dropout", type=float, default=0.2)
+    # Flow matching specific
+    p.add_argument("--denoiser_dim", type=int, default=256)
+    p.add_argument("--denoiser_layers", type=int, default=4)
+    p.add_argument("--denoiser_heads", type=int, default=8)
+    p.add_argument("--euler_steps", type=int, default=1)
+    p.add_argument("--guidance_scale", type=float, default=3.0,
+                   help="Flow-matching CFG scale at inference (w=1 conditional, w>1 extrapolative).")
+    p.add_argument("--flow_uncond_train_prob", type=float, default=0.1,
+                   help="Probability of running unconditional flow-matching branch during training.")
     # PMA specific
     p.add_argument("--pma_query_mode", type=str, default="farthest_point",
                    choices=["farthest_point", "soft_kmeans"])
@@ -323,6 +332,18 @@ def build_generator(args):
             num_layers=args.gen_num_layers,
             num_heads=args.gen_num_heads,
             dropout=args.gen_dropout,
+        )
+    elif args.generator == "flow_matching":
+        return FlowMatchingGenerator(
+            num_proxies=args.num_proxies,
+            node_dim=args.hidden_dim,
+            denoiser_dim=args.denoiser_dim,
+            denoiser_layers=args.denoiser_layers,
+            denoiser_heads=args.denoiser_heads,
+            dropout=args.gen_dropout,
+            euler_steps=args.euler_steps,
+            guidance_scale_default=args.guidance_scale,
+            uncond_train_prob=args.flow_uncond_train_prob,
         )
     elif args.generator == "pma":
         return PMAGenerator(
