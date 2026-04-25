@@ -366,13 +366,18 @@ class FlowMatchingGenerator(BaseGenerator):
 
             # Always train conditional branch.
             v_guided = self._denoise(x_t, t, node_embeddings, mask)
-            aux_loss = F.mse_loss(v_guided, u)
+            cond_loss = F.mse_loss(v_guided, u)
+            aux_loss = cond_loss
             # Train unconditional branch only on a subset of steps.
-            if torch.rand(1, device=device).item() < self.uncond_train_prob:
+            run_uncond = kwargs.get("run_uncond", None)
+            if run_uncond is None:
+                run_uncond = torch.rand(1).item() < self.uncond_train_prob
+            if run_uncond:
                 v_free = self._denoise(
                     x_t, t, self._null_condition(node_embeddings), mask
                 )
-                aux_loss = 0.5 * (aux_loss + F.mse_loss(v_free, u))
+                uncond_loss = F.mse_loss(v_free, u)
+                aux_loss = 0.5 * (cond_loss + uncond_loss)
 
             # Return a standard conditional sample for downstream probes.
             with torch.no_grad():

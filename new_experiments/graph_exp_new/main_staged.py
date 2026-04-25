@@ -1326,6 +1326,10 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 targets = target_proxies
 
             optimizer.zero_grad()
+            flow_run_uncond = (
+                args.generator == "flow_matching"
+                and torch.rand(1).item() < args.flow_uncond_train_prob
+            )
 
             # Get the active generator (from wrapper if multi-point, else standalone)
             active_gen = model.multi_point_proxy.generators[0] if multi_point_proxy is not None else generator
@@ -1343,7 +1347,12 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 )
             else:
                 # Dense-interface generators (score_based, flow_matching, pma)
-                proxy_emb, aux_loss = active_gen(encoder_embs, emb_masks, targets=targets)
+                if args.generator == "flow_matching":
+                    proxy_emb, aux_loss = active_gen(
+                        encoder_embs, emb_masks, targets=targets, run_uncond=flow_run_uncond
+                    )
+                else:
+                    proxy_emb, aux_loss = active_gen(encoder_embs, emb_masks, targets=targets)
 
             if aux_loss is not None:
                 # Reconstruction / regularization loss (MMD, CFM, ortho)
@@ -1362,7 +1371,7 @@ def run_stage3(args, model_path, proxy_pairs_path):
                             logits_guided, pyg_batch.y
                         )
                         # Run unconditional guidance probe only some of the time.
-                        if torch.rand(1, device=encoder_embs.device).item() < args.flow_uncond_train_prob:
+                        if flow_run_uncond:
                             proxy_emb_free = active_gen.generate(
                                 encoder_embs, emb_masks, guidance_scale=0.0
                             )
