@@ -153,6 +153,8 @@ def build_parser():
     p.add_argument("--euler_steps", type=int, default=1)
     p.add_argument("--guidance_scale", type=float, default=3.0,
                    help="Flow-matching CFG scale at inference (w=1 conditional, w>1 extrapolative).")
+    p.add_argument("--flow_uncond_train_prob", type=float, default=0.1,
+                   help="Probability of running unconditional flow-matching branch during training.")
     # GNN specific
     p.add_argument("--gnn_layers", type=int, default=4)
     p.add_argument("--gnn_type", type=str, default="GINE",
@@ -432,6 +434,7 @@ def build_generator(args):
             dropout=args.gen_dropout,
             euler_steps=args.euler_steps,
             guidance_scale_default=args.guidance_scale,
+            uncond_train_prob=args.flow_uncond_train_prob,
         )
     elif args.generator == "gnn_pooling":
         return GNNPoolingGenerator(
@@ -1348,26 +1351,29 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 # After generating proxy_emb from the generator:
                 with torch.no_grad():
                     if args.generator == "flow_matching":
-                        # guidance_scale=0.0 -> fully guidance-free (unconditional),
-                        # guidance_scale=1.0 -> standard conditional generation.
-                        proxy_emb_free = active_gen.generate(
-                            encoder_embs, emb_masks, guidance_scale=0.0
-                        )
                         proxy_emb_guided = active_gen.generate(
                             encoder_embs, emb_masks, guidance_scale=1.0
-                        )
-                        logits_free, _ = _model_forward_with_proxies(
-                            model, pyg_batch, dist_masks_batch, node_masks_batch, gred_h_batch,
-                            proxy_emb_free, encoder_embs, emb_masks, args,
                         )
                         logits_guided, _ = _model_forward_with_proxies(
                             model, pyg_batch, dist_masks_batch, node_masks_batch, gred_h_batch,
                             proxy_emb_guided, encoder_embs, emb_masks, args,
                         )
-                        task_loss_aux = 0.5 * (
-                            nn.functional.binary_cross_entropy_with_logits(logits_free, pyg_batch.y) +
-                            nn.functional.binary_cross_entropy_with_logits(logits_guided, pyg_batch.y)
+                        task_loss_aux = nn.functional.binary_cross_entropy_with_logits(
+                            logits_guided, pyg_batch.y
                         )
+                        # Run unconditional guidance probe only some of the time.
+                        if torch.rand(1, device=encoder_embs.device).item() < args.flow_uncond_train_prob:
+                            proxy_emb_free = active_gen.generate(
+                                encoder_embs, emb_masks, guidance_scale=0.0
+                            )
+                            logits_free, _ = _model_forward_with_proxies(
+                                model, pyg_batch, dist_masks_batch, node_masks_batch, gred_h_batch,
+                                proxy_emb_free, encoder_embs, emb_masks, args,
+                            )
+                            task_loss_aux = 0.5 * (
+                                task_loss_aux +
+                                nn.functional.binary_cross_entropy_with_logits(logits_free, pyg_batch.y)
+                            )
                     else:
                         logits_with, _ = _model_forward_with_proxies(
                             model, pyg_batch, dist_masks_batch, node_masks_batch, gred_h_batch,

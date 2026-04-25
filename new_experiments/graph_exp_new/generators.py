@@ -282,11 +282,13 @@ class FlowMatchingGenerator(BaseGenerator):
     """
     def __init__(self, num_proxies, node_dim, denoiser_dim=128,
                  denoiser_layers=4, denoiser_heads=8, dropout=0.2,
-                 euler_steps=1, guidance_scale_default=3.0):
+                 euler_steps=1, guidance_scale_default=3.0,
+                 uncond_train_prob=0.1):
         super().__init__(num_proxies, node_dim)
         self.denoiser_dim = denoiser_dim
         self.euler_steps = euler_steps
         self.guidance_scale_default = float(guidance_scale_default)
+        self.uncond_train_prob = float(uncond_train_prob)
 
         # Projections if node_dim != denoiser_dim
         self.input_proj = nn.Linear(node_dim, denoiser_dim) if node_dim != denoiser_dim else nn.Identity()
@@ -349,7 +351,7 @@ class FlowMatchingGenerator(BaseGenerator):
         """Zero conditioning used for the guidance-free CFG branch."""
         return torch.zeros_like(node_embeddings)
 
-    def forward(self, node_embeddings, mask, targets=None, **kwargs):
+    def forward(self, node_embeddings, mask, targets=None, guidance_scale=None, **kwargs):
         B, N, d = node_embeddings.shape
         M = self.num_proxies
         device = node_embeddings.device
@@ -362,13 +364,15 @@ class FlowMatchingGenerator(BaseGenerator):
             x_t = (1 - t_expand) * x_0 + t_expand * targets  # interpolation
             u = targets - x_0  # conditional vector field
 
-            # Mixed guided + guidance-free training (one run each).
+            # Always train conditional branch.
             v_guided = self._denoise(x_t, t, node_embeddings, mask)
-            v_free = self._denoise(
-                x_t, t, self._null_condition(node_embeddings), mask
-            )
-            # Equal weighting keeps guided and guidance-free branches balanced.
-            aux_loss = 0.5 * (F.mse_loss(v_guided, u) + F.mse_loss(v_free, u))
+            aux_loss = F.mse_loss(v_guided, u)
+            # Train unconditional branch only on a subset of steps.
+            if torch.rand(1, device=device).item() < self.uncond_train_prob:
+                v_free = self._denoise(
+                    x_t, t, self._null_condition(node_embeddings), mask
+                )
+                aux_loss = 0.5 * (aux_loss + F.mse_loss(v_free, u))
 
             # Return a standard conditional sample for downstream probes.
             with torch.no_grad():
