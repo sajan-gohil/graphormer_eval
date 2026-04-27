@@ -116,9 +116,25 @@ def build_warmup_cosine_scheduler(
 def build_reduce_on_plateau_scheduler(
     optimizer: torch.optim.Optimizer,
     patience: int = 15,
+    factor: float = 0.1,
+    threshold: float = 1e-4,
 ):
+    """
+    Build a ReduceLROnPlateau scheduler for validation-loss tracking.
+
+    Args:
+        optimizer: Optimizer whose learning rate is adjusted.
+        patience: Number of validation checks with no improvement before reducing LR.
+        factor: Multiplicative decay applied to LR when plateau is detected.
+        threshold: Minimum change in monitored metric to qualify as improvement.
+
+    Returns:
+        torch.optim.lr_scheduler.ReduceLROnPlateau configured in min mode.
+    """
     return torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
         patience=patience,
+        factor=factor,
+        threshold=threshold,
     )
