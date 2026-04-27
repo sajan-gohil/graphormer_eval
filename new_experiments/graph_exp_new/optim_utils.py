@@ -111,3 +111,14 @@ def build_warmup_cosine_scheduler(
         )
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambdas)
+
+
+def build_reduce_on_plateau_scheduler(
+    optimizer: torch.optim.Optimizer,
+    patience: int = 15,
+):
+    return torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        patience=patience,
+    )

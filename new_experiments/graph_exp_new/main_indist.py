@@ -40,6 +40,7 @@ from metrics import compute_macro_ap
 from optim_utils import (
     build_grouped_optimizer_and_scheduler,
     build_warmup_cosine_scheduler,
+    build_reduce_on_plateau_scheduler,
 )
 from losses import novelty_loss, inter_proxy_cosine_stats, proxy_diversity_loss
 
@@ -203,6 +204,8 @@ def build_parser():
                    help="Minimum LR floor for warmup-cosine schedule")
     p.add_argument("--warmup_ratio", type=float, default=0.05,
                    help="Warmup fraction of total optimization steps")
+    p.add_argument("--plateau_patience", type=int, default=15,
+                   help="Patience for ReduceLROnPlateau scheduler on validation loss")
     p.add_argument("--recurrent_lr_factor", type=float, default=1.0,
                    help="LR multiplier for recurrent GRED parameters")
     p.add_argument("--save_dir", type=str, default="checkpoints_indist")
@@ -735,6 +738,10 @@ def run_phase1(args):
         warmup_ratio=args.warmup_ratio,
         recurrent_lr_factor=args.recurrent_lr_factor,
     )
+    plateau_scheduler = build_reduce_on_plateau_scheduler(
+        optimizer,
+        patience=args.plateau_patience,
+    )
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
@@ -778,6 +785,7 @@ def run_phase1(args):
         train_loss = float(np.mean(train_losses))
 
         val_ap, val_loss = evaluate_model_only(model, val_loader, args.device, args)
+        plateau_scheduler.step(val_loss)
 
         elapsed = time.time() - epoch_start
         mem_str = _mem_str(args)
@@ -875,6 +883,10 @@ def run_phase2(args, model_path):
         warmup_ratio=args.warmup_ratio,
         recurrent_lr_factor=args.recurrent_lr_factor,
     )
+    plateau_scheduler = build_reduce_on_plateau_scheduler(
+        optimizer,
+        patience=args.plateau_patience,
+    )
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
@@ -960,6 +972,7 @@ def run_phase2(args, model_path):
         # Validate on partial graphs too (consistent with training)
         val_ap, val_loss = _evaluate_partial(
             model, val_loader, args.device, args, M)
+        plateau_scheduler.step(val_loss)
 
         elapsed = time.time() - epoch_start
         mem_str = _mem_str(args)
@@ -1122,6 +1135,10 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
         warmup_ratio=args.warmup_ratio,
         recurrent_lr_factor=1.0,
     )
+    plateau_scheduler = build_reduce_on_plateau_scheduler(
+        optimizer,
+        patience=args.plateau_patience,
+    )
     loss_fn = nn.BCEWithLogitsLoss()
     M = args.num_proxies
 
@@ -1282,6 +1299,7 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
             val_ap, val_loss = _evaluate_phase3(
                 phase1_model, phase2_model, generator, val_loader,
                 args.device, args, M)
+            plateau_scheduler.step(val_loss)
             test_ap, _ = _evaluate_phase3(
                 phase1_model, phase2_model, generator, test_loader,
                 args.device, args, M)
@@ -1591,8 +1609,13 @@ def run_phase5(args, phase1_model_path, generator_path):
         warmup_ratio=args.warmup_ratio,
         recurrent_lr_factor=1.0,
     )
+    plateau_scheduler_a = build_reduce_on_plateau_scheduler(
+        opt_a,
+        patience=args.plateau_patience,
+    )
     opt_b = None
     sched_b = None
+    plateau_scheduler_b = None
 
     best_val_ap = 0.0
     best_val_loss = float("inf")
@@ -1655,6 +1678,10 @@ def run_phase5(args, phase1_model_path, generator_path):
                 total_steps=phase_b_total_steps,
                 lr_min=args.lr_min,
                 warmup_ratio=args.warmup_ratio,
+            )
+            plateau_scheduler_b = build_reduce_on_plateau_scheduler(
+                opt_b,
+                patience=args.plateau_patience,
             )
             print(f"  [Epoch {epoch}] Switching to Phase B — model unfrozen.",
                   flush=True)
@@ -1795,6 +1822,10 @@ def run_phase5(args, phase1_model_path, generator_path):
         val_ap, val_loss = evaluate_with_proxies(
             model, generator, val_loader, args.device, args,
             proxy_multiplier=args.proxy_multiplier)
+        if current_phase == "A":
+            plateau_scheduler_a.step(val_loss)
+        else:
+            plateau_scheduler_b.step(val_loss)
         test_ap, _ = evaluate_with_proxies(
             model, generator, test_loader, args.device, args,
             proxy_multiplier=args.proxy_multiplier)

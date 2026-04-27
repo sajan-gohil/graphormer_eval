@@ -26,7 +26,10 @@ from generators import (
 )
 from metrics import compute_macro_ap
 from mmd import mmd_squared
-from optim_utils import build_grouped_optimizer_and_scheduler
+from optim_utils import (
+    build_grouped_optimizer_and_scheduler,
+    build_reduce_on_plateau_scheduler,
+)
 from losses import novelty_loss, inter_proxy_cosine_stats, proxy_diversity_loss
 
 
@@ -123,6 +126,8 @@ def build_parser():
                    help="Minimum LR floor for warmup-cosine schedule")
     p.add_argument("--warmup_ratio", type=float, default=0.05,
                    help="Warmup fraction of total optimization steps")
+    p.add_argument("--plateau_patience", type=int, default=15,
+                   help="Patience for ReduceLROnPlateau scheduler on validation loss")
     p.add_argument("--recurrent_lr_factor", type=float, default=1.0,
                    help="LR multiplier for recurrent GRED parameters")
 
@@ -605,6 +610,10 @@ def run_e2e(args):
         warmup_ratio=args.warmup_ratio,
         recurrent_lr_factor=args.recurrent_lr_factor,
     )
+    plateau_scheduler = build_reduce_on_plateau_scheduler(
+        optimizer,
+        patience=args.plateau_patience,
+    )
     loss_fn = nn.BCEWithLogitsLoss()
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -704,6 +713,7 @@ def run_e2e(args):
             model, generator, val_loader, args.device, args,
             use_proxies=use_proxies,
         )
+        plateau_scheduler.step(val_loss)
 
         # --- Test ---
         test_ap, test_loss, test_mmd = evaluate(
