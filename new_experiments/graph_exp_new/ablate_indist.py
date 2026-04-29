@@ -606,7 +606,7 @@ def run_ablation(args):
                 best_val_ap = val_ap
                 plateau_count = 0
             else:
-                plateau_count += 1
+                # plateau_count += 1
                 if plateau_count >= args.plateau_patience:
                     print(f"\nPlateau detected: val AP did not improve for "
                           f"{args.plateau_patience} consecutive k steps. Stopping.",

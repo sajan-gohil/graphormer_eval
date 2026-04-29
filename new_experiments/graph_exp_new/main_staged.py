@@ -1145,7 +1145,11 @@ def run_stage2(args, model_path):
     save_path = os.path.join(args.save_dir, "proxy_pairs.pkl")
     with open(save_path, "wb") as f:
         pickle.dump(proxy_pairs, f)
-
+    try:
+        import shutil
+        shutil.rmtree(os.path.join(args.save_dir, "proxy_pairs_temp.pkl"))
+    except Exception as e:
+        print(f"Error removing temporary file: {e}", flush=True)
     unique_samples = len(set(p["sample_idx"] for p in proxy_pairs))
     print(f"\nStage 2 done. Saved {len(proxy_pairs)} pairs "
           f"({unique_samples} unique graphs) -> {save_path}", flush=True)
@@ -1376,11 +1380,12 @@ def run_stage3(args, model_path, proxy_pairs_path):
                 flush=True,
             )
 
-            # Early stopping on generator loss / downstream validation metrics
+            # Early stopping on downstream validation metrics only
+            # (gen_loss excluded — can trend in misleading ways and defeats patience)
             improved_gen_loss = mean_train_loss < best_gen_loss
             improved_val_loss = val_loss < best_val_loss
             improved_val_ap = val_ap > best_val_ap
-            if improved_gen_loss or improved_val_loss or improved_val_ap:
+            if improved_val_loss or improved_val_ap:
                 if improved_gen_loss:
                     best_gen_loss = mean_train_loss
                 if improved_val_loss:
@@ -1690,13 +1695,15 @@ def run_stage4(args, model_path, generator_path):
 
         print(log_line, flush=True)
 
-        # Early stopping on generator loss / validation metrics
-        improved_gen_loss = train_loss < best_gen_loss
+        # Early stopping on validation metrics only
+        # NOTE: gen_loss (train_loss) is excluded because novelty loss makes it
+        # go negative and continuously "improve", defeating early stopping.
         improved_val_loss = val_loss < best_val_loss
         improved_val_ap = val_ap > best_val_ap
-        if improved_gen_loss or improved_val_loss or improved_val_ap:
-            if improved_gen_loss:
-                best_gen_loss = train_loss
+        # Still track gen_loss for logging, but don't use it for checkpointing
+        if train_loss < best_gen_loss:
+            best_gen_loss = train_loss
+        if improved_val_loss or improved_val_ap:
             if improved_val_loss:
                 best_val_loss = val_loss
             if improved_val_ap:

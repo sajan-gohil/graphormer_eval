@@ -1307,7 +1307,8 @@ def run_phase3(args, phase1_model_path, phase2_model_path):
             improved_gen_loss = mean_loss < best_gen_loss
             improved_val_loss = val_loss < best_val_loss
             improved_val_ap = val_ap > best_val_ap
-            if improved_gen_loss or improved_val_loss or improved_val_ap:
+            # Early stopping on validation metrics only; gen_loss excluded
+            if improved_val_loss or improved_val_ap:
                 if improved_gen_loss:
                     best_gen_loss = mean_loss
                 if improved_val_loss:
@@ -1812,7 +1813,8 @@ def run_phase5(args, phase1_model_path, generator_path):
         improved_gen_loss = train_loss < best_gen_loss
         improved_val_loss = val_loss < best_val_loss
         improved_val_ap = val_ap > best_val_ap
-        if improved_gen_loss or improved_val_loss or improved_val_ap:
+        # Early stopping on validation metrics only; gen_loss excluded
+        if improved_val_loss or improved_val_ap:
             if improved_gen_loss:
                 best_gen_loss = train_loss
             if improved_val_loss:
