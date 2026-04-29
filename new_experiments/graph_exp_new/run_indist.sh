@@ -49,7 +49,7 @@ python3 main_indist.py \
     --warmup_ratio 0.05 \
     --lr_min 1e-7 \
     --readout_scope all_tokens \
-    --save_dir checkpoints_indist_3
+    --save_dir checkpoints_indist_4
     #  \
     # 2>&1 | tee indist.log
 
