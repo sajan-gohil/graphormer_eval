@@ -48,8 +48,8 @@ from torch_geometric.utils import to_dense_batch
 from torch_geometric.nn import global_mean_pool
 from torch.utils.data import Dataset, DataLoader
 
-from data import get_loaders
-from models import NodeEncoder
+from data import get_loaders, _compute_dist_mask_single
+from models import NodeEncoder, GraphTransformer, GREDEncoder, GREDHybridTransformer
 from metrics import compute_macro_ap
 from mmd import mmd_squared
 
@@ -246,6 +246,64 @@ class GraphTransformerWithCrossAttn(nn.Module):
 
 
 # ================================================================
+# MODEL FACTORY
+# ================================================================
+
+def build_model(args):
+    """Build backbone model based on --backbone arg."""
+    lap_pe_dim = args.lap_pe_dim if getattr(args, 'use_lap_pe', False) else 0
+    if getattr(args, 'backbone', 'vanilla_gt') == "vanilla_gt":
+        return GraphTransformerWithCrossAttn(
+            num_layers=args.num_layers, num_heads=args.num_heads,
+            hidden_dim=args.hidden_dim, output_dim=args.output_dim,
+            dropout=args.dropout,
+        )
+    elif args.backbone == "gred":
+        return GREDEncoder(
+            hidden_dim=args.hidden_dim, state_dim=args.state_dim,
+            num_layers=args.num_gred_layers, expand=args.gred_expand,
+            r_min=args.r_min, r_max=args.r_max, max_phase=args.max_phase,
+            dropout=args.dropout, act=args.gred_act, output_dim=args.output_dim,
+            lap_pe_dim=lap_pe_dim,
+        )
+    elif args.backbone == "hybrid":
+        return GREDHybridTransformer(
+            hidden_dim=args.hidden_dim, state_dim=args.state_dim,
+            num_gred_layers=args.num_gred_layers,
+            num_transformer_layers=args.num_transformer_layers,
+            num_heads=args.num_heads, expand=args.gred_expand,
+            r_min=args.r_min, r_max=args.r_max, max_phase=args.max_phase,
+            dropout=args.dropout, act=args.gred_act, output_dim=args.output_dim,
+            lap_pe_dim=lap_pe_dim,
+        )
+    else:
+        raise ValueError(f"Unknown backbone: {args.backbone}")
+
+
+def _build_dist_and_node_masks_for_batch(pyg_batch, max_hops, device):
+    """Build padded distance masks and node masks for a PyG batch."""
+    graphs = pyg_batch.to_data_list()
+    B = len(graphs)
+    max_N = max(g.x.size(0) for g in graphs)
+
+    dist_masks = torch.zeros(B, max_hops, max_N, max_N, device=device)
+    node_masks = torch.zeros(B, max_N, dtype=torch.bool, device=device)
+
+    for i, g in enumerate(graphs):
+        n = g.x.size(0)
+        adj = np.zeros((n, n), dtype=np.float32)
+        edge_index = g.edge_index.detach().cpu().numpy()
+        adj[edge_index[0], edge_index[1]] = 1.0
+
+        dm = _compute_dist_mask_single(adj, max_hops=max_hops)
+        k_use = min(dm.shape[0], max_hops)
+        dist_masks[i, :k_use, :n, :n] = torch.from_numpy(dm[:k_use].astype(np.float32)).to(device)
+        node_masks[i, :n] = True
+
+    return dist_masks, node_masks
+
+
+# ================================================================
 # PROXY OPTIMIZATION
 # ================================================================
 
@@ -305,8 +363,12 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
 # ================================================================
 
 def run_pretrain(args):
+    backbone = getattr(args, 'backbone', 'vanilla_gt')
+    is_gred = backbone in ("gred", "hybrid")
+
     print("\n" + "=" * 60, flush=True)
-    print("PRETRAIN: Train Graph Transformer from scratch", flush=True)
+    print("PRETRAIN: Train Model from scratch", flush=True)
+    print(f"  backbone={backbone}", flush=True)
     print(f"  hidden_dim={args.hidden_dim}, num_layers={args.num_layers}, "
           f"num_heads={args.num_heads}", flush=True)
     print(f"  s1_lr={args.s1_lr}, s1_weight_decay={args.s1_weight_decay}, "
@@ -315,17 +377,25 @@ def run_pretrain(args):
           flush=True)
     print("=" * 60, flush=True)
 
+    use_lap_pe = getattr(args, 'use_lap_pe', False)
+    lap_pe_dim = getattr(args, 'lap_pe_dim', 0)
     train_loader, val_loader, test_loader, _, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
+        use_dist_masks=is_gred, max_hops=getattr(args, 'max_hops', 40),
+        dist_mask_workers=getattr(args, 'dist_mask_workers', 8),
+        use_lap_pe=use_lap_pe, lap_pe_dim=lap_pe_dim,
     )
 
-    model = GraphTransformerWithCrossAttn(
-        num_layers=args.num_layers, num_heads=args.num_heads,
-        hidden_dim=args.hidden_dim, output_dim=args.output_dim,
-        dropout=args.dropout,
-    ).to(args.device)
+    if backbone == "vanilla_gt":
+        model = GraphTransformerWithCrossAttn(
+            num_layers=args.num_layers, num_heads=args.num_heads,
+            hidden_dim=args.hidden_dim, output_dim=args.output_dim,
+            dropout=args.dropout,
+        ).to(args.device)
+    else:
+        model = build_model(args).to(args.device)
 
-    # Only count encoder + self-attention + head params (not cross-attn)
+    # Only count encoder + self-attention + head params (not cross-attn for vanilla_gt)
     trainable_params = []
     for name, param in model.named_parameters():
         if "cross_attn_layers" not in name:
@@ -357,6 +427,24 @@ def run_pretrain(args):
     patience_counter = 0
     save_path = os.path.join(args.save_dir, "pretrain_best.pt")
 
+    def _unpack_batch(batch_data):
+        if is_gred:
+            batch, dist_masks_batch, node_masks_batch = batch_data
+            batch = batch.to(args.device)
+            dist_masks_batch = dist_masks_batch.to(args.device)
+            node_masks_batch = node_masks_batch.to(args.device)
+        else:
+            batch = batch_data.to(args.device)
+            dist_masks_batch = None
+            node_masks_batch = None
+        return batch, dist_masks_batch, node_masks_batch
+
+    def _forward_no_proxy(batch, dist_masks_batch, node_masks_batch):
+        if backbone == "vanilla_gt":
+            return model(batch, return_attention=False)
+        else:
+            return model(batch, dist_masks_batch, node_masks_batch)
+
     for epoch in range(1, args.s1_max_epochs + 1):
         epoch_start = time.time()
 
@@ -365,10 +453,10 @@ def run_pretrain(args):
         train_losses = []
         all_preds, all_labels = [], []
 
-        for batch in train_loader:
-            batch = batch.to(args.device)
+        for batch_data in train_loader:
+            batch, dist_masks_batch, node_masks_batch = _unpack_batch(batch_data)
             optimizer.zero_grad()
-            logits, _ = model(batch, return_attention=False)
+            logits, _ = _forward_no_proxy(batch, dist_masks_batch, node_masks_batch)
             loss = loss_fn(logits, batch.y)
             loss.backward()
             nn.utils.clip_grad_norm_(trainable_params, args.s1_grad_clip)
@@ -386,9 +474,9 @@ def run_pretrain(args):
         model.eval()
         val_preds, val_labels, val_losses = [], [], []
         with torch.no_grad():
-            for batch in val_loader:
-                batch = batch.to(args.device)
-                logits, _ = model(batch, return_attention=False)
+            for batch_data in val_loader:
+                batch, dist_masks_batch, node_masks_batch = _unpack_batch(batch_data)
+                logits, _ = _forward_no_proxy(batch, dist_masks_batch, node_masks_batch)
                 val_losses.append(loss_fn(logits, batch.y).item())
                 val_preds.append(torch.sigmoid(logits).cpu().numpy())
                 val_labels.append(batch.y.cpu().numpy())
@@ -411,9 +499,9 @@ def run_pretrain(args):
             model.eval()
             test_preds, test_labels = [], []
             with torch.no_grad():
-                for batch in test_loader:
-                    batch = batch.to(args.device)
-                    logits, _ = model(batch, return_attention=False)
+                for batch_data in test_loader:
+                    batch, dist_masks_batch, node_masks_batch = _unpack_batch(batch_data)
+                    logits, _ = _forward_no_proxy(batch, dist_masks_batch, node_masks_batch)
                     test_preds.append(torch.sigmoid(logits).cpu().numpy())
                     test_labels.append(batch.y.cpu().numpy())
             test_ap = compute_macro_ap(
@@ -457,6 +545,12 @@ def run_pretrain(args):
 # ================================================================
 
 def run_extraction(args):
+    backbone = getattr(args, 'backbone', 'vanilla_gt')
+    if backbone != "vanilla_gt":
+        print(f"  NOTE: backbone={backbone} but extraction always uses "
+              f"GraphTransformerWithCrossAttn (vanilla GT) as teacher for "
+              f"attention target extraction.", flush=True)
+
     print("=" * 60)
     print("Phase 1: Extract Attention Targets")
     print(f"  model_path={args.model_path}")
@@ -468,8 +562,11 @@ def run_extraction(args):
     print(f"  distill_layers={args.distill_layers}")
     print("=" * 60)
 
+    use_lap_pe = getattr(args, 'use_lap_pe', False)
+    lap_pe_dim = getattr(args, 'lap_pe_dim', 0)
     _, _, _, train_ds, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
+        use_lap_pe=use_lap_pe, lap_pe_dim=lap_pe_dim,
     )
     # Use non-shuffled loader so sample_idx == dataset index
     from torch_geometric.loader import DataLoader as PyGDataLoader
@@ -759,50 +856,84 @@ def attention_distillation_loss(student_attns, teacher_attns_padded, mask, tempe
 # ================================================================
 
 def run_training(args):
-    targets_path = os.path.join(args.save_dir, "attn_targets.pkl")
-    assert os.path.exists(targets_path), \
-        f"Attention targets not found at {targets_path}. Run 'extract' phase first."
+    backbone = getattr(args, 'backbone', 'vanilla_gt')
+    is_gred = backbone in ("gred", "hybrid")
+    use_distillation = (backbone == "vanilla_gt")
 
-    # Load target metadata
-    with open(targets_path, "rb") as f:
-        target_data = pickle.load(f)
-    distill_layer_indices = target_data["distill_layer_indices"]
+    targets_path = os.path.join(args.save_dir, "attn_targets.pkl")
+
+    if use_distillation:
+        assert os.path.exists(targets_path), \
+            f"Attention targets not found at {targets_path}. Run 'extract' phase first."
+        # Load target metadata
+        with open(targets_path, "rb") as f:
+            target_data = pickle.load(f)
+        distill_layer_indices = target_data["distill_layer_indices"]
+    else:
+        distill_layer_indices = []
+        print(f"  NOTE: backbone={backbone} — no attention distillation "
+              f"(GRED has no self-attention). Training with task loss only.",
+              flush=True)
 
     print("=" * 60)
     print("Phase 2: Train with Attention Distillation")
-    print(f"  distill_weight={args.distill_weight}")
-    print(f"  temperature={args.temperature}")
-    print(f"  distill_layers={distill_layer_indices}")
-    print(f"  targets from: {targets_path}")
+    print(f"  backbone={backbone}")
+    print(f"  distill_weight={args.distill_weight}" if use_distillation else "  distill_weight=N/A (task-only)")
+    print(f"  temperature={args.temperature}" if use_distillation else "  temperature=N/A")
+    print(f"  distill_layers={distill_layer_indices}" if use_distillation else "  distill_layers=N/A")
+    if use_distillation:
+        print(f"  targets from: {targets_path}")
     print("=" * 60)
 
     # Standard loaders for val/test
+    use_lap_pe = getattr(args, 'use_lap_pe', False)
+    lap_pe_dim = getattr(args, 'lap_pe_dim', 0)
     _, val_loader, test_loader, train_ds, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
+        use_dist_masks=is_gred, max_hops=getattr(args, 'max_hops', 40),
+        dist_mask_workers=getattr(args, 'dist_mask_workers', 8),
+        use_lap_pe=use_lap_pe, lap_pe_dim=lap_pe_dim,
     )
 
-    # Distillation train loader (pairs graphs with attention targets)
-    distill_ds = AttnTargetDataset(train_ds, targets_path)
-    distill_loader = DataLoader(
-        distill_ds, batch_size=args.batch_size, shuffle=True,
-        collate_fn=collate_attn_targets, num_workers=args.num_workers,
-    )
+    if use_distillation:
+        # Distillation train loader (pairs graphs with attention targets)
+        distill_ds = AttnTargetDataset(train_ds, targets_path)
+        distill_loader = DataLoader(
+            distill_ds, batch_size=args.batch_size, shuffle=True,
+            collate_fn=collate_attn_targets, num_workers=args.num_workers,
+        )
+    else:
+        # For GRED: use standard train loader (no attention targets)
+        distill_loader = None
+        # Re-fetch train loader (first return value)
+        train_loader_gred, _, _, _, _, _ = get_loaders(
+            batch_size=args.batch_size, num_workers=args.num_workers,
+            use_dist_masks=is_gred, max_hops=getattr(args, 'max_hops', 40),
+            dist_mask_workers=getattr(args, 'dist_mask_workers', 8),
+            use_lap_pe=use_lap_pe, lap_pe_dim=lap_pe_dim,
+        )
 
-    # Student: vanilla transformer (same architecture, pretrained init)
+    # Student model
     ckpt = torch.load(args.model_path, map_location=args.device, weights_only=True)
 
-    student = GraphTransformerWithCrossAttn(
-        num_layers=args.num_layers, num_heads=args.num_heads,
-        hidden_dim=args.hidden_dim, output_dim=args.output_dim,
-        dropout=args.dropout,
-    ).to(args.device)
+    if backbone == "vanilla_gt":
+        student = GraphTransformerWithCrossAttn(
+            num_layers=args.num_layers, num_heads=args.num_heads,
+            hidden_dim=args.hidden_dim, output_dim=args.output_dim,
+            dropout=args.dropout,
+        ).to(args.device)
+    else:
+        student = build_model(args).to(args.device)
 
     pretrained_state = ckpt["model_state"]
     model_state_s = student.state_dict()
+    loaded_keys = []
     for k, v in pretrained_state.items():
         if k in model_state_s and model_state_s[k].shape == v.shape:
             model_state_s[k] = v
+            loaded_keys.append(k)
     student.load_state_dict(model_state_s)
+    print(f"  Loaded {len(loaded_keys)}/{len(model_state_s)} keys from checkpoint")
 
     # Baseline
     print("\nBaseline (pretrained, no distillation):")
@@ -820,9 +951,10 @@ def run_training(args):
             param.requires_grad_(False)
     print(f"  Student trainable params: {sum(p.numel() for p in trainable_params):,}")
 
+    active_loader = distill_loader if use_distillation else train_loader_gred
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr,
                                    weight_decay=args.weight_decay)
-    total_steps = max(1, len(distill_loader) * args.max_epochs)
+    total_steps = max(1, len(active_loader) * args.max_epochs)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=total_steps, eta_min=1e-7)
 
@@ -838,38 +970,68 @@ def run_training(args):
         train_losses, task_losses_log, distill_losses_log = [], [], []
         all_preds, all_labels = [], []
 
-        for batch_idx, (pyg_batch, teacher_attns_padded, attn_masks) in enumerate(distill_loader):
-            pyg_batch = pyg_batch.to(args.device)
-            teacher_attns_padded = teacher_attns_padded.to(args.device)
-            attn_masks = attn_masks.to(args.device)
+        if use_distillation:
+            # --- Vanilla GT path: distillation + task loss ---
+            for batch_idx, (pyg_batch, teacher_attns_padded, attn_masks) in enumerate(active_loader):
+                pyg_batch = pyg_batch.to(args.device)
+                teacher_attns_padded = teacher_attns_padded.to(args.device)
+                attn_masks = attn_masks.to(args.device)
 
-            optimizer.zero_grad()
+                optimizer.zero_grad()
 
-            # Student forward (no proxies)
-            logits, _, student_attns = student(pyg_batch, return_attention=True)
+                # Student forward (no proxies)
+                logits, _, student_attns = student(pyg_batch, return_attention=True)
 
-            # Filter to distilled layers
-            student_attns_filtered = [student_attns[i] for i in distill_layer_indices]
+                # Filter to distilled layers
+                student_attns_filtered = [student_attns[i] for i in distill_layer_indices]
 
-            # Task loss
-            task_loss = loss_fn(logits, pyg_batch.y)
+                # Task loss
+                task_loss = loss_fn(logits, pyg_batch.y)
 
-            # Distillation loss against pre-extracted targets
-            distill_loss = attention_distillation_loss(
-                student_attns_filtered, teacher_attns_padded,
-                attn_masks, temperature=args.temperature)
+                # Distillation loss against pre-extracted targets
+                distill_loss = attention_distillation_loss(
+                    student_attns_filtered, teacher_attns_padded,
+                    attn_masks, temperature=args.temperature)
 
-            loss = task_loss + args.distill_weight * distill_loss
-            loss.backward()
-            nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
-            optimizer.step()
-            scheduler.step()
+                loss = task_loss + args.distill_weight * distill_loss
+                loss.backward()
+                nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
+                optimizer.step()
+                scheduler.step()
 
-            train_losses.append(loss.item())
-            task_losses_log.append(task_loss.item())
-            distill_losses_log.append(distill_loss.item())
-            all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
-            all_labels.append(pyg_batch.y.cpu().numpy())
+                train_losses.append(loss.item())
+                task_losses_log.append(task_loss.item())
+                distill_losses_log.append(distill_loss.item())
+                all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
+                all_labels.append(pyg_batch.y.cpu().numpy())
+        else:
+            # --- GRED/hybrid path: task loss only ---
+            for batch_data in active_loader:
+                if is_gred:
+                    pyg_batch, dist_masks_batch, node_masks_batch = batch_data
+                    pyg_batch = pyg_batch.to(args.device)
+                    dist_masks_batch = dist_masks_batch.to(args.device)
+                    node_masks_batch = node_masks_batch.to(args.device)
+                else:
+                    pyg_batch = batch_data.to(args.device)
+                    dist_masks_batch = None
+                    node_masks_batch = None
+
+                optimizer.zero_grad()
+
+                logits, _ = student(pyg_batch, dist_masks_batch, node_masks_batch)
+                task_loss = loss_fn(logits, pyg_batch.y)
+
+                task_loss.backward()
+                nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
+                optimizer.step()
+                scheduler.step()
+
+                train_losses.append(task_loss.item())
+                task_losses_log.append(task_loss.item())
+                distill_losses_log.append(0.0)
+                all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
+                all_labels.append(pyg_batch.y.cpu().numpy())
 
         train_ap = compute_macro_ap(
             np.concatenate(all_preds), np.concatenate(all_labels))
@@ -911,10 +1073,19 @@ def run_training(args):
 @torch.no_grad()
 def evaluate(model, loader, args):
     model.eval()
+    backbone = getattr(args, 'backbone', 'vanilla_gt')
+    is_gred = backbone in ("gred", "hybrid")
     all_preds, all_labels = [], []
-    for batch in loader:
-        batch = batch.to(args.device)
-        logits, _ = model(batch, return_attention=False)
+    for batch_data in loader:
+        if is_gred:
+            batch, dist_masks_batch, node_masks_batch = batch_data
+            batch = batch.to(args.device)
+            dist_masks_batch = dist_masks_batch.to(args.device)
+            node_masks_batch = node_masks_batch.to(args.device)
+            logits, _ = model(batch, dist_masks_batch, node_masks_batch)
+        else:
+            batch = batch_data.to(args.device)
+            logits, _ = model(batch, return_attention=False)
         all_preds.append(torch.sigmoid(logits).cpu().numpy())
         all_labels.append(batch.y.cpu().numpy())
     return compute_macro_ap(np.concatenate(all_preds), np.concatenate(all_labels))
@@ -935,12 +1106,40 @@ def main():
                         "If not provided for extract/train, looks for pretrain_best.pt in save_dir.")
     p.add_argument("--save_dir", type=str, default="checkpoints_attn_distill")
 
+    # Backbone
+    p.add_argument("--backbone", type=str, default="vanilla_gt",
+                   choices=["vanilla_gt", "gred", "hybrid"],
+                   help="Backbone architecture: vanilla_gt, gred, or hybrid")
+
     # Model architecture
     p.add_argument("--hidden_dim", type=int, default=256)
     p.add_argument("--num_layers", type=int, default=5)
     p.add_argument("--num_heads", type=int, default=8)
     p.add_argument("--output_dim", type=int, default=10)
     p.add_argument("--dropout", type=float, default=0.1)
+
+    # Laplacian positional encoding
+    p.add_argument("--use_lap_pe", action=argparse.BooleanOptionalAction, default=False,
+                   help="Add Laplacian eigenvector positional encodings to node features")
+    p.add_argument("--lap_pe_dim", type=int, default=8,
+                   help="Number of Laplacian eigenvectors for positional encoding")
+
+    # GRED-specific
+    p.add_argument("--state_dim", type=int, default=88,
+                   help="LRU complex state dimension (GRED/hybrid only)")
+    p.add_argument("--num_gred_layers", type=int, default=8,
+                   help="Number of GRED layers (GRED/hybrid only)")
+    p.add_argument("--num_transformer_layers", type=int, default=2,
+                   help="Number of transformer layers for proxy integration (hybrid only)")
+    p.add_argument("--gred_expand", type=int, default=1,
+                   help="FFN expansion factor for GRED DeepSets MLP")
+    p.add_argument("--r_min", type=float, default=0.0)
+    p.add_argument("--r_max", type=float, default=1.0)
+    p.add_argument("--max_phase", type=float, default=6.28)
+    p.add_argument("--gred_act", type=str, default="full-glu",
+                   choices=["full-glu", "half-glu"])
+    p.add_argument("--max_hops", type=int, default=40)
+    p.add_argument("--dist_mask_workers", type=int, default=8)
 
     # Pretrain (Stage 1)
     p.add_argument("--s1_lr", type=float, default=3e-5)
