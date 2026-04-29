@@ -20,12 +20,20 @@ Cross-attention routing per layer (Phase 1 only):
   Result: enriched node embeddings → different N×N self-attention patterns
 
 Usage:
+    # Pretrain from scratch (skip if you already have a checkpoint)
+    python exp_attn_distill.py pretrain --hidden_dim 128 --num_layers 3
+
     # Phase 1: Extract attention targets (run once)
-    python exp_attn_distill.py extract --model_path checkpoints_staged/stage1_best.pt
+    python exp_attn_distill.py extract --model_path checkpoints_attn_distill/pretrain_best.pt
 
     # Phase 2: Train with distillation (run many times with different hyperparams)
-    python exp_attn_distill.py train --model_path checkpoints_staged/stage1_best.pt
-    python exp_attn_distill.py train --model_path checkpoints_staged/stage1_best.pt --distill_weight 0.5
+    python exp_attn_distill.py train --model_path checkpoints_attn_distill/pretrain_best.pt
+    python exp_attn_distill.py train --model_path checkpoints_attn_distill/pretrain_best.pt --distill_weight 0.5
+
+    # All three phases in sequence
+    python exp_attn_distill.py pretrain --hidden_dim 128 --num_layers 3
+    python exp_attn_distill.py extract --model_path checkpoints_attn_distill/pretrain_best.pt
+    python exp_attn_distill.py train --model_path checkpoints_attn_distill/pretrain_best.pt
 """
 
 import argparse
@@ -293,6 +301,158 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
 
 
 # ================================================================
+# PRETRAIN — Train vanilla transformer from scratch
+# ================================================================
+
+def run_pretrain(args):
+    print("\n" + "=" * 60, flush=True)
+    print("PRETRAIN: Train Graph Transformer from scratch", flush=True)
+    print(f"  hidden_dim={args.hidden_dim}, num_layers={args.num_layers}, "
+          f"num_heads={args.num_heads}", flush=True)
+    print(f"  s1_lr={args.s1_lr}, s1_weight_decay={args.s1_weight_decay}, "
+          f"dropout={args.dropout}", flush=True)
+    print(f"  s1_max_epochs={args.s1_max_epochs}, s1_patience={args.s1_patience}",
+          flush=True)
+    print("=" * 60, flush=True)
+
+    train_loader, val_loader, test_loader, _, _, _ = get_loaders(
+        batch_size=args.batch_size, num_workers=args.num_workers,
+    )
+
+    model = GraphTransformerWithCrossAttn(
+        num_layers=args.num_layers, num_heads=args.num_heads,
+        hidden_dim=args.hidden_dim, output_dim=args.output_dim,
+        dropout=args.dropout,
+    ).to(args.device)
+
+    # Only count encoder + self-attention + head params (not cross-attn)
+    trainable_params = []
+    for name, param in model.named_parameters():
+        if "cross_attn_layers" not in name:
+            param.requires_grad_(True)
+            trainable_params.append(param)
+        else:
+            param.requires_grad_(False)
+
+    print(f"  Parameters: {sum(p.numel() for p in trainable_params):,}", flush=True)
+
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.s1_lr,
+                                   weight_decay=args.s1_weight_decay)
+    total_steps = max(1, len(train_loader) * args.s1_max_epochs)
+    # Warmup + cosine decay
+    warmup_steps = int(total_steps * args.warmup_ratio)
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(args.lr_min / args.s1_lr, 0.5 * (1 + np.cos(np.pi * progress)))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    loss_fn = nn.BCEWithLogitsLoss()
+    best_val_ap = 0.0
+    best_val_loss = float("inf")
+    best_epoch = -1
+    patience_counter = 0
+    save_path = os.path.join(args.save_dir, "pretrain_best.pt")
+
+    for epoch in range(1, args.s1_max_epochs + 1):
+        epoch_start = time.time()
+
+        # Train
+        model.train()
+        train_losses = []
+        all_preds, all_labels = [], []
+
+        for batch in train_loader:
+            batch = batch.to(args.device)
+            optimizer.zero_grad()
+            logits, _ = model(batch, return_attention=False)
+            loss = loss_fn(logits, batch.y)
+            loss.backward()
+            nn.utils.clip_grad_norm_(trainable_params, args.s1_grad_clip)
+            optimizer.step()
+            scheduler.step()
+            train_losses.append(loss.item())
+            all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
+            all_labels.append(batch.y.cpu().numpy())
+
+        train_ap = compute_macro_ap(
+            np.concatenate(all_preds), np.concatenate(all_labels))
+        train_loss = float(np.mean(train_losses))
+
+        # Val
+        model.eval()
+        val_preds, val_labels, val_losses = [], [], []
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = batch.to(args.device)
+                logits, _ = model(batch, return_attention=False)
+                val_losses.append(loss_fn(logits, batch.y).item())
+                val_preds.append(torch.sigmoid(logits).cpu().numpy())
+                val_labels.append(batch.y.cpu().numpy())
+        val_ap = compute_macro_ap(
+            np.concatenate(val_preds), np.concatenate(val_labels))
+        val_loss = float(np.mean(val_losses))
+
+        elapsed = time.time() - epoch_start
+        mem_str = ""
+        if args.device.startswith("cuda"):
+            mem_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+            mem_str = f" mem={mem_mb:.0f}MB"
+            torch.cuda.reset_peak_memory_stats()
+        log_line = (f"Epoch {epoch:3d}/{args.s1_max_epochs} [{elapsed:.1f}s{mem_str}] | "
+                    f"train_loss={train_loss:.4f} train_AP={train_ap:.4f} | "
+                    f"val_loss={val_loss:.4f} val_AP={val_ap:.4f}")
+
+        # Test every 10 epochs
+        if epoch % 10 == 0:
+            model.eval()
+            test_preds, test_labels = [], []
+            with torch.no_grad():
+                for batch in test_loader:
+                    batch = batch.to(args.device)
+                    logits, _ = model(batch, return_attention=False)
+                    test_preds.append(torch.sigmoid(logits).cpu().numpy())
+                    test_labels.append(batch.y.cpu().numpy())
+            test_ap = compute_macro_ap(
+                np.concatenate(test_preds), np.concatenate(test_labels))
+            log_line += f" | test_AP={test_ap:.4f}"
+
+        print(log_line, flush=True)
+
+        # Early stopping
+        improved_val_loss = val_loss < best_val_loss
+        improved_val_ap = val_ap > best_val_ap
+        if improved_val_loss or improved_val_ap:
+            if improved_val_loss:
+                best_val_loss = val_loss
+            if improved_val_ap:
+                best_val_ap = val_ap
+            best_epoch = epoch
+            patience_counter = 0
+            torch.save({
+                "model_state": model.state_dict(),
+                "epoch": epoch, "val_ap": val_ap,
+                "args": vars(args),
+            }, save_path)
+            print(f"  -> New best: val_loss={best_val_loss:.4f} "
+                  f"val_AP={best_val_ap:.4f}, saved", flush=True)
+        else:
+            patience_counter += 1
+            if patience_counter >= args.s1_patience:
+                print(f"Early stopping at epoch {epoch}. "
+                      f"Best val_loss={best_val_loss:.4f} val_AP={best_val_ap:.4f} "
+                      f"at epoch {best_epoch}.", flush=True)
+                break
+
+    print(f"Pretrain done. Best val_loss={best_val_loss:.4f} "
+          f"val_AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+    return save_path
+
+
+# ================================================================
 # PHASE 1: EXTRACT ATTENTION TARGETS
 # ================================================================
 
@@ -308,19 +468,15 @@ def run_extraction(args):
     print(f"  distill_layers={args.distill_layers}")
     print("=" * 60)
 
-    # IMPORTANT: shuffle=False so that graphs_processed + i == actual dataset index.
-    # Phase 2's AttnTargetDataset uses sample_idx to index into the raw dataset,
-    # so the extraction order must match dataset order.
     _, _, _, train_ds, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
     )
+    # Use non-shuffled loader so sample_idx == dataset index
     from torch_geometric.loader import DataLoader as PyGDataLoader
-    train_loader = PyGDataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers,
-    )
-
-    ckpt = torch.load(args.model_path, map_location=args.device, weights_only=True)
+    train_loader = PyGDataLoader(train_ds, batch_size=args.batch_size,
+                                  shuffle=False, num_workers=args.num_workers)
+    if args.phase != "pretrain":
+        ckpt = torch.load(args.model_path, map_location=args.device, weights_only=True)
 
     teacher = GraphTransformerWithCrossAttn(
         num_layers=args.num_layers, num_heads=args.num_heads,
@@ -353,6 +509,7 @@ def run_extraction(args):
 
     # Storage: list of dicts, one per graph
     # Each dict: {sample_idx, num_nodes, attn_targets: list of (H, n, n) per distilled layer}
+    # sample_idx is the true dataset index (loader is non-shuffled)
     all_targets = []
     graphs_processed = 0
     total_base_loss, total_opt_loss = 0.0, 0.0
@@ -430,11 +587,12 @@ def run_extraction(args):
     print(f"  Avg base_loss={avg_base:.4f}  opt_loss={avg_opt:.4f}")
 
     # Quick sanity check: how different are teacher vs vanilla attention?
-    # Load vanilla attention for first few graphs and compare
+    # Re-use the same non-shuffled loader so graph ordering matches all_targets
     print("\nSanity check: attention difference (teacher vs vanilla)...")
     attn_diffs = []
-    graph_counter = 0  # tracks which graph in all_targets we're comparing
-    check_loader, _, _, _, _, _ = get_loaders(batch_size=args.batch_size, num_workers=0)
+    graph_counter = 0
+    check_loader = PyGDataLoader(train_ds, batch_size=args.batch_size,
+                                  shuffle=False, num_workers=0)
     with torch.no_grad():
         for batch_data in check_loader:
             batch_data = batch_data.to(args.device)
@@ -445,18 +603,20 @@ def run_extraction(args):
             for i in range(B_check):
                 if graph_counter >= len(all_targets):
                     break
-                # Use stored num_nodes for consistent cropping
-                n_i = all_targets[graph_counter]["num_nodes"]
-                for l_pos, layer_idx in enumerate(distill_layer_indices):
-                    v_attn = vanilla_attns[layer_idx][i, :, :n_i, :n_i].cpu()
-                    t_attn = all_targets[graph_counter]["attn_targets"][l_pos]
-                    diff = (t_attn - v_attn).abs().mean().item()
+                n_vanilla = int(dense_mask_c[i].sum().item())
+                for layer_idx in distill_layer_indices:
+                    v_attn = vanilla_attns[layer_idx][i, :, :n_vanilla, :n_vanilla].cpu()
+                    t_attn = all_targets[graph_counter]["attn_targets"][
+                        distill_layer_indices.index(layer_idx)]
+                    # Align sizes in case of any mismatch
+                    n_min = min(v_attn.shape[-1], t_attn.shape[-1])
+                    diff = (t_attn[:, :n_min, :n_min] - v_attn[:, :n_min, :n_min]).abs().mean().item()
                     attn_diffs.append(diff)
-
                 graph_counter += 1
-                if graph_counter >= 500:
+
+                if len(attn_diffs) >= 500:
                     break
-            if graph_counter >= 500 or graph_counter >= len(all_targets):
+            if len(attn_diffs) >= 500:
                 break
 
     if attn_diffs:
@@ -538,50 +698,38 @@ def attention_distillation_loss(student_attns, teacher_attns_padded, mask, tempe
     KL divergence between student and pre-extracted teacher attention.
 
     Args:
-        student_attns: list of (B, H, N_s, N_s) per distilled layer
-        teacher_attns_padded: (B, num_distill_layers, H, N_t, N_t) padded teacher targets
-        mask: (B, N_t) boolean — aligned with teacher padding
+        student_attns: list of (B, H, N, N) per distilled layer
+        teacher_attns_padded: (B, num_distill_layers, H, N, N) padded teacher targets
+        mask: (B, N) boolean
         temperature: softening temperature
-
-    N_s (student) and N_t (teacher) may differ because to_dense_batch pads
-    to the max graph size within each batch, while teacher targets are padded
-    to the max graph size within the collated attention-target batch.
-    We align both to N = max(N_s, N_t) by zero-padding the smaller one.
     """
     total_loss = 0.0
     num_layers = len(student_attns)
-
-    B_t, _, H_t, N_t, _ = teacher_attns_padded.shape
 
     for l_idx in range(num_layers):
         s_attn = student_attns[l_idx]                # (B, H, N_s, N_s)
         t_attn = teacher_attns_padded[:, l_idx]      # (B, H, N_t, N_t)
 
-        B, H, N_s, _ = s_attn.shape
-        N = max(N_s, N_t)
+        # Align spatial dimensions: student's N may differ from teacher's N
+        N_s = s_attn.shape[-1]
+        N_t = t_attn.shape[-1]
+        if N_s != N_t:
+            N = max(N_s, N_t)
+            if N_s < N:
+                s_attn = F.pad(s_attn, (0, N - N_s, 0, N - N_s))
+            if N_t < N:
+                t_attn = F.pad(t_attn, (0, N - N_t, 0, N - N_t))
+            # Extend mask to match
+            if mask.shape[-1] < N:
+                mask = F.pad(mask, (0, N - mask.shape[-1]), value=False)
 
-        # Pad student attention to (B, H, N, N) if needed
-        if N_s < N:
-            pad_amt = N - N_s
-            s_attn = F.pad(s_attn, (0, pad_amt, 0, pad_amt), value=0.0)
-
-        # Pad teacher attention to (B, H, N, N) if needed
-        if N_t < N:
-            pad_amt = N - N_t
-            t_attn = F.pad(t_attn, (0, pad_amt, 0, pad_amt), value=0.0)
-
-        # Align mask to size N
-        if mask.shape[1] < N:
-            pad_amt = N - mask.shape[1]
-            aligned_mask = F.pad(mask.float(), (0, pad_amt), value=0.0).bool()
-        else:
-            aligned_mask = mask[:, :N]
+        B, H, N, _ = s_attn.shape
 
         if temperature != 1.0:
             s_log = torch.log(s_attn + 1e-10) / temperature
             t_log = torch.log(t_attn + 1e-10) / temperature
 
-            pad_mask = (~aligned_mask).unsqueeze(1).unsqueeze(2)  # (B, 1, 1, N)
+            pad_mask = (~mask).unsqueeze(1).unsqueeze(2)
             s_log = s_log.masked_fill(pad_mask, float("-inf"))
             t_log = t_log.masked_fill(pad_mask, float("-inf"))
 
@@ -596,7 +744,7 @@ def attention_distillation_loss(student_attns, teacher_attns_padded, mask, tempe
         kl = t_soft * (torch.log(t_soft + 1e-10) - torch.log(s_soft + 1e-10))
         kl = kl.sum(dim=-1)  # (B, H, N)
 
-        query_mask = aligned_mask.unsqueeze(1)
+        query_mask = mask.unsqueeze(1)
         kl = kl * query_mask.float()
 
         num_valid = query_mask.float().sum() * H
@@ -778,42 +926,54 @@ def evaluate(model, loader, args):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("phase", choices=["extract", "train"],
-                   help="'extract' = Phase 1 (optimize proxies, save attention targets). "
-                        "'train' = Phase 2 (train student with distillation).")
-    p.add_argument("--model_path", type=str, required=True)
+    p.add_argument("phase", choices=["pretrain", "extract", "train"],
+                   help="'pretrain' = train transformer from scratch. "
+                        "'extract' = optimize proxies, save attention targets. "
+                        "'train' = train student with distillation.")
+    p.add_argument("--model_path", type=str, default=None,
+                   help="Pretrained checkpoint. Required for extract/train. "
+                        "If not provided for extract/train, looks for pretrain_best.pt in save_dir.")
     p.add_argument("--save_dir", type=str, default="checkpoints_attn_distill")
 
-    # Model
+    # Model architecture
     p.add_argument("--hidden_dim", type=int, default=256)
     p.add_argument("--num_layers", type=int, default=5)
     p.add_argument("--num_heads", type=int, default=8)
     p.add_argument("--output_dim", type=int, default=10)
     p.add_argument("--dropout", type=float, default=0.1)
 
-    # Cross-attention routing (Phase 1 only)
+    # Pretrain (Stage 1)
+    p.add_argument("--s1_lr", type=float, default=3e-5)
+    p.add_argument("--s1_weight_decay", type=float, default=3e-4)
+    p.add_argument("--s1_max_epochs", type=int, default=300)
+    p.add_argument("--s1_patience", type=int, default=50)
+    p.add_argument("--s1_grad_clip", type=float, default=1.0)
+    p.add_argument("--warmup_ratio", type=float, default=0.05)
+    p.add_argument("--lr_min", type=float, default=1e-7)
+
+    # Cross-attention routing (extract phase only)
     p.add_argument("--num_cross_layers", type=int, default=None)
     p.add_argument("--use_proxy_self_attn", action=argparse.BooleanOptionalAction,
                    default=True)
 
-    # Proxy optimization (Phase 1 only)
-    p.add_argument("--num_proxies", type=int, default=4)
+    # Proxy optimization (extract phase only)
+    p.add_argument("--num_proxies", type=int, default=64)
     p.add_argument("--proxy_lr", type=float, default=5e-2)
-    p.add_argument("--proxy_opt_steps", type=int, default=75)
-    p.add_argument("--proxy_mmd_lambda", type=float, default=0.01)
+    p.add_argument("--proxy_opt_steps", type=int, default=300)
+    p.add_argument("--proxy_mmd_lambda", type=float, default=1)
 
-    # Distillation (Phase 2)
+    # Distillation (train phase)
     p.add_argument("--distill_weight", type=float, default=1.0)
-    p.add_argument("--temperature", type=float, default=2.0)
+    p.add_argument("--temperature", type=float, default=1.2)
     p.add_argument("--distill_layers", type=str, default="all")
 
-    # Training (Phase 2)
-    p.add_argument("--lr", type=float, default=5e-4)
+    # Training (train phase)
+    p.add_argument("--lr", type=float, default=5e-5)
     p.add_argument("--weight_decay", type=float, default=1e-4)
-    p.add_argument("--max_epochs", type=int, default=100)
+    p.add_argument("--max_epochs", type=int, default=200)
     p.add_argument("--patience", type=int, default=30)
     p.add_argument("--grad_clip", type=float, default=1.0)
-    p.add_argument("--batch_size", type=int, default=32)
+    p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--device", type=str, default=None)
 
@@ -822,7 +982,20 @@ def main():
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.save_dir, exist_ok=True)
 
-    if args.phase == "extract":
+    # Auto-resolve model_path for extract/train if not provided
+    if args.model_path is None and args.phase in ("extract", "train"):
+        default_path = os.path.join(args.save_dir, "pretrain_best.pt")
+        if os.path.exists(default_path):
+            args.model_path = default_path
+            print(f"Auto-resolved model_path: {default_path}")
+        else:
+            raise FileNotFoundError(
+                f"No --model_path provided and no pretrain checkpoint found at {default_path}. "
+                f"Run 'pretrain' phase first or provide --model_path.")
+
+    if args.phase == "pretrain":
+        run_pretrain(args)
+    elif args.phase == "extract":
         run_extraction(args)
     elif args.phase == "train":
         run_training(args)
@@ -830,3 +1003,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
