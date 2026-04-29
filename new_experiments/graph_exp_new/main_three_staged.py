@@ -52,7 +52,7 @@ def build_parser():
     p = argparse.ArgumentParser(description="Three-Staged Pipeline: task-loss generator training")
     p.add_argument("--config", type=str, default=None)
     p.add_argument("--stage", type=str, default="all",
-                   choices=["1", "2", "3", "all"])
+                   )  # choices=["1", "2", "3", "all"]
     p.add_argument("--generator", type=str, default="graph_coarsening",
                    choices=["flow_matching", "score_based", "pma", "graph_coarsening", "gnn_pooling", "gred_layers"])
 
@@ -991,7 +991,7 @@ def run_stage2(args, model_path):
             improved_gen_loss = mean_train_loss < best_gen_loss
             improved_val_loss = val_loss < best_val_loss
             improved_val_ap = val_ap > best_val_ap
-            if improved_gen_loss or improved_val_loss or improved_val_ap:
+            if improved_val_loss or improved_val_ap:  # improved_gen_loss
                 if improved_gen_loss:
                     best_gen_loss = mean_train_loss
                 if improved_val_loss:
@@ -1331,7 +1331,7 @@ def run_stage3(args, model_path, generator_path):
         improved_gen_loss = train_loss < best_gen_loss
         improved_val_loss = val_loss < best_val_loss
         improved_val_ap = val_ap > best_val_ap
-        if improved_gen_loss or improved_val_loss or improved_val_ap:
+        if improved_val_loss or improved_val_ap:  # improved_gen_loss or 
             if improved_gen_loss:
                 best_gen_loss = train_loss
             if improved_val_loss:
@@ -1371,7 +1371,7 @@ if __name__ == "__main__":
     os.makedirs(args.save_dir, exist_ok=True)
     save_code_snapshot(args.save_dir)
 
-    stages = [args.stage] if args.stage != "all" else ["1", "2", "3"]
+    stages = args.stage.split(",") if args.stage != "all" else ["1", "2", "3"]
     model_path = args.model_path
     generator_path = args.generator_path
 
