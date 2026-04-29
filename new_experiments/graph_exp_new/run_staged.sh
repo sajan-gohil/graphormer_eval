@@ -2,7 +2,7 @@
 set -eux pipefail
 
 
-python3 main_staged.py --backbone hybrid \
+python3 main_staged.py --backbone vanilla_gt \
     --generator flow_matching --hidden_dim 512 \
     --num_layers 1 --no-use_lap_pe \
     --s1_lr 3e-5 --s1_patience 20 --s1_max_epochs 300 \
@@ -19,9 +19,8 @@ python3 main_staged.py --backbone hybrid \
     --s4_grad_clip 0.5 --s4_max_epochs 1000 \
     --s4_patience 100 --novelty_alpha 0.1 \
     --diversity_weight 0.1 \
-    --save_dir checkpoints_staged_cros_cfg_hybrid/ \
-    --batch_size 16 \
-    --use_cross_attn_routing
+    --save_dir checkpoints_staged_novelty_vanilla_3/ \
+    --batch_size 16
 # # =============================================================
 # # Staged experiments (Pipeline A)
 # # Varies: generator type

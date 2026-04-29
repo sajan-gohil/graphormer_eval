@@ -43,6 +43,7 @@ from losses import novelty_loss, inter_proxy_cosine_stats, proxy_diversity_loss
 from optim_utils import (
     build_grouped_optimizer_and_scheduler,
     build_warmup_cosine_scheduler,
+    build_reduce_on_plateau_scheduler,
 )
 
 import warnings
@@ -219,6 +220,8 @@ def build_parser():
                    help="Minimum LR floor for warmup-cosine schedule")
     p.add_argument("--warmup_ratio", type=float, default=0.05,
                    help="Warmup fraction of total optimization steps")
+    p.add_argument("--plateau_patience", type=int, default=15,
+                   help="Patience for ReduceLROnPlateau scheduler on validation loss")
     p.add_argument("--recurrent_lr_factor", type=float, default=1.0,
                    help="LR multiplier for recurrent GRED parameters")
     p.add_argument("--save_dir", type=str, default="checkpoints_staged")
@@ -641,6 +644,10 @@ def run_stage1(args):
         warmup_ratio=args.warmup_ratio,
         recurrent_lr_factor=args.recurrent_lr_factor,
     )
+    plateau_scheduler = build_reduce_on_plateau_scheduler(
+        optimizer,
+        patience=args.plateau_patience,
+    )
     loss_fn = nn.BCEWithLogitsLoss()
 
     best_val_ap = 0.0
@@ -713,6 +720,7 @@ def run_stage1(args):
         val_ap = compute_macro_ap(
             np.concatenate(val_preds), np.concatenate(val_labels))
         val_loss = float(np.mean(val_losses))
+        plateau_scheduler.step(val_loss)
 
         elapsed = time.time() - epoch_start
         mem_str = ""
@@ -1285,6 +1293,10 @@ def run_stage3(args, model_path, proxy_pairs_path):
             warmup_ratio=args.warmup_ratio,
             recurrent_lr_factor=1.0,
         )
+    plateau_scheduler = build_reduce_on_plateau_scheduler(
+        optimizer,
+        patience=args.plateau_patience,
+    )
 
     best_val_ap = 0.0
     best_val_loss = float("inf")
@@ -1415,6 +1427,7 @@ def run_stage3(args, model_path, proxy_pairs_path):
         if epoch % args.s3_eval_every == 0:
             val_ap, val_loss = downstream_eval(
                 model, generator, val_loader, args.device, args)
+            plateau_scheduler.step(val_loss)
             test_ap, test_loss = downstream_eval(
                 model, generator, test_loader, args.device, args)
 
@@ -1576,6 +1589,10 @@ def run_stage4(args, model_path, generator_path):
         lr_min=args.lr_min,
         warmup_ratio=args.warmup_ratio,
     )
+    plateau_scheduler = build_reduce_on_plateau_scheduler(
+        optimizer,
+        patience=args.plateau_patience,
+    )
 
     loss_fn = nn.BCEWithLogitsLoss()
     use_novelty = args.novelty_alpha > 0
@@ -1719,6 +1736,7 @@ def run_stage4(args, model_path, generator_path):
         # --- Val ---
         val_ap, val_loss = downstream_eval(
             model, generator, val_loader, args.device, args)
+        plateau_scheduler.step(val_loss)
 
         # --- Test ---
         test_ap, test_loss = downstream_eval(
