@@ -25,7 +25,7 @@ class BaseGenerator(ABC, nn.Module):
         self.hidden_dim = hidden_dim
 
     @abstractmethod
-    def forward(self, node_embeddings, mask, targets=None, **kwargs):
+    def forward(self, node_embeddings, mask, targets=None, guidance_scale=None, **kwargs):
         """
         Args:
             node_embeddings: (B, N, d) dense batched node embeddings.
@@ -282,10 +282,13 @@ class FlowMatchingGenerator(BaseGenerator):
     """
     def __init__(self, num_proxies, node_dim, denoiser_dim=128,
                  denoiser_layers=4, denoiser_heads=8, dropout=0.2,
-                 euler_steps=1):
+                 euler_steps=1, guidance_scale_default=3.0,
+                 uncond_train_prob=0.1):
         super().__init__(num_proxies, node_dim)
         self.denoiser_dim = denoiser_dim
         self.euler_steps = euler_steps
+        self.guidance_scale_default = float(guidance_scale_default)
+        self.uncond_train_prob = float(uncond_train_prob)
 
         # Projections if node_dim != denoiser_dim
         self.input_proj = nn.Linear(node_dim, denoiser_dim) if node_dim != denoiser_dim else nn.Identity()
@@ -344,7 +347,11 @@ class FlowMatchingGenerator(BaseGenerator):
         # Project back to node_dim
         return self.output_proj(h)  # (B, M, node_dim)
 
-    def forward(self, node_embeddings, mask, targets=None, **kwargs):
+    def _null_condition(self, node_embeddings):
+        """Zero conditioning used for the guidance-free CFG branch."""
+        return torch.zeros_like(node_embeddings)
+
+    def forward(self, node_embeddings, mask, targets=None, guidance_scale=None, **kwargs):
         B, N, d = node_embeddings.shape
         M = self.num_proxies
         device = node_embeddings.device
@@ -357,20 +364,39 @@ class FlowMatchingGenerator(BaseGenerator):
             x_t = (1 - t_expand) * x_0 + t_expand * targets  # interpolation
             u = targets - x_0  # conditional vector field
 
-            v = self._denoise(x_t, t, node_embeddings, mask)
-            aux_loss = F.mse_loss(v, u)
+            # Always train conditional branch.
+            v_guided = self._denoise(x_t, t, node_embeddings, mask)
+            cond_loss = F.mse_loss(v_guided, u)
+            aux_loss = cond_loss
+            # Train unconditional branch only on a subset of steps.
+            run_uncond = kwargs.get("run_uncond", None)
+            if run_uncond is None:
+                run_uncond = torch.rand(1).item() < self.uncond_train_prob
+            if run_uncond:
+                v_free = self._denoise(
+                    x_t, t, self._null_condition(node_embeddings), mask
+                )
+                uncond_loss = F.mse_loss(v_free, u)
+                aux_loss = 0.5 * (cond_loss + uncond_loss)
 
-            # Also generate proxies via Euler for return value
+            # Return a standard conditional sample for downstream probes.
             with torch.no_grad():
-                proxy_embeddings = self._euler_sample(node_embeddings, mask)
+                proxy_embeddings = self._euler_sample(
+                    node_embeddings, mask, guidance_scale=1.0
+                )
         else:
-            # Inference: Euler integration
-            proxy_embeddings = self._euler_sample(node_embeddings, mask)
+            # Inference: CFG Euler integration (w=1 => conditional generation,
+            # w>1 => extrapolation towards condition).
+            if guidance_scale is None:
+                guidance_scale = self.guidance_scale_default
+            proxy_embeddings = self._euler_sample(
+                node_embeddings, mask, guidance_scale=guidance_scale
+            )
             aux_loss = None
 
         return proxy_embeddings, aux_loss
 
-    def _euler_sample(self, node_embeddings, mask):
+    def _euler_sample(self, node_embeddings, mask, guidance_scale=1.0):
         """Generate proxies via Euler integration from t=0 to t=1."""
         B, N, d = node_embeddings.shape
         M = self.num_proxies
@@ -380,7 +406,14 @@ class FlowMatchingGenerator(BaseGenerator):
         for step in range(self.euler_steps):
             t_val = step * dt
             t = torch.full((B,), t_val, device=node_embeddings.device)
-            v = self._denoise(z, t, node_embeddings, mask)
+            v_cond = self._denoise(z, t, node_embeddings, mask)
+            if guidance_scale == 1.0:
+                v = v_cond
+            else:
+                v_free = self._denoise(
+                    z, t, self._null_condition(node_embeddings), mask
+                )
+                v = v_free + guidance_scale * (v_cond - v_free)
             z = z + dt * v
 
         return z  # (B, M, d)
