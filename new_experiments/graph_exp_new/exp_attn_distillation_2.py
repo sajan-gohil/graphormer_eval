@@ -977,11 +977,12 @@ def main():
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--device", type=str, default=None)
 
-    args = p.parse_args()
+    args, unknown = p.parse_known_args()
     if args.device is None:
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.save_dir, exist_ok=True)
-
+    print(args.__dict__)
+    print("Unknown args = ", unknown)
     # Auto-resolve model_path for extract/train if not provided
     if args.model_path is None and args.phase in ("extract", "train"):
         default_path = os.path.join(args.save_dir, "pretrain_best.pt")
