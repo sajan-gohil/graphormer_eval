@@ -316,6 +316,7 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
     B = batch.y.size(0)
     device = batch.y.device
     mmd_lambda = getattr(args, 'proxy_mmd_lambda', 0.0)
+    loss_threshold = getattr(args, 'extract_loss_threshold', 0.05)
 
     proxy = torch.randn(B, args.num_proxies, args.hidden_dim, device=device) * 0.02
     proxy = nn.Parameter(proxy)
@@ -327,8 +328,16 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
     best_loss = base_loss.clone()
     best_proxy = proxy.detach().clone()
 
+    # Track which samples have converged below threshold
+    converged = best_loss < loss_threshold  # (B,) bool
+    steps_taken = 0
+
     with torch.enable_grad():
         for step in range(args.proxy_opt_steps):
+            # Early exit if all samples converged
+            if converged.all():
+                break
+
             opt.zero_grad()
             logits, _, _ = model(batch, proxy_embeddings=proxy,
                                   precomputed_dense=(dense_x, dense_mask),
@@ -346,16 +355,26 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
                 total = task_loss.mean()
 
             total.backward()
+
+            # Zero gradients for converged samples so their proxies stop updating
+            if converged.any():
+                with torch.no_grad():
+                    proxy.grad[converged] = 0.0
+
             nn.utils.clip_grad_norm_([proxy], 1.0)
             opt.step()
+            steps_taken = step + 1
 
             with torch.no_grad():
                 improved = task_loss < best_loss
                 if improved.any():
                     best_loss[improved] = task_loss[improved]
                     best_proxy[improved] = proxy.detach()[improved]
+                # Update convergence status
+                converged = best_loss < loss_threshold
 
-    return best_proxy, base_loss, best_loss
+    num_converged = int(converged.sum().item())
+    return best_proxy, base_loss, best_loss, steps_taken, num_converged
 
 
 # ================================================================
@@ -554,7 +573,8 @@ def run_extraction(args):
     print("=" * 60)
     print("Phase 1: Extract Attention Targets")
     print(f"  model_path={args.model_path}")
-    print(f"  proxy_opt_steps={args.proxy_opt_steps}")
+    print(f"  proxy_opt_steps={args.proxy_opt_steps} (max)")
+    print(f"  extract_loss_threshold={args.extract_loss_threshold}")
     print(f"  num_proxies={args.num_proxies}")
     print(f"  proxy_mmd_lambda={args.proxy_mmd_lambda}")
     print(f"  num_cross_layers={args.num_cross_layers}")
@@ -610,6 +630,8 @@ def run_extraction(args):
     all_targets = []
     graphs_processed = 0
     total_base_loss, total_opt_loss = 0.0, 0.0
+    total_converged = 0
+    total_steps_taken = 0
     total_mmd = 0.0
     num_batches = len(train_loader)
 
@@ -620,11 +642,13 @@ def run_extraction(args):
         with torch.no_grad():
             dense_x, dense_mask = teacher.encode_dense(batch)
 
-        # Optimize proxies
-        best_proxies, base_loss, opt_loss = optimize_proxies_for_batch(
-            teacher, batch, dense_x, dense_mask, args)
+        # Optimize proxies (runs until loss < threshold or max steps)
+        best_proxies, base_loss, opt_loss, steps_taken, num_converged = \
+            optimize_proxies_for_batch(teacher, batch, dense_x, dense_mask, args)
 
         total_base_loss += base_loss.sum().item()
+        total_converged += num_converged
+        total_steps_taken += steps_taken
         total_opt_loss += opt_loss.sum().item()
 
         # Log MMD
@@ -664,8 +688,11 @@ def run_extraction(args):
             avg_base = total_base_loss / graphs_processed
             avg_opt = total_opt_loss / graphs_processed
             avg_mmd = total_mmd / graphs_processed if args.proxy_mmd_lambda > 0 else 0
+            conv_rate = total_converged / graphs_processed * 100
+            avg_steps = total_steps_taken / (batch_idx + 1)
             print(f"  [{batch_idx+1}/{num_batches}] {graphs_processed} graphs | "
-                  f"base_loss={avg_base:.4f} opt_loss={avg_opt:.4f} mmd={avg_mmd:.6f}",
+                  f"base_loss={avg_base:.4f} opt_loss={avg_opt:.4f} mmd={avg_mmd:.6f} | "
+                  f"converged={conv_rate:.1f}% avg_steps={avg_steps:.0f}",
                   flush=True)
 
     # Save
@@ -680,8 +707,11 @@ def run_extraction(args):
 
     avg_base = total_base_loss / graphs_processed
     avg_opt = total_opt_loss / graphs_processed
+    final_conv_rate = total_converged / graphs_processed * 100
     print(f"\nExtraction done. {graphs_processed} graphs saved to {save_path}")
     print(f"  Avg base_loss={avg_base:.4f}  opt_loss={avg_opt:.4f}")
+    print(f"  Converged (loss < {args.extract_loss_threshold}): "
+          f"{total_converged}/{graphs_processed} ({final_conv_rate:.1f}%)")
 
     # Quick sanity check: how different are teacher vs vanilla attention?
     # Re-use the same non-shuffled loader so graph ordering matches all_targets
@@ -1158,7 +1188,12 @@ def main():
     # Proxy optimization (extract phase only)
     p.add_argument("--num_proxies", type=int, default=64)
     p.add_argument("--proxy_lr", type=float, default=5e-2)
-    p.add_argument("--proxy_opt_steps", type=int, default=300)
+    p.add_argument("--proxy_opt_steps", type=int, default=300,
+                   help="Maximum proxy optimization steps per batch (extract phase)")
+    p.add_argument("--extract_loss_threshold", type=float, default=0.05,
+                   help="Per-sample loss threshold for proxy convergence. "
+                        "Optimization stops early when all samples in the batch "
+                        "drop below this value.")
     p.add_argument("--proxy_mmd_lambda", type=float, default=1)
 
     # Distillation (train phase)
