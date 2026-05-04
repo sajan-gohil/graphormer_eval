@@ -127,6 +127,32 @@ class CrossAttentionRoutingLayer(nn.Module):
 
 
 # ================================================================
+# PARAMETER-FREE PROXY ROUTING (Form B)
+# ================================================================
+
+def parameter_free_proxy_routing(nodes, proxies, node_mask):
+    """
+    Parameter-free Form B routing used in Phase 1 only.
+    Nodes attend to proxies (no W_Q / W_K / W_V / FFN), receive a residual update.
+    Proxies live in the same space as nodes, which makes MMD-to-nodes a meaningful
+    regularizer and shrinks the gaming surface vs. learnable cross-attention.
+
+    Args:
+        nodes:     (B, N, d)
+        proxies:   (B, M, d)   — the optimization variable
+        node_mask: (B, N) bool — True for real nodes
+    Returns:
+        updated nodes: (B, N, d)
+    """
+    d = nodes.size(-1)
+    scores = torch.matmul(nodes, proxies.transpose(-2, -1)) / (d ** 0.5)  # (B, N, M)
+    attn = F.softmax(scores, dim=-1)                                       # (B, N, M)
+    update = torch.matmul(attn, proxies)                                   # (B, N, d)
+    update = update * node_mask.unsqueeze(-1).float()                      # zero pad rows
+    return nodes + update
+
+
+# ================================================================
 # TRANSFORMER LAYER — returns attention weights
 # ================================================================
 
@@ -185,10 +211,14 @@ class TransformerLayerWithAttn(nn.Module):
 class GraphTransformerWithCrossAttn(nn.Module):
     def __init__(self, num_layers=5, num_heads=8, hidden_dim=64,
                  output_dim=10, dropout=0.3, num_cross_layers=None,
-                 use_proxy_self_attn=True):
+                 use_proxy_self_attn=True, use_parameter_free_proxy=False):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        # When True, the cross_attn_layers ModuleList is left in place (so checkpoints
+        # and other files that import this class still work) but is bypassed in the
+        # forward pass in favor of parameter_free_proxy_routing.
+        self.use_parameter_free_proxy = use_parameter_free_proxy
         self.encoder = NodeEncoder(hidden_dim)
 
         self.layers = nn.ModuleList([
@@ -228,9 +258,15 @@ class GraphTransformerWithCrossAttn(nn.Module):
 
         for layer_idx, layer in enumerate(self.layers):
             if proxies is not None and layer_idx in self.cross_layer_mapping:
-                cross_idx = self.cross_layer_mapping.index(layer_idx)
-                dense_x, proxies = self.cross_attn_layers[cross_idx](
-                    dense_x, proxies, dense_mask)
+                if self.use_parameter_free_proxy:
+                    # Form B: bypass learnable cross-attn, modify dense_x via
+                    # node→proxy attention with no learnable parameters.
+                    dense_x = parameter_free_proxy_routing(
+                        dense_x, proxies, dense_mask)
+                else:
+                    cross_idx = self.cross_layer_mapping.index(layer_idx)
+                    dense_x, proxies = self.cross_attn_layers[cross_idx](
+                        dense_x, proxies, dense_mask)
 
             dense_x, attn_w = layer(dense_x, dense_mask)
             if return_attention:
@@ -258,8 +294,19 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
     B = batch.y.size(0)
     device = batch.y.device
     mmd_lambda = getattr(args, 'proxy_mmd_lambda', 0.0)
+    rel_threshold = getattr(args, 'extract_rel_threshold', 0.1)
+    jitter_scale = getattr(args, 'proxy_init_jitter', 0.5)
 
-    proxy = torch.randn(B, args.num_proxies, args.hidden_dim, device=device) * 0.02
+    # Simple init: pick a random node embedding per (graph, proxy_slot) and add
+    # large jitter. The jitter breaks symmetry so the M proxies for one graph
+    # follow distinct optimization trajectories instead of collapsing together.
+    # Proxies are throwaway after extraction, so we don't need anything fancier.
+    _, N_pad, d = dense_x.shape
+    M = args.num_proxies
+    idx = torch.randint(0, N_pad, (B, M), device=device)
+    batch_arange = torch.arange(B, device=device).view(B, 1).expand(B, M)
+    proxy = dense_x[batch_arange, idx].clone()              # (B, M, d) on-manifold
+    proxy = proxy + jitter_scale * torch.randn_like(proxy)  # large jitter
     proxy = nn.Parameter(proxy)
     opt = torch.optim.Adam([proxy], lr=args.proxy_lr)
 
@@ -269,8 +316,17 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
     best_loss = base_loss.clone()
     best_proxy = proxy.detach().clone()
 
+    # Per-sample relative target: opt_loss[i] < rel_threshold * base_loss[i].
+    # Exit early only when ALL samples have crossed it (no per-sample freezing
+    # — we want to keep pushing opt_loss as low as possible, ideally toward 0).
+    target = rel_threshold * base_loss
+    steps_taken = 0
+
     with torch.enable_grad():
         for step in range(args.proxy_opt_steps):
+            if (best_loss < target).all():
+                break
+
             opt.zero_grad()
             logits, _, _ = model(batch, proxy_embeddings=proxy,
                                   precomputed_dense=(dense_x, dense_mask),
@@ -290,6 +346,7 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
             total.backward()
             nn.utils.clip_grad_norm_([proxy], 1.0)
             opt.step()
+            steps_taken = step + 1
 
             with torch.no_grad():
                 improved = task_loss < best_loss
@@ -297,7 +354,8 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
                     best_loss[improved] = task_loss[improved]
                     best_proxy[improved] = proxy.detach()[improved]
 
-    return best_proxy, base_loss, best_loss
+    num_converged = int((best_loss < target).sum().item())
+    return best_proxy, base_loss, best_loss, steps_taken, num_converged
 
 
 # ================================================================
@@ -483,6 +541,7 @@ def run_extraction(args):
         hidden_dim=args.hidden_dim, output_dim=args.output_dim,
         dropout=args.dropout, num_cross_layers=args.num_cross_layers,
         use_proxy_self_attn=args.use_proxy_self_attn,
+        use_parameter_free_proxy=True,
     ).to(args.device)
 
     pretrained_state = ckpt["model_state"]
@@ -514,6 +573,9 @@ def run_extraction(args):
     graphs_processed = 0
     total_base_loss, total_opt_loss = 0.0, 0.0
     total_mmd = 0.0
+    total_steps_taken = 0
+    total_converged = 0
+    all_ratios = []  # opt_loss / base_loss per sample, for histogram
     num_batches = len(train_loader)
 
     for batch_idx, batch in enumerate(train_loader):
@@ -524,11 +586,18 @@ def run_extraction(args):
             dense_x, dense_mask = teacher.encode_dense(batch)
 
         # Optimize proxies
-        best_proxies, base_loss, opt_loss = optimize_proxies_for_batch(
-            teacher, batch, dense_x, dense_mask, args)
+        best_proxies, base_loss, opt_loss, steps_taken, num_converged = \
+            optimize_proxies_for_batch(teacher, batch, dense_x, dense_mask, args)
 
         total_base_loss += base_loss.sum().item()
         total_opt_loss += opt_loss.sum().item()
+        total_steps_taken += steps_taken
+        total_converged += num_converged
+
+        # Per-sample ratio for diagnostic histogram
+        with torch.no_grad():
+            ratio_b = (opt_loss / base_loss.clamp_min(1e-12)).cpu().tolist()
+            all_ratios.extend(ratio_b)
 
         # Log MMD
         if args.proxy_mmd_lambda > 0:
@@ -567,8 +636,13 @@ def run_extraction(args):
             avg_base = total_base_loss / graphs_processed
             avg_opt = total_opt_loss / graphs_processed
             avg_mmd = total_mmd / graphs_processed if args.proxy_mmd_lambda > 0 else 0
+            ratio = avg_opt / max(avg_base, 1e-12)
+            avg_steps = total_steps_taken / (batch_idx + 1)
+            conv_rate = total_converged / graphs_processed
             print(f"  [{batch_idx+1}/{num_batches}] {graphs_processed} graphs | "
-                  f"base_loss={avg_base:.4f} opt_loss={avg_opt:.4f} mmd={avg_mmd:.6f}",
+                  f"base_loss={avg_base:.4f} opt_loss={avg_opt:.4f} "
+                  f"ratio={ratio:.4f} mmd={avg_mmd:.6f} "
+                  f"avg_steps={avg_steps:.1f} conv={conv_rate:.2%}",
                   flush=True)
 
     # Save
@@ -583,8 +657,28 @@ def run_extraction(args):
 
     avg_base = total_base_loss / graphs_processed
     avg_opt = total_opt_loss / graphs_processed
+    overall_ratio = avg_opt / max(avg_base, 1e-12)
+    avg_steps = total_steps_taken / max(num_batches, 1)
+    conv_rate = total_converged / graphs_processed
     print(f"\nExtraction done. {graphs_processed} graphs saved to {save_path}")
-    print(f"  Avg base_loss={avg_base:.4f}  opt_loss={avg_opt:.4f}")
+    print(f"  Avg base_loss={avg_base:.4f}  opt_loss={avg_opt:.4f}  "
+          f"ratio={overall_ratio:.4f}")
+    print(f"  Avg proxy steps/batch={avg_steps:.1f}  "
+          f"converged={conv_rate:.2%} (target: opt < {args.extract_rel_threshold} * base)")
+
+    # opt/base ratio histogram
+    if all_ratios:
+        ratios_np = np.array(all_ratios)
+        bins = [0.0, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, float('inf')]
+        hist, _ = np.histogram(ratios_np, bins=bins)
+        print(f"  opt/base ratio histogram (per-sample, {len(ratios_np)} samples):")
+        for lo, hi, count in zip(bins[:-1], bins[1:], hist):
+            pct = count / len(ratios_np)
+            hi_str = "inf" if hi == float('inf') else f"{hi:.2f}"
+            print(f"    [{lo:.2f}, {hi_str}): {count:6d}  ({pct:6.2%})")
+        print(f"  ratio stats: mean={ratios_np.mean():.4f}  "
+              f"median={np.median(ratios_np):.4f}  "
+              f"p90={np.percentile(ratios_np, 90):.4f}")
 
     # Quick sanity check: how different are teacher vs vanilla attention?
     # Re-use the same non-shuffled loader so graph ordering matches all_targets
@@ -961,6 +1055,13 @@ def main():
     p.add_argument("--proxy_lr", type=float, default=5e-2)
     p.add_argument("--proxy_opt_steps", type=int, default=300)
     p.add_argument("--proxy_mmd_lambda", type=float, default=1)
+    p.add_argument("--extract_rel_threshold", type=float, default=0.1,
+                   help="Per-sample early-exit target: stop when opt_loss[i] < "
+                        "rel_threshold * base_loss[i] for all i in the batch")
+    p.add_argument("--proxy_init_jitter", type=float, default=0.5,
+                   help="Stddev of Gaussian noise added to on-manifold proxy init. "
+                        "Larger values break symmetry and let proxies follow distinct "
+                        "optimization trajectories instead of collapsing.")
 
     # Distillation (train phase)
     p.add_argument("--distill_weight", type=float, default=1.0)
@@ -1004,4 +1105,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
