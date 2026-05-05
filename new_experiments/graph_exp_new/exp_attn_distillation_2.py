@@ -309,6 +309,8 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
     proxy = proxy + jitter_scale * torch.randn_like(proxy)  # large jitter
     proxy = nn.Parameter(proxy)
     opt = torch.optim.Adam([proxy], lr=args.proxy_lr)
+    proxy_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=args.proxy_opt_steps, eta_min=args.proxy_lr * 0.01)
 
     logits_base, _, _ = model(batch, precomputed_dense=(dense_x, dense_mask),
                                return_attention=True)
@@ -346,6 +348,7 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
             total.backward()
             nn.utils.clip_grad_norm_([proxy], 1.0)
             opt.step()
+            proxy_scheduler.step()
             steps_taken = step + 1
 
             with torch.no_grad():
@@ -380,7 +383,7 @@ def run_pretrain(args):
     model = GraphTransformerWithCrossAttn(
         num_layers=args.num_layers, num_heads=args.num_heads,
         hidden_dim=args.hidden_dim, output_dim=args.output_dim,
-        dropout=args.dropout,
+        dropout=args.dropout, use_parameter_free_proxy=True
     ).to(args.device)
 
     # Only count encoder + self-attention + head params (not cross-attn)
@@ -753,7 +756,8 @@ class AttnTargetDataset(Dataset):
         graph = self.pyg_dataset[sample_idx]
         target = self.idx_to_target[sample_idx]
         # attn_targets: list of (H, n, n) tensors
-        return graph, target["attn_targets"], target["num_nodes"]
+        opt_loss = target.get("opt_loss", 0.0)
+        return graph, target["attn_targets"], target["num_nodes"], opt_loss
 
 
 def collate_attn_targets(batch):
@@ -762,7 +766,7 @@ def collate_attn_targets(batch):
     Pads attention matrices to max_N in the batch.
     """
     import torch_geometric
-    graphs, attn_list, num_nodes_list = zip(*batch)
+    graphs, attn_list, num_nodes_list, opt_losses = zip(*batch)
 
     pyg_batch = torch_geometric.data.Batch.from_data_list(list(graphs))
     B = len(graphs)
@@ -773,6 +777,7 @@ def collate_attn_targets(batch):
     # Pad attention targets: (B, num_layers, H, max_N, max_N)
     padded_attns = torch.zeros(B, num_layers, H, max_N, max_N)
     attn_masks = torch.zeros(B, max_N, dtype=torch.bool)
+    opt_loss_tensor = torch.tensor(opt_losses, dtype=torch.float32)  # (B,)
 
     for i in range(B):
         n = num_nodes_list[i]
@@ -780,14 +785,15 @@ def collate_attn_targets(batch):
         for l in range(num_layers):
             padded_attns[i, l, :, :n, :n] = attn_list[i][l]
 
-    return pyg_batch, padded_attns, attn_masks
+    return pyg_batch, padded_attns, attn_masks, opt_loss_tensor
 
 
 # ================================================================
 # ATTENTION DISTILLATION LOSS
 # ================================================================
 
-def attention_distillation_loss(student_attns, teacher_attns_padded, mask, temperature=1.0):
+def attention_distillation_loss(student_attns, teacher_attns_padded, mask, temperature=1.0,
+                                sample_mask=None):
     """
     KL divergence between student and pre-extracted teacher attention.
 
@@ -796,6 +802,9 @@ def attention_distillation_loss(student_attns, teacher_attns_padded, mask, tempe
         teacher_attns_padded: (B, num_distill_layers, H, N, N) padded teacher targets
         mask: (B, N) boolean
         temperature: softening temperature
+        sample_mask: (B,) boolean — if provided, only include distillation loss for
+                     samples where sample_mask[i] is True (i.e. extraction opt_loss
+                     was below threshold). Samples with False are zeroed out.
     """
     total_loss = 0.0
     num_layers = len(student_attns)
@@ -838,11 +847,22 @@ def attention_distillation_loss(student_attns, teacher_attns_padded, mask, tempe
         kl = t_soft * (torch.log(t_soft + 1e-10) - torch.log(s_soft + 1e-10))
         kl = kl.sum(dim=-1)  # (B, H, N)
 
-        query_mask = mask.unsqueeze(1)
+        query_mask = mask.unsqueeze(1)  # (B, 1, N)
         kl = kl * query_mask.float()
 
-        num_valid = query_mask.float().sum() * H
-        layer_loss = kl.sum() / (num_valid + 1e-10)
+        # Per-sample KL: sum over heads and query positions
+        per_sample_kl = kl.sum(dim=(1, 2))  # (B,)
+        per_sample_valid = query_mask.float().sum(dim=-1).squeeze(1) * H  # (B,)
+        per_sample_loss = per_sample_kl / (per_sample_valid + 1e-10)  # (B,)
+
+        # Zero out samples that had poor extraction quality
+        if sample_mask is not None:
+            per_sample_loss = per_sample_loss * sample_mask.float()
+            num_active = sample_mask.float().sum().clamp_min(1.0)
+            layer_loss = per_sample_loss.sum() / num_active
+        else:
+            layer_loss = per_sample_loss.mean()
+
         total_loss = total_loss + layer_loss
 
     return total_loss / num_layers
@@ -888,7 +908,7 @@ def run_training(args):
     student = GraphTransformerWithCrossAttn(
         num_layers=args.num_layers, num_heads=args.num_heads,
         hidden_dim=args.hidden_dim, output_dim=args.output_dim,
-        dropout=args.dropout,
+        dropout=args.dropout
     ).to(args.device)
 
     pretrained_state = ckpt["model_state"]
@@ -932,10 +952,15 @@ def run_training(args):
         train_losses, task_losses_log, distill_losses_log = [], [], []
         all_preds, all_labels = [], []
 
-        for batch_idx, (pyg_batch, teacher_attns_padded, attn_masks) in enumerate(distill_loader):
+        for batch_idx, (pyg_batch, teacher_attns_padded, attn_masks, opt_losses) in enumerate(distill_loader):
             pyg_batch = pyg_batch.to(args.device)
             teacher_attns_padded = teacher_attns_padded.to(args.device)
             attn_masks = attn_masks.to(args.device)
+            opt_losses = opt_losses.to(args.device)  # (B,)
+
+            # Build per-sample mask: only distill from samples with good extraction
+            sample_mask = (opt_losses < args.distill_loss_threshold)  # (B,) bool
+            num_active = int(sample_mask.sum().item())
 
             optimizer.zero_grad()
 
@@ -949,9 +974,14 @@ def run_training(args):
             task_loss = loss_fn(logits, pyg_batch.y)
 
             # Distillation loss against pre-extracted targets
-            distill_loss = attention_distillation_loss(
-                student_attns_filtered, teacher_attns_padded,
-                attn_masks, temperature=args.temperature)
+            # Only include for samples with extraction loss below threshold
+            if num_active > 0:
+                distill_loss = attention_distillation_loss(
+                    student_attns_filtered, teacher_attns_padded,
+                    attn_masks, temperature=args.temperature,
+                    sample_mask=sample_mask)
+            else:
+                distill_loss = torch.tensor(0.0, device=args.device)
 
             loss = task_loss + args.distill_weight * distill_loss
             loss.backward()
@@ -975,7 +1005,8 @@ def run_training(args):
 
         elapsed = time.time() - epoch_start
         print(f"Epoch {epoch:3d}/{args.max_epochs} [{elapsed:.1f}s] | "
-              f"task={mean_task:.4f} distill={mean_distill:.4f} | "
+              f"task={mean_task:.4f} distill={mean_distill:.4f} "
+              f"(thresh={args.distill_loss_threshold}) | "
               f"train_AP={train_ap:.4f} val_AP={val_ap:.4f} test_AP={test_ap:.4f}",
               flush=True)
 
@@ -1066,6 +1097,11 @@ def main():
     # Distillation (train phase)
     p.add_argument("--distill_weight", type=float, default=1.0)
     p.add_argument("--temperature", type=float, default=1.2)
+    p.add_argument("--distill_loss_threshold", type=float, default=0.5,
+                   help="Only include attention distillation loss for samples whose "
+                        "extraction opt_loss was below this threshold. Samples with "
+                        "opt_loss >= threshold are excluded from distillation (but "
+                        "still contribute to task BCE loss).")
     p.add_argument("--distill_layers", type=str, default="all")
 
     # Training (train phase)
