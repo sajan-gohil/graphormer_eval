@@ -23,14 +23,14 @@ class NodeEncoder(nn.Module):
         self.num_atom_features = len(FULL_ATOM_FEATURE_DIMS)
 
         self.atom_feature_embeddings = nn.ModuleList([
-            nn.Embedding(num_embeddings=dim, embedding_dim=hidden_dim)
+            nn.Embedding(num_embeddings=dim, embedding_dim=hidden_dim*8)
             for dim in FULL_ATOM_FEATURE_DIMS
         ])
         for emb in self.atom_feature_embeddings:
             nn.init.normal_(emb.weight, std=0.01)
 
         self.atom_post = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim*8, hidden_dim),
             nn.GELU(),
         )
 
