@@ -1,3 +1,4 @@
+# exp_attn_distillation_4.py
 """
 Experiment: Attention Distillation from Proxy-Augmented Transformer
 
@@ -37,6 +38,7 @@ Usage:
 """
 
 import argparse
+import math
 import os
 import pickle
 import time
@@ -50,7 +52,7 @@ from torch_geometric.nn import global_mean_pool
 from torch.utils.data import Dataset, DataLoader
 
 from data import get_loaders, _compute_dist_mask_single
-from models import NodeEncoder, GraphTransformer, GREDEncoder, GREDHybridTransformer
+from models import NodeEncoder, GraphTransformer, GREDHybridTransformer
 from metrics import compute_macro_ap
 from mmd import mmd_squared
 
@@ -247,7 +249,7 @@ class GraphTransformerWithCrossAttn(nn.Module):
         return to_dense_batch(h, batch.batch)
 
     def forward(self, batch, proxy_embeddings=None, precomputed_dense=None,
-                return_attention=False):
+                return_attention=False, return_dense=False):
         if precomputed_dense is not None:
             dense_x, dense_mask = precomputed_dense
         else:
@@ -277,8 +279,16 @@ class GraphTransformerWithCrossAttn(nn.Module):
         pooled = global_mean_pool(node_emb_masked, batch.batch)
         logits = self.head(pooled)
 
+        # Build a return tuple incrementally for backwards-compat with the
+        # 2-tuple (logits, node_emb_masked) and 3-tuple (..., all_attn) callers.
+        # When return_dense=True, the final post-routing dense_x and dense_mask
+        # are appended — used by the latent-embedding distillation pipeline.
+        if return_attention and return_dense:
+            return logits, node_emb_masked, all_attn, dense_x, dense_mask
         if return_attention:
             return logits, node_emb_masked, all_attn
+        if return_dense:
+            return logits, node_emb_masked, dense_x, dense_mask
         return logits, node_emb_masked
 
 
@@ -287,24 +297,22 @@ class GraphTransformerWithCrossAttn(nn.Module):
 # ================================================================
 
 def build_model(args):
-    """Build backbone model based on --backbone arg."""
+    """Build backbone model based on --backbone arg.
+
+    Only ``vanilla_gt`` and ``hybrid`` are supported. Pure-GRED has been
+    dropped — the user does not use it, and dropping it removes the bag of
+    "GRED has no self-attention" special cases throughout this file.
+    """
     lap_pe_dim = args.lap_pe_dim if getattr(args, 'use_lap_pe', False) else 0
-    if getattr(args, 'backbone', 'vanilla_gt') == "vanilla_gt":
+    backbone = getattr(args, 'backbone', 'vanilla_gt')
+    if backbone == "vanilla_gt":
         return GraphTransformerWithCrossAttn(
             num_layers=args.num_layers, num_heads=args.num_heads,
             hidden_dim=args.hidden_dim, output_dim=args.output_dim,
             dropout=args.dropout,
             use_parameter_free_proxy=getattr(args, 'use_parameter_free_proxy', True),
         )
-    elif args.backbone == "gred":
-        return GREDEncoder(
-            hidden_dim=args.hidden_dim, state_dim=args.state_dim,
-            num_layers=args.num_gred_layers, expand=args.gred_expand,
-            r_min=args.r_min, r_max=args.r_max, max_phase=args.max_phase,
-            dropout=args.dropout, act=args.gred_act, output_dim=args.output_dim,
-            lap_pe_dim=lap_pe_dim,
-        )
-    elif args.backbone == "hybrid":
+    elif backbone == "hybrid":
         return GREDHybridTransformer(
             hidden_dim=args.hidden_dim, state_dim=args.state_dim,
             num_gred_layers=args.num_gred_layers,
@@ -315,7 +323,8 @@ def build_model(args):
             lap_pe_dim=lap_pe_dim,
         )
     else:
-        raise ValueError(f"Unknown backbone: {args.backbone}")
+        raise ValueError(
+            f"Unknown backbone: {backbone}. Supported: vanilla_gt, hybrid.")
 
 
 def _build_dist_and_node_masks_for_batch(pyg_batch, max_hops, device):
@@ -421,13 +430,107 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
     return best_proxy, base_loss, best_loss, steps_taken, num_converged
 
 
+@torch.no_grad()
+def optimize_proxies_for_batch_hybrid(model, batch, dense_x, dense_mask,
+                                       dist_masks, node_masks, args):
+    """
+    Per-sample proxy optimization for the GREDHybridTransformer teacher.
+
+    Differences from the vanilla_gt path:
+      * The "fixed" features are post-GRED (precomputed once outside the
+        optimization loop), not the raw encoder output.
+      * Hybrid forward uses ``proxy_embeddings`` to feed the proxy injection
+        branch (cross_attn_router or N+M concat), then runs the transformer
+        layers on top. Hybrid's TransformerLayer doesn't return attention,
+        so the only signal we use to drive proxies is task BCE — same
+        criterion as the vanilla_gt path.
+      * Returns are identical in shape so the rest of the extraction code
+        can stay backbone-agnostic: (best_proxy, base_loss, opt_loss,
+        steps_taken, num_converged).
+    """
+    B = batch.y.size(0)
+    device = batch.y.device
+    mmd_lambda = getattr(args, 'proxy_mmd_lambda', 0.0)
+    rel_threshold = getattr(args, 'extract_rel_threshold', 0.1)
+    jitter_scale = getattr(args, 'proxy_init_jitter', 0.5)
+
+    # Precompute post-GRED node features (fixed during proxy optimization).
+    h_gred = model.encode_gred(dense_x, dist_masks, node_masks)
+
+    _, N_pad, d = h_gred.shape
+    M = args.num_proxies
+    # On-manifold init from GRED-encoded nodes (nodes that the proxy will
+    # actually be cross-attended against in the routing step).
+    idx = torch.randint(0, N_pad, (B, M), device=device)
+    batch_arange = torch.arange(B, device=device).view(B, 1).expand(B, M)
+    proxy = h_gred[batch_arange, idx].clone()
+    proxy = proxy + jitter_scale * torch.randn_like(proxy)
+    proxy = nn.Parameter(proxy)
+    opt = torch.optim.Adam([proxy], lr=args.proxy_lr)
+    proxy_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=args.proxy_opt_steps, eta_min=args.proxy_lr * 0.01)
+
+    # Baseline forward — no proxies. Hybrid signature is positional:
+    #   forward(batch, dist_masks, node_masks, proxy_embeddings=..., ...)
+    logits_base, _ = model(
+        batch, dist_masks, node_masks,
+        precomputed_dense=(dense_x, dense_mask),
+        precomputed_gred=h_gred,
+    )
+    base_loss = _per_sample_bce(logits_base, batch.y)
+    best_loss = base_loss.clone()
+    best_proxy = proxy.detach().clone()
+
+    target = rel_threshold * base_loss
+    steps_taken = 0
+
+    with torch.enable_grad():
+        for step in range(args.proxy_opt_steps):
+            if (best_loss < target).all():
+                break
+
+            opt.zero_grad()
+            logits, _ = model(
+                batch, dist_masks, node_masks,
+                proxy_embeddings=proxy,
+                precomputed_dense=(dense_x, dense_mask),
+                precomputed_gred=h_gred,
+            )
+            task_loss = _per_sample_bce(logits, batch.y)
+
+            if mmd_lambda > 0:
+                mmd_losses = []
+                for i in range(B):
+                    nodes_i = h_gred[i][dense_mask[i]]
+                    mmd_losses.append(mmd_squared(proxy[i], nodes_i))
+                mmd_batch = torch.stack(mmd_losses)
+                total = (task_loss + mmd_lambda * mmd_batch).mean()
+            else:
+                total = task_loss.mean()
+
+            total.backward()
+            nn.utils.clip_grad_norm_([proxy], 1.0)
+            opt.step()
+            proxy_scheduler.step()
+            steps_taken = step + 1
+
+            with torch.no_grad():
+                improved = task_loss < best_loss
+                if improved.any():
+                    best_loss[improved] = task_loss[improved]
+                    best_proxy[improved] = proxy.detach()[improved]
+
+    num_converged = int((best_loss < target).sum().item())
+    return best_proxy, base_loss, best_loss, steps_taken, num_converged
+
+
 # ================================================================
 # PRETRAIN — Train vanilla transformer from scratch
 # ================================================================
 
 def run_pretrain(args):
     backbone = getattr(args, 'backbone', 'vanilla_gt')
-    is_gred = backbone in ("gred", "hybrid")
+    is_hybrid = (backbone == "hybrid")
 
     print("\n" + "=" * 60, flush=True)
     print("PRETRAIN: Train Model from scratch", flush=True)
@@ -444,20 +547,12 @@ def run_pretrain(args):
     lap_pe_dim = getattr(args, 'lap_pe_dim', 0)
     train_loader, val_loader, test_loader, _, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
-        use_dist_masks=is_gred, max_hops=getattr(args, 'max_hops', 40),
+        use_dist_masks=is_hybrid, max_hops=getattr(args, 'max_hops', 40),
         dist_mask_workers=getattr(args, 'dist_mask_workers', 8),
         use_lap_pe=use_lap_pe, lap_pe_dim=lap_pe_dim,
     )
 
-    if backbone == "vanilla_gt":
-        model = GraphTransformerWithCrossAttn(
-            num_layers=args.num_layers, num_heads=args.num_heads,
-            hidden_dim=args.hidden_dim, output_dim=args.output_dim,
-            dropout=args.dropout,
-            use_parameter_free_proxy=getattr(args, 'use_parameter_free_proxy', True),
-        ).to(args.device)
-    else:
-        model = build_model(args).to(args.device)
+    model = build_model(args).to(args.device)
 
     # Only count encoder + self-attention + head params (not cross-attn for vanilla_gt)
     trainable_params = []
@@ -492,7 +587,7 @@ def run_pretrain(args):
     save_path = os.path.join(args.save_dir, "pretrain_best.pt")
 
     def _unpack_batch(batch_data):
-        if is_gred:
+        if is_hybrid:
             batch, dist_masks_batch, node_masks_batch = batch_data
             batch = batch.to(args.device)
             dist_masks_batch = dist_masks_batch.to(args.device)
@@ -504,10 +599,10 @@ def run_pretrain(args):
         return batch, dist_masks_batch, node_masks_batch
 
     def _forward_no_proxy(batch, dist_masks_batch, node_masks_batch):
-        if backbone == "vanilla_gt":
-            return model(batch, return_attention=False)
-        else:
+        if is_hybrid:
             return model(batch, dist_masks_batch, node_masks_batch)
+        else:
+            return model(batch, return_attention=False)
 
     for epoch in range(1, args.s1_max_epochs + 1):
         epoch_start = time.time()
@@ -609,11 +704,32 @@ def run_pretrain(args):
 # ================================================================
 
 def _extract_attention_for_loader(teacher, loader, args, distill_layer_indices,
-                                    save_path, split_name="train"):
+                                    save_path, split_name="train",
+                                    backbone="vanilla_gt"):
     """Run proxy optimization + attention extraction over a single loader.
 
     Loader MUST be non-shuffled so ``sample_idx == dataset index``. Saves a
     pickle to ``save_path`` and returns it.
+
+    Backbone-specific behavior:
+      vanilla_gt:
+        - optimize_proxies_for_batch (raw encoder features → proxy injection
+          at every cross_layer_mapping index → transformer attention).
+        - Capture per-layer attention from teacher.layers[*].
+        - Capture the "post-proxy, pre-transformer-attention" embedding via a
+          forward pre-hook on teacher.layers[cross_layer_mapping[-1]] — this
+          is dense_x right after the LAST proxy injection but before that
+          layer's attention runs. (Mirrors the user's earlier preference of
+          using the LAST cross-layer for reduce_attn_to_weights.)
+
+      hybrid:
+        - optimize_proxies_for_batch_hybrid (post-GRED features → proxy
+          injection (cross_attn_router or N+M concat) → transformer layers).
+        - Capture the "post-proxy, pre-transformer-attention" embedding via a
+          forward pre-hook on teacher.transformer_layers[0].
+        - Capture per-transformer-layer attention by calling the hybrid
+          teacher with return_attention=True (TransformerLayer now exposes
+          its post-softmax pre-dropout weights).
     """
     print(f"\n--- Extracting {split_name} split -> {save_path} ---", flush=True)
     all_targets = []
@@ -622,8 +738,29 @@ def _extract_attention_for_loader(teacher, loader, args, distill_layer_indices,
     total_converged = 0
     total_steps_taken = 0
     total_mmd = 0.0
-    all_ratios = []  # opt_loss / base_loss per sample, for histogram
+    all_ratios = []
     num_batches = len(loader)
+
+    is_hybrid = (backbone == "hybrid")
+
+    # Resolve which module to hook for "post-proxy, pre-attention" capture.
+    if is_hybrid:
+        if not hasattr(teacher, "transformer_layers") or len(teacher.transformer_layers) == 0:
+            raise ValueError(
+                "Hybrid teacher has no transformer_layers — nothing to hook "
+                "for post-proxy, pre-attention capture.")
+        capture_module = teacher.transformer_layers[0]
+    else:
+        last_cross_idx = teacher.cross_layer_mapping[-1]
+        capture_module = teacher.layers[last_cross_idx]
+
+    captured = {"h": None}
+
+    def _pre_hook(_module, inputs):
+        # Hybrid TransformerLayer.forward(x, mask) and the vanilla
+        # TransformerLayerWithAttn.forward(x, mask) have identical positional
+        # signatures, so inputs[0] is dense_x in both cases.
+        captured["h"] = inputs[0].detach()
 
     for batch_idx, batch in enumerate(loader):
         batch = batch.to(args.device)
@@ -632,10 +769,29 @@ def _extract_attention_for_loader(teacher, loader, args, distill_layer_indices,
         with torch.no_grad():
             dense_x, dense_mask = teacher.encode_dense(batch)
 
-        # Optimize proxies (runs until opt_loss < rel_threshold * base_loss for
-        # all samples, or max steps reached)
-        best_proxies, base_loss, opt_loss, steps_taken, num_converged = \
-            optimize_proxies_for_batch(teacher, batch, dense_x, dense_mask, args)
+        # Build dist masks for hybrid (used by GRED encoding step).
+        if is_hybrid:
+            dist_masks_b, node_masks_b = _build_dist_and_node_masks_for_batch(
+                batch, max_hops=getattr(args, 'max_hops', 40),
+                device=args.device)
+        else:
+            dist_masks_b = None
+            node_masks_b = None
+
+        # Optimize proxies (until opt_loss < rel_threshold * base_loss for all
+        # samples, or max steps reached). Backbone-specific implementation.
+        if is_hybrid:
+            best_proxies, base_loss, opt_loss, steps_taken, num_converged = \
+                optimize_proxies_for_batch_hybrid(
+                    teacher, batch, dense_x, dense_mask,
+                    dist_masks_b, node_masks_b, args)
+            # Reuse post-GRED features as the basis for the post-proxy capture
+            # forward pass (avoids redundant GRED computation).
+            with torch.no_grad():
+                h_gred = teacher.encode_gred(dense_x, dist_masks_b, node_masks_b)
+        else:
+            best_proxies, base_loss, opt_loss, steps_taken, num_converged = \
+                optimize_proxies_for_batch(teacher, batch, dense_x, dense_mask, args)
 
         total_base_loss += base_loss.sum().item()
         total_converged += num_converged
@@ -647,33 +803,78 @@ def _extract_attention_for_loader(teacher, loader, args, distill_layer_indices,
             ratio_b = (opt_loss / base_loss.clamp_min(1e-12)).cpu().tolist()
             all_ratios.extend(ratio_b)
 
-        # Log MMD
+        # Log MMD: vanilla_gt uses raw encoder features; hybrid uses post-GRED
+        # features (those are the "nodes" the proxies actually interact with).
         if args.proxy_mmd_lambda > 0:
             with torch.no_grad():
                 for i in range(B):
-                    nodes_i = dense_x[i][dense_mask[i]]
+                    if is_hybrid:
+                        nodes_i = h_gred[i][dense_mask[i]]
+                    else:
+                        nodes_i = dense_x[i][dense_mask[i]]
                     total_mmd += mmd_squared(best_proxies[i], nodes_i).item()
 
-        # Extract teacher attention with optimized proxies
-        with torch.no_grad():
-            _, _, teacher_attns = teacher(
-                batch, proxy_embeddings=best_proxies,
-                precomputed_dense=(dense_x, dense_mask),
-                return_attention=True)
+        # Run the teacher with optimized proxies and capture the post-proxy,
+        # pre-attention embedding via the forward pre-hook. For vanilla_gt we
+        # also collect per-layer attention here.
+        captured["h"] = None
+        handle = capture_module.register_forward_pre_hook(_pre_hook)
+        try:
+            with torch.no_grad():
+                if is_hybrid:
+                    _, _, teacher_attns = teacher(
+                        batch, dist_masks_b, node_masks_b,
+                        proxy_embeddings=best_proxies,
+                        precomputed_dense=(dense_x, dense_mask),
+                        precomputed_gred=h_gred,
+                        return_attention=True,
+                    )
+                else:
+                    _, _, teacher_attns = teacher(
+                        batch, proxy_embeddings=best_proxies,
+                        precomputed_dense=(dense_x, dense_mask),
+                        return_attention=True)
+        finally:
+            handle.remove()
 
-        # Save per-graph attention targets (only distilled layers, only real nodes)
+        # The captured tensor lives in the "post-proxy, pre-transformer-attn"
+        # space and has shape (B, max_N, d). The hybrid path may also include
+        # extra proxy tokens when the N+M concat branch is taken; slice to
+        # max_N (the real-node region) here, since we only save post_emb for
+        # the n_i real nodes per graph anyway.
+        post_dense_x = captured["h"]
+        if post_dense_x is None:
+            raise RuntimeError(
+                "Forward pre-hook did not capture h — the chosen capture "
+                "module didn't run. Check teacher architecture.")
+        max_N = dense_x.shape[1]
+        if post_dense_x.shape[1] > max_N:
+            post_dense_x = post_dense_x[:, :max_N, :]
+        # pre_dense_x is the encoder-output reference (saved for completeness;
+        # not currently used by the training loop but useful for debugging).
+        pre_dense_x = dense_x
+
+        # Save per-graph targets (real nodes only).
         for i in range(B):
             n_i = int(dense_mask[i].sum().item())
-            graph_attns = []
-            for layer_idx in distill_layer_indices:
-                # Extract attention for real nodes only: (H, n_i, n_i)
-                attn_i = teacher_attns[layer_idx][i, :, :n_i, :n_i].cpu()
-                graph_attns.append(attn_i)
+            if teacher_attns is not None:
+                graph_attns = []
+                for layer_idx in distill_layer_indices:
+                    attn_i = teacher_attns[layer_idx][i, :, :n_i, :n_i].cpu()
+                    graph_attns.append(attn_i)
+            else:
+                # Hybrid: no per-layer attention to save.
+                graph_attns = []
+
+            post_emb_i = post_dense_x[i, :n_i].detach().cpu()
+            pre_emb_i = pre_dense_x[i, :n_i].detach().cpu()
 
             all_targets.append({
                 "sample_idx": graphs_processed + i,
                 "num_nodes": n_i,
-                "attn_targets": graph_attns,  # list of (H, n_i, n_i) tensors
+                "attn_targets": graph_attns,  # list of (H, n_i, n_i) — empty for hybrid
+                "post_emb": post_emb_i,       # (n_i, d) post-proxy, pre-attn target
+                "pre_emb": pre_emb_i,
                 "base_loss": float(base_loss[i]),
                 "opt_loss": float(opt_loss[i]),
             })
@@ -733,14 +934,12 @@ def _extract_attention_for_loader(teacher, loader, args, distill_layer_indices,
 
 def run_extraction(args):
     backbone = getattr(args, 'backbone', 'vanilla_gt')
-    if backbone != "vanilla_gt":
-        print(f"  NOTE: backbone={backbone} but extraction always uses "
-              f"GraphTransformerWithCrossAttn (vanilla GT) as teacher for "
-              f"attention target extraction.", flush=True)
+    is_hybrid = (backbone == "hybrid")
 
     extract_splits = getattr(args, 'extract_splits', 'train')
     print("=" * 60)
     print("Phase 1: Extract Attention Targets")
+    print(f"  backbone={backbone}")
     print(f"  model_path={args.model_path}")
     print(f"  proxy_opt_steps={args.proxy_opt_steps} (max)")
     print(f"  extract_rel_threshold={args.extract_rel_threshold} "
@@ -748,10 +947,11 @@ def run_extraction(args):
     print(f"  proxy_init_jitter={args.proxy_init_jitter}")
     print(f"  num_proxies={args.num_proxies}")
     print(f"  proxy_mmd_lambda={args.proxy_mmd_lambda}")
-    print(f"  num_cross_layers={args.num_cross_layers}")
-    print(f"  use_proxy_self_attn={args.use_proxy_self_attn}")
-    print(f"  use_parameter_free_proxy="
-          f"{getattr(args, 'use_parameter_free_proxy', True)}")
+    if not is_hybrid:
+        print(f"  num_cross_layers={args.num_cross_layers}")
+        print(f"  use_proxy_self_attn={args.use_proxy_self_attn}")
+        print(f"  use_parameter_free_proxy="
+              f"{getattr(args, 'use_parameter_free_proxy', True)}")
     print(f"  distill_layers={args.distill_layers}")
     print(f"  extract_splits={extract_splits}")
     print("=" * 60)
@@ -774,13 +974,20 @@ def run_extraction(args):
     if args.phase != "pretrain":
         ckpt = torch.load(args.model_path, map_location=args.device, weights_only=True)
 
-    teacher = GraphTransformerWithCrossAttn(
-        num_layers=args.num_layers, num_heads=args.num_heads,
-        hidden_dim=args.hidden_dim, output_dim=args.output_dim,
-        dropout=args.dropout, num_cross_layers=args.num_cross_layers,
-        use_proxy_self_attn=args.use_proxy_self_attn,
-        use_parameter_free_proxy=getattr(args, 'use_parameter_free_proxy', True),
-    ).to(args.device)
+    # Build the teacher to match args.backbone. The teacher's "edge" over the
+    # student is per-sample proxy optimization, NOT a different architecture
+    # — so a hybrid teacher distills hybrid students, vanilla_gt teacher
+    # distills vanilla_gt students.
+    if is_hybrid:
+        teacher = build_model(args).to(args.device)
+    else:
+        teacher = GraphTransformerWithCrossAttn(
+            num_layers=args.num_layers, num_heads=args.num_heads,
+            hidden_dim=args.hidden_dim, output_dim=args.output_dim,
+            dropout=args.dropout, num_cross_layers=args.num_cross_layers,
+            use_proxy_self_attn=args.use_proxy_self_attn,
+            use_parameter_free_proxy=getattr(args, 'use_parameter_free_proxy', True),
+        ).to(args.device)
 
     pretrained_state = ckpt["model_state"]
     model_state = teacher.state_dict()
@@ -790,15 +997,30 @@ def run_extraction(args):
             model_state[k] = v
             loaded_keys.append(k)
     teacher.load_state_dict(model_state)
-    print(f"  Loaded {len(loaded_keys)} pretrained keys, "
-          f"cross-attn layers randomly initialized")
+    if is_hybrid:
+        print(f"  Loaded {len(loaded_keys)} pretrained keys (hybrid teacher)")
+    else:
+        print(f"  Loaded {len(loaded_keys)} pretrained keys, "
+              f"cross-attn layers randomly initialized")
 
     for p in teacher.parameters():
         p.requires_grad_(False)
     teacher.eval()
 
-    # Parse distill layers
-    if args.distill_layers == "all":
+    # Parse distill layers. For vanilla_gt these index into teacher.layers
+    # (length = args.num_layers). For hybrid these index into
+    # teacher.transformer_layers (length = args.num_transformer_layers).
+    if is_hybrid:
+        num_tf_layers = getattr(args, "num_transformer_layers", None)
+        if num_tf_layers is None:
+            raise ValueError(
+                "Hybrid backbone requires args.num_transformer_layers to "
+                "parse --distill_layers.")
+        if args.distill_layers == "all":
+            distill_layer_indices = list(range(num_tf_layers))
+        else:
+            distill_layer_indices = [int(x) for x in args.distill_layers.split(",")]
+    elif args.distill_layers == "all":
         distill_layer_indices = list(range(args.num_layers))
     else:
         distill_layer_indices = [int(x) for x in args.distill_layers.split(",")]
@@ -824,13 +1046,14 @@ def run_extraction(args):
     for split_name, loader, _ds, split_save_path in splits_to_run:
         sp, all_t = _extract_attention_for_loader(
             teacher, loader, args, distill_layer_indices,
-            split_save_path, split_name=split_name)
+            split_save_path, split_name=split_name, backbone=backbone)
         save_paths[split_name] = sp
         if split_name == "train":
             train_targets_for_sanity = all_t
 
-    # Quick sanity check (train split only): teacher vs vanilla attention
-    if train_targets_for_sanity is not None:
+    # Quick sanity check (train split only, vanilla_gt only): teacher vs vanilla attention.
+    # Hybrid teacher doesn't expose per-layer attention so we skip this check.
+    if train_targets_for_sanity is not None and not is_hybrid:
         print("\nSanity check (train): attention difference (teacher vs vanilla)...")
         attn_diffs = []
         graph_counter = 0
@@ -906,6 +1129,33 @@ def load_attn_weights(path):
         data = pickle.load(f)
     return {t["sample_idx"]: reduce_attn_to_weights(t["attn_targets"])
             for t in data["targets"]}
+
+
+def reduce_student_attn_to_weights(student_attns, max_N):
+    """Batched analogue of ``reduce_attn_to_weights`` for student attention.
+
+    The student forward returns a list of per-transformer-layer attention
+    tensors (B, H, N_aug, N_aug). For self-attention-weighted GRED we want a
+    single (B, max_N, max_N) weight matrix matching the shape produced by
+    ``collate_gred_with_attn_weights``. Reduction:
+      - take the LAST transformer layer
+      - slice to the real-node region (first ``max_N`` rows/cols), so the
+        N+M-concat proxy branch's proxy tokens are dropped
+      - max over heads
+      - detach (these weights are used as a multiplicative coefficient on
+        GRED aggregation; gradient should flow through how they're CONSUMED
+        in pass B, not how they were PRODUCED in pass A)
+
+    Args:
+        student_attns: list of (B, H, N_aug, N_aug) tensors.
+        max_N: real-node max-N for the batch (i.e. ``dense_x.shape[1]``).
+    Returns:
+        (B, max_N, max_N) tensor.
+    """
+    last = student_attns[-1]                # (B, H, N_aug, N_aug)
+    if last.shape[-1] > max_N:
+        last = last[:, :, :max_N, :max_N]
+    return last.max(dim=1).values.detach()  # (B, max_N, max_N)
 
 
 class DistMaskWithAttnWeights(Dataset):
@@ -988,16 +1238,24 @@ class AttnTargetDataset(Dataset):
         # opt_loss: scalar — extraction proxy-optimized BCE loss for this sample.
         #           Used at training time to filter samples whose extraction
         #           didn't converge below distill_loss_threshold.
+        # post_emb: (n, d) post-routing teacher node embedding (target for the
+        #           latent-embedding flow-matching distillation). Older pickles
+        #           that pre-date the latent-embedding extraction step won't have
+        #           this key — fall back to a zero tensor of the right size so
+        #           the dataset still works (the latent-embedding aux loss must
+        #           be turned off in that case).
         attn_weights = reduce_attn_to_weights(target["attn_targets"])
         opt_loss = target.get("opt_loss", 0.0)
+        post_emb = target.get("post_emb", None)
         return (graph, target["attn_targets"], target["num_nodes"],
-                attn_weights, opt_loss)
+                attn_weights, opt_loss, post_emb)
 
 
 def collate_attn_targets(batch):
     """
     Collate graphs + variable-size attention targets + reduced (n, n) weights
-    + per-sample extraction opt_loss. Pads everything to max_N in the batch.
+    + per-sample extraction opt_loss + post-routing node embedding targets.
+    Pads everything to max_N in the batch.
 
     Returns:
         pyg_batch:        PyG Batch
@@ -1005,9 +1263,15 @@ def collate_attn_targets(batch):
         attn_masks:       (B, max_N) bool — True for real nodes
         padded_w:         (B, max_N, max_N) reduced weight matrix per graph
         opt_loss_tensor:  (B,) extraction opt_loss per sample (for sample_mask)
+        padded_post_emb:  (B, max_N, d) post-routing teacher node embeddings
+                          (zeros where post_emb wasn't saved by the extractor).
+        post_emb_present: (B,) bool — True if this sample has a real post_emb
+                          target (i.e. extractor saved one); used to gate the
+                          latent-embedding distillation loss per-sample.
     """
     import torch_geometric
-    graphs, attn_list, num_nodes_list, weight_list, opt_losses = zip(*batch)
+    (graphs, attn_list, num_nodes_list, weight_list,
+     opt_losses, post_emb_list) = zip(*batch)
 
     pyg_batch = torch_geometric.data.Batch.from_data_list(list(graphs))
     B = len(graphs)
@@ -1021,14 +1285,29 @@ def collate_attn_targets(batch):
     padded_w = torch.zeros(B, max_N, max_N)
     opt_loss_tensor = torch.tensor(opt_losses, dtype=torch.float32)  # (B,)
 
+    # Determine the embedding dim from any present post_emb. If none of the
+    # samples have one, padded_post_emb is shape (B, max_N, 0) — but in that
+    # case the caller should not enable latent-embedding distillation.
+    d_post = 0
+    for pe in post_emb_list:
+        if pe is not None:
+            d_post = pe.shape[-1]
+            break
+    padded_post_emb = torch.zeros(B, max_N, d_post)
+    post_emb_present = torch.zeros(B, dtype=torch.bool)
+
     for i in range(B):
         n = num_nodes_list[i]
         attn_masks[i, :n] = True
         for l in range(num_layers):
             padded_attns[i, l, :, :n, :n] = attn_list[i][l]
         padded_w[i, :n, :n] = weight_list[i]
+        if post_emb_list[i] is not None and d_post > 0:
+            padded_post_emb[i, :n, :] = post_emb_list[i]
+            post_emb_present[i] = True
 
-    return pyg_batch, padded_attns, attn_masks, padded_w, opt_loss_tensor
+    return (pyg_batch, padded_attns, attn_masks, padded_w,
+            opt_loss_tensor, padded_post_emb, post_emb_present)
 
 
 # ================================================================
@@ -1138,47 +1417,323 @@ def attention_distillation_loss(student_attns, teacher_attns_padded, mask,
 
 
 # ================================================================
+# LATENT EMBEDDING FLOW-MATCHING DENOISER
+# ================================================================
+#
+# Companion auxiliary head for distilling teacher post-routing node embeddings
+# into the student. Inspired by DiffGraph (arXiv 2501.02313): treat the gap
+# between the student's pre-routing embedding and the teacher's post-routing
+# embedding as noise to be removed via a learnt vector field.
+#
+# Reuses the structure of FlowMatchingGenerator from generators.py
+# (sinusoidal time embedding + denoiser layers with time conditioning,
+# self-/cross-attention, FFN), but operates on per-node embeddings of
+# variable length instead of a fixed proxy bundle, and uses self-attention on
+# the noisy node tokens plus cross-attention to the student's pre-routing
+# embeddings as the conditioning signal.
+#
+# Training loss: conditional flow matching (CFM)
+#   t ~ U(0, 1)
+#   z_0 ~ N(0, I)
+#   x_1 = teacher post-routing embedding (target)
+#   x_t = (1 - t) * z_0 + t * x_1
+#   v_target = x_1 - z_0
+#   loss   = MSE( v_theta(x_t, t | s_student), v_target )
+# Optionally with classifier-free guidance dropout: with probability
+# ``uncond_train_prob`` the conditioning is replaced with zeros so the same
+# network learns both conditional and unconditional vector fields.
+
+class _NodeDenoiserLayer(nn.Module):
+    """Single denoiser layer for per-node flow matching.
+
+    Position-wise structure: only cross-attention from each noisy token to the
+    student conditioning, then a position-wise FFN. There is intentionally NO
+    self-attention over noisy tokens — letting noisy positions attend to other
+    noisy positions just spreads noise across the sequence with no clean
+    reference to recover from. All node-to-node interaction structure must come
+    through the conditioning (which itself was produced by a GNN/transformer
+    encoder that already mixed neighborhood information). Time embedding is
+    added additively to x_t at the start of each layer.
+    """
+    def __init__(self, dim, num_heads, dropout):
+        super().__init__()
+        self.cross_attn = nn.MultiheadAttention(
+            dim, num_heads, dropout=dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim * 4, dim),
+        )
+
+    def forward(self, x_t, t_emb, cond, key_padding_mask):
+        """
+        Args:
+            x_t: (B, N, dim) noisy node tokens.
+            t_emb: (B, 1, dim) per-batch time embedding (broadcast over N).
+            cond: (B, N, dim) student conditioning (pre-routing node embedding).
+            key_padding_mask: (B, N) — True = padding (passed straight to MHA).
+        """
+        x_t = x_t + t_emb
+
+        # Cross-attention from each noisy token to the (clean) conditioning.
+        # Q = noisy token, K/V = student conditioning.
+        normed = self.norm1(x_t)
+        ca, _ = self.cross_attn(
+            normed, cond, cond, key_padding_mask=key_padding_mask)
+        x_t = x_t + ca
+
+        # Position-wise FFN — no cross-position mixing on the noisy side.
+        x_t = x_t + self.ffn(self.norm2(x_t))
+        return x_t
+
+
+class NodeEmbeddingFlowDenoiser(nn.Module):
+    """Flow-matching denoiser over per-node embeddings.
+
+    Input: padded student node embeddings (B, N, d_node), boolean mask (B, N),
+           and optionally targets (B, N, d_node) for the CFM training loss.
+    Output:
+        - During training (targets given): predicted vector field v (B, N, d_node)
+          and a CFM loss scalar.
+        - During inference (targets None): generated denoised embeddings via
+          Euler integration from N(0, I), and aux_loss=None.
+    """
+    def __init__(self, node_dim, denoiser_dim=128, num_layers=4, num_heads=8,
+                 dropout=0.1, euler_steps=4, uncond_train_prob=0.1,
+                 guidance_scale_default=1.0):
+        super().__init__()
+        self.node_dim = node_dim
+        self.denoiser_dim = denoiser_dim
+        self.euler_steps = max(1, int(euler_steps))
+        self.uncond_train_prob = float(uncond_train_prob)
+        self.guidance_scale_default = float(guidance_scale_default)
+
+        self.input_proj = (nn.Linear(node_dim, denoiser_dim)
+                           if node_dim != denoiser_dim else nn.Identity())
+        self.cond_proj = (nn.Linear(node_dim, denoiser_dim)
+                          if node_dim != denoiser_dim else nn.Identity())
+        self.output_proj = (nn.Linear(denoiser_dim, node_dim)
+                            if node_dim != denoiser_dim else nn.Identity())
+
+        self.time_mlp = nn.Sequential(
+            nn.Linear(denoiser_dim, denoiser_dim),
+            nn.GELU(),
+            nn.Linear(denoiser_dim, denoiser_dim),
+        )
+
+        self.layers = nn.ModuleList([
+            _NodeDenoiserLayer(denoiser_dim, num_heads, dropout)
+            for _ in range(num_layers)
+        ])
+
+    def _sinusoidal_time(self, t):
+        """Sinusoidal embedding for scalar time. t: (B,) -> (B, denoiser_dim)."""
+        half = self.denoiser_dim // 2
+        freqs = torch.exp(
+            -math.log(10000.0)
+            * torch.arange(half, device=t.device, dtype=t.dtype) / half
+        )
+        args = t.unsqueeze(-1) * freqs.unsqueeze(0)  # (B, half)
+        emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+        # If denoiser_dim is odd, pad the last dim (rare but defensive).
+        if emb.shape[-1] < self.denoiser_dim:
+            emb = F.pad(emb, (0, self.denoiser_dim - emb.shape[-1]))
+        return emb
+
+    def _denoise(self, x_t, t, cond, mask):
+        """Predict vector field v(x_t, t | cond).
+
+        Args:
+            x_t: (B, N, node_dim) — noisy embeddings.
+            t: (B,) — time values in [0, 1].
+            cond: (B, N, node_dim) — student conditioning (zeros for the
+                  unconditional CFG branch).
+            mask: (B, N) — True = real node, False = padding.
+        Returns:
+            v: (B, N, node_dim).
+        """
+        x_proj = self.input_proj(x_t)
+        c_proj = self.cond_proj(cond)
+
+        t_emb = self._sinusoidal_time(t)              # (B, denoiser_dim)
+        t_emb = self.time_mlp(t_emb).unsqueeze(1)     # (B, 1, denoiser_dim)
+
+        key_padding_mask = ~mask  # MHA expects True = ignore
+
+        h = x_proj
+        for layer in self.layers:
+            h = layer(h, t_emb, c_proj, key_padding_mask)
+
+        return self.output_proj(h)
+
+    def _null_condition(self, cond):
+        return torch.zeros_like(cond)
+
+    def forward(self, cond, mask, targets=None, run_uncond=None,
+                guidance_scale=None):
+        """
+        Conditional flow matching.
+
+        - Training (targets given): returns (proxy denoised sample, cfm_loss).
+        - Inference (targets None): returns (denoised sample, None).
+        """
+        B, N, d = cond.shape
+        device = cond.device
+
+        if targets is not None:
+            t = torch.rand(B, device=device)              # (B,)
+            z_0 = torch.randn(B, N, d, device=device)
+            t_b = t.view(B, 1, 1)
+            x_t = (1 - t_b) * z_0 + t_b * targets
+            u = targets - z_0                              # target vector field
+
+            v_cond = self._denoise(x_t, t, cond, mask)
+            # Mask the loss to real nodes only, per-entry MSE.
+            entry_mask = mask.unsqueeze(-1).float()        # (B, N, 1)
+            sq_err_cond = ((v_cond - u) ** 2) * entry_mask
+            denom = entry_mask.sum().clamp_min(1.0) * d
+            cond_loss = sq_err_cond.sum() / denom
+            cfm_loss = cond_loss
+
+            if run_uncond is None:
+                run_uncond = torch.rand(1).item() < self.uncond_train_prob
+            if run_uncond:
+                v_free = self._denoise(
+                    x_t, t, self._null_condition(cond), mask)
+                sq_err_free = ((v_free - u) ** 2) * entry_mask
+                uncond_loss = sq_err_free.sum() / denom
+                cfm_loss = 0.5 * (cond_loss + uncond_loss)
+
+            with torch.no_grad():
+                sample = self._euler_sample(
+                    cond, mask,
+                    guidance_scale=guidance_scale or 1.0)
+            return sample, cfm_loss
+
+        if guidance_scale is None:
+            guidance_scale = self.guidance_scale_default
+        sample = self._euler_sample(cond, mask, guidance_scale=guidance_scale)
+        return sample, None
+
+    def _euler_sample(self, cond, mask, guidance_scale=1.0):
+        """Generate denoised node embeddings via Euler integration t: 0 -> 1."""
+        B, N, d = cond.shape
+        device = cond.device
+        dt = 1.0 / self.euler_steps
+        z = torch.randn(B, N, d, device=device)
+
+        for step in range(self.euler_steps):
+            t_val = step * dt
+            t = torch.full((B,), t_val, device=device)
+            v_cond = self._denoise(z, t, cond, mask)
+            if guidance_scale == 1.0:
+                v = v_cond
+            else:
+                v_free = self._denoise(
+                    z, t, self._null_condition(cond), mask)
+                v = v_free + guidance_scale * (v_cond - v_free)
+            z = z + dt * v
+        # Zero out padded positions so downstream consumers don't see noise there.
+        z = z * mask.unsqueeze(-1).float()
+        return z
+
+    def forward_differentiable(self, cond, mask, euler_steps=None):
+        """Differentiable single-/few-step generation for end-to-end finetuning.
+
+        Same as ``_euler_sample`` but gradients flow back through v_theta. Use
+        only with small ``euler_steps`` to keep the unrolled graph manageable.
+        """
+        if euler_steps is None:
+            euler_steps = self.euler_steps
+        euler_steps = max(1, int(euler_steps))
+        B, N, d = cond.shape
+        device = cond.device
+        dt = 1.0 / euler_steps
+        z = torch.randn(B, N, d, device=device)
+        for step in range(euler_steps):
+            t_val = step * dt
+            t = torch.full((B,), t_val, device=device)
+            v = self._denoise(z, t, cond, mask)
+            z = z + dt * v
+        return z * mask.unsqueeze(-1).float()
+
+
+# ================================================================
 # PHASE 2: TRAIN WITH DISTILLATION
 # ================================================================
 
 def run_training(args):
     backbone = getattr(args, 'backbone', 'vanilla_gt')
-    is_gred = backbone in ("gred", "hybrid")
-    use_distillation = (backbone == "vanilla_gt")
+    is_hybrid = (backbone == "hybrid")
 
     targets_path = os.path.join(args.save_dir, "attn_targets.pkl")
 
-    if use_distillation:
-        assert os.path.exists(targets_path), \
-            f"Attention targets not found at {targets_path}. Run 'extract' phase first."
-        # Load target metadata
+    # Distillation availability (per supervision channel):
+    #   * Attention KL/MSE  : both backbones (vanilla_gt indexes
+    #                          teacher.layers; hybrid indexes
+    #                          teacher.transformer_layers, which now exposes
+    #                          its softmax attention via return_attention).
+    #   * Latent-embedding  : both backbones, when enabled and post_emb is
+    #     CFM (post_emb)      saved by the extractor. Hybrid student uses
+    #                          post-GRED features as conditioning; vanilla_gt
+    #                          student uses raw encoder output.
+    use_distillation = os.path.exists(targets_path)
+    if not use_distillation:
+        print(f"  NOTE: no attention targets at {targets_path} — training "
+              f"with task loss only.", flush=True)
+        distill_layer_indices = []
+    else:
         with open(targets_path, "rb") as f:
             target_data = pickle.load(f)
         distill_layer_indices = target_data["distill_layer_indices"]
-    else:
-        distill_layer_indices = []
-        print(f"  NOTE: backbone={backbone} — no attention distillation "
-              f"(GRED has no self-attention). Training with task loss only.",
-              flush=True)
 
-    use_attn_weighting = (backbone in ("gred", "hybrid")
+    # Attention-KL / MSE losses are only meaningful when the teacher actually
+    # produced per-layer attention targets.
+    has_attn_targets = bool(distill_layer_indices)
+    use_attn_distill = use_distillation and has_attn_targets
+
+    use_attn_weighting = (is_hybrid
                           and getattr(args, 'use_attn_weighting', False))
+    use_self_attn_weighting = (is_hybrid
+                               and getattr(args, 'use_self_attn_weighting', False))
+    if use_attn_weighting and use_self_attn_weighting:
+        raise ValueError(
+            "--use_attn_weighting (oracle, from disk) and "
+            "--use_self_attn_weighting (student's own attention) are "
+            "mutually exclusive — pick one source for the GRED weights.")
+    if use_self_attn_weighting and not use_attn_distill:
+        print(
+            "  WARNING: --use_self_attn_weighting without attention KL/MSE "
+            "distillation. The student's transformer attention is not being "
+            "supervised against the teacher's optimal attention, so the "
+            "weights routed back into GRED will be near-random.")
 
     print("=" * 60)
     print("Phase 2: Train with Attention Distillation")
     print(f"  backbone={backbone}")
-    if use_distillation:
+    if use_attn_distill:
         print(f"  distill_weight={args.distill_weight}  (KL term)")
         print(f"  mse_weight={args.mse_weight}  (per-entry MSE term)")
         print(f"  temperature={args.temperature}")
         print(f"  distill_layers={distill_layer_indices}")
+    elif use_distillation and not has_attn_targets:
+        print(f"  attention KL/MSE: disabled (no per-layer attention targets "
+              f"saved in {targets_path})")
+    if use_distillation:
         print(f"  distill_loss_threshold={args.distill_loss_threshold}")
+        print(f"  use_latent_embedding_distill="
+              f"{getattr(args, 'use_latent_embedding_distill', False)}")
+        if getattr(args, 'use_latent_embedding_distill', False):
+            print(f"  latent_distill_weight="
+                  f"{getattr(args, 'latent_distill_weight', 0.0)}  (CFM term)")
         print(f"  targets from: {targets_path}")
     else:
         print(f"  distill_weight=N/A (task-only)")
-        print(f"  temperature=N/A")
-        print(f"  distill_layers=N/A")
     print(f"  use_attn_weighting={use_attn_weighting}")
+    print(f"  use_self_attn_weighting={use_self_attn_weighting}")
     print("=" * 60)
 
     # Standard loaders for val/test
@@ -1188,13 +1743,13 @@ def run_training(args):
 
     train_loader_gred_default, val_loader, test_loader, train_ds, _, _ = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
-        use_dist_masks=is_gred, max_hops=max_hops,
+        use_dist_masks=is_hybrid, max_hops=max_hops,
         dist_mask_workers=getattr(args, 'dist_mask_workers', 8),
         use_lap_pe=use_lap_pe, lap_pe_dim=lap_pe_dim,
     )
 
     if use_distillation:
-        # Distillation train loader (pairs graphs with attention targets)
+        # Distillation train loader (pairs graphs with attention/embedding targets)
         distill_ds = AttnTargetDataset(train_ds, targets_path)
         distill_loader = DataLoader(
             distill_ds, batch_size=args.batch_size, shuffle=True,
@@ -1247,18 +1802,10 @@ def run_training(args):
         else:
             train_loader_gred = train_loader_gred_default
 
-    # Student model
+    # Student model — same architecture as the teacher (the teacher's edge is
+    # per-sample proxy optimization, not a different model).
     ckpt = torch.load(args.model_path, map_location=args.device, weights_only=True)
-
-    if backbone == "vanilla_gt":
-        student = GraphTransformerWithCrossAttn(
-            num_layers=args.num_layers, num_heads=args.num_heads,
-            hidden_dim=args.hidden_dim, output_dim=args.output_dim,
-            dropout=args.dropout,
-            use_parameter_free_proxy=getattr(args, 'use_parameter_free_proxy', True),
-        ).to(args.device)
-    else:
-        student = build_model(args).to(args.device)
+    student = build_model(args).to(args.device)
 
     pretrained_state = ckpt["model_state"]
     model_state_s = student.state_dict()
@@ -1269,6 +1816,40 @@ def run_training(args):
             loaded_keys.append(k)
     student.load_state_dict(model_state_s)
     print(f"  Loaded {len(loaded_keys)}/{len(model_state_s)} keys from checkpoint")
+
+    # ---- Latent embedding distillation: denoiser ----
+    use_latent_embedding_distill = (
+        use_distillation
+        and getattr(args, "use_latent_embedding_distill", False)
+        and getattr(args, "latent_distill_weight", 0.0) > 0
+    )
+    denoiser = None
+    if use_latent_embedding_distill:
+        # Resolve denoiser hyperparams: None defaults inherit from main model.
+        d_dim = getattr(args, "denoiser_dim", None) or args.hidden_dim
+        d_layers = getattr(args, "denoiser_layers", 4) or 4
+        d_heads = getattr(args, "denoiser_heads", None) or args.num_heads
+        d_drop = getattr(args, "denoiser_dropout", None)
+        if d_drop is None:
+            d_drop = args.dropout
+        d_euler = getattr(args, "denoiser_euler_steps", 4) or 4
+        denoiser = NodeEmbeddingFlowDenoiser(
+            node_dim=args.hidden_dim,
+            denoiser_dim=d_dim,
+            num_layers=d_layers,
+            num_heads=d_heads,
+            dropout=d_drop,
+            euler_steps=d_euler,
+            uncond_train_prob=getattr(args, "latent_uncond_train_prob", 0.1),
+            guidance_scale_default=getattr(args, "latent_guidance_scale", 1.0),
+        ).to(args.device)
+        print(f"  Latent embedding denoiser: "
+              f"node_dim={args.hidden_dim}  "
+              f"dim={d_dim}  layers={d_layers}  heads={d_heads}  "
+              f"euler_steps={d_euler}  "
+              f"latent_distill_weight={args.latent_distill_weight}")
+        print(f"  Latent denoiser parameters: "
+              f"{sum(p.numel() for p in denoiser.parameters()):,}")
 
     # Baseline
     print("\nBaseline (pretrained, no distillation):")
@@ -1286,9 +1867,27 @@ def run_training(args):
             param.requires_grad_(False)
     print(f"  Student trainable params: {sum(p.numel() for p in trainable_params):,}")
 
+    # Denoiser params train alongside the student in the same optimizer.
+    # They use the same lr by default; if the user wants a separate lr they can
+    # use --denoiser_lr (handled below via per-param-group config).
+    denoiser_params = []
+    if denoiser is not None:
+        for p in denoiser.parameters():
+            p.requires_grad_(True)
+            denoiser_params.append(p)
+
     active_loader = distill_loader if use_distillation else train_loader_gred
-    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr,
-                                   weight_decay=args.weight_decay)
+    if denoiser_params:
+        denoiser_lr = getattr(args, "denoiser_lr", None) or args.lr
+        optimizer = torch.optim.AdamW([
+            {"params": trainable_params, "lr": args.lr,
+             "weight_decay": args.weight_decay},
+            {"params": denoiser_params, "lr": denoiser_lr,
+             "weight_decay": args.weight_decay},
+        ])
+    else:
+        optimizer = torch.optim.AdamW(trainable_params, lr=args.lr,
+                                       weight_decay=args.weight_decay)
     total_steps = max(1, len(active_loader) * args.max_epochs)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=total_steps, eta_min=1e-7)
@@ -1304,38 +1903,133 @@ def run_training(args):
 
         train_losses, task_losses_log, distill_losses_log = [], [], []
         kl_losses_log, mse_losses_log = [], []
+        cfm_losses_log = []
         all_preds, all_labels = [], []
 
         if use_distillation:
-            # --- Vanilla GT path: distillation + task loss ---
-            # collate_attn_targets returns 5-tuple. The 4th value (attn_weights)
-            # is unused on this path — it's only consumed by the GRED/hybrid branch.
-            # The 5th value (opt_loss) drives sample-level distillation masking.
-            for batch_idx, (pyg_batch, teacher_attns_padded, attn_masks,
-                            _attn_w, opt_losses) in enumerate(active_loader):
+            # --- Distillation path: attention KL/MSE (both backbones, when
+            #     attention targets were extracted) + latent-embedding CFM
+            #     (both backbones) + task loss ---
+            # collate_attn_targets returns a 7-tuple:
+            #   pyg_batch, teacher_attns_padded, attn_masks, _attn_w,
+            #   opt_losses, post_emb_padded, post_emb_present
+            # When no attention targets were saved (has_attn_targets=False),
+            # teacher_attns_padded/attn_masks are zero-shaped placeholders
+            # and use_attn_distill is False.
+            for batch_idx, batch_tuple in enumerate(active_loader):
+                (pyg_batch, teacher_attns_padded, attn_masks,
+                 _attn_w, opt_losses,
+                 post_emb_padded, post_emb_present) = batch_tuple
                 pyg_batch = pyg_batch.to(args.device)
                 teacher_attns_padded = teacher_attns_padded.to(args.device)
                 attn_masks = attn_masks.to(args.device)
-                opt_losses = opt_losses.to(args.device)  # (B,)
+                opt_losses = opt_losses.to(args.device)
+                post_emb_padded = post_emb_padded.to(args.device)
+                post_emb_present = post_emb_present.to(args.device)
 
-                # Build per-sample mask: only distill from samples with good extraction
-                sample_mask = (opt_losses < args.distill_loss_threshold)  # (B,) bool
+                # Per-sample mask: only distill from samples with good extraction.
+                sample_mask = (opt_losses < args.distill_loss_threshold)
                 num_active = int(sample_mask.sum().item())
 
                 optimizer.zero_grad()
 
-                # Student forward (no proxies)
-                logits, _, student_attns = student(pyg_batch, return_attention=True)
+                # Compute student forward + the conditioning to use for the
+                # latent-embedding denoiser. Conditioning differs by backbone:
+                #   vanilla_gt: raw encoder output (encode_dense).
+                #   hybrid:     post-GRED features (encode_gred(encode_dense)).
+                # In both cases conditioning is taken from the SAME stage that
+                # the teacher's post_emb sits one routing-step downstream of —
+                # so the denoiser learns to traverse the proxy-routing gap.
+                dense_x_s, dense_mask_s = student.encode_dense(pyg_batch)
 
-                # Filter to distilled layers
-                student_attns_filtered = [student_attns[i] for i in distill_layer_indices]
+                if is_hybrid:
+                    dist_masks_b, node_masks_b = (
+                        _build_dist_and_node_masks_for_batch(
+                            pyg_batch, max_hops=max_hops, device=args.device)
+                    )
+                    # Whether we capture per-layer attention from the student.
+                    # Needed for the KL/MSE attention-distillation channel.
+                    # Always required when self-attn-weighting is on (pass B
+                    # also serves as pass A for the next training step's
+                    # eval — but here we capture it from pass B for the loss).
+                    need_attn = use_attn_distill or use_self_attn_weighting
+
+                    # ---- Pass A: optional student-self attention probe -----
+                    # When --use_self_attn_weighting is on, run a cheap no-grad
+                    # forward (no GRED weighting) to harvest the student's
+                    # transformer attention. Reduce to a (B, max_N, max_N)
+                    # weight matrix and feed it to GRED in pass B. The attention
+                    # is detached (see reduce_student_attn_to_weights) so
+                    # gradient flows only through pass B.
+                    self_attn_weights = None
+                    if use_self_attn_weighting:
+                        max_N_b = dense_x_s.shape[1]
+                        with torch.no_grad():
+                            cond_A = student.encode_gred(
+                                dense_x_s, dist_masks_b, node_masks_b)
+                            _, _, attns_A = student(
+                                pyg_batch, dist_masks_b, node_masks_b,
+                                precomputed_dense=(dense_x_s, dense_mask_s),
+                                precomputed_gred=cond_A,
+                                return_attention=True,
+                            )
+                        self_attn_weights = reduce_student_attn_to_weights(
+                            attns_A, max_N_b)
+
+                    # ---- Pass B: scored forward (with grad) ----------------
+                    if denoiser is not None:
+                        # Compute GRED once WITH grad — gradient from the CFM
+                        # loss should flow back through these layers so the
+                        # student's GRED is trained to produce features that
+                        # the denoiser can map onto the teacher target. Reuse
+                        # the result as precomputed_gred so the student.forward
+                        # path doesn't recompute it.
+                        cond_features = student.encode_gred(
+                            dense_x_s, dist_masks_b, node_masks_b,
+                            attn_weights=self_attn_weights)
+                        if need_attn:
+                            logits, _, student_attns = student(
+                                pyg_batch, dist_masks_b, node_masks_b,
+                                precomputed_dense=(dense_x_s, dense_mask_s),
+                                precomputed_gred=cond_features,
+                                return_attention=True)
+                        else:
+                            logits, _ = student(
+                                pyg_batch, dist_masks_b, node_masks_b,
+                                precomputed_dense=(dense_x_s, dense_mask_s),
+                                precomputed_gred=cond_features)
+                            student_attns = None
+                    else:
+                        cond_features = None
+                        # No denoiser: forward through student.forward, which
+                        # will run encode_gred internally with attn_weights.
+                        if need_attn:
+                            logits, _, student_attns = student(
+                                pyg_batch, dist_masks_b, node_masks_b,
+                                precomputed_dense=(dense_x_s, dense_mask_s),
+                                attn_weights=self_attn_weights,
+                                return_attention=True)
+                        else:
+                            logits, _ = student(
+                                pyg_batch, dist_masks_b, node_masks_b,
+                                precomputed_dense=(dense_x_s, dense_mask_s),
+                                attn_weights=self_attn_weights)
+                            student_attns = None
+                else:
+                    logits, _, student_attns = student(
+                        pyg_batch, precomputed_dense=(dense_x_s, dense_mask_s),
+                        return_attention=True)
+                    cond_features = dense_x_s if denoiser is not None else None
 
                 # Task loss
                 task_loss = loss_fn(logits, pyg_batch.y)
 
-                # Distillation loss against pre-extracted targets
-                # Only include for samples with extraction loss below threshold
-                if num_active > 0:
+                # Attention KL/MSE: both backbones, when attention targets
+                # were extracted and the student forward returned per-layer
+                # attention.
+                if use_attn_distill and num_active > 0 and student_attns is not None:
+                    student_attns_filtered = [
+                        student_attns[i] for i in distill_layer_indices]
                     kl_loss, mse_loss = attention_distillation_loss(
                         student_attns_filtered, teacher_attns_padded,
                         attn_masks, temperature=args.temperature,
@@ -1344,11 +2038,55 @@ def run_training(args):
                     kl_loss = torch.tensor(0.0, device=args.device)
                     mse_loss = torch.tensor(0.0, device=args.device)
 
+                # ----- Latent-embedding flow-matching loss -----
+                # Trains a denoiser to map student conditioning features to
+                # teacher post-proxy pre-attention embeddings via conditional
+                # flow matching. Restricted to samples whose extractor (a)
+                # saved a post_emb and (b) had opt_loss < distill_loss_threshold.
+                cfm_loss = torch.tensor(0.0, device=args.device)
+                if denoiser is not None and cond_features is not None:
+                    latent_active = sample_mask & post_emb_present
+                    if int(latent_active.sum().item()) > 0:
+                        # Align student's max_N (cond_features.shape[1]) with the
+                        # saved post_emb's max_N (post_emb_padded.shape[1]).
+                        max_N_s = cond_features.shape[1]
+                        max_N_t = post_emb_padded.shape[1]
+                        target_emb = post_emb_padded
+                        cfm_mask = attn_masks  # (B, max_N_t)
+                        if max_N_s != max_N_t:
+                            N = max(max_N_s, max_N_t)
+                            if cond_features.shape[1] < N:
+                                pad_n = N - cond_features.shape[1]
+                                cond_features = F.pad(
+                                    cond_features, (0, 0, 0, pad_n))
+                                dense_mask_s_pad = F.pad(
+                                    dense_mask_s, (0, pad_n), value=False)
+                            else:
+                                dense_mask_s_pad = dense_mask_s
+                            if target_emb.shape[1] < N:
+                                pad_n = N - target_emb.shape[1]
+                                target_emb = F.pad(
+                                    target_emb, (0, 0, 0, pad_n))
+                                cfm_mask = F.pad(
+                                    cfm_mask, (0, pad_n), value=False)
+                            cond_mask = dense_mask_s_pad & cfm_mask
+                        else:
+                            cond_mask = dense_mask_s & cfm_mask
+
+                        active_b = latent_active.unsqueeze(-1)
+                        cond_mask_active = cond_mask & active_b
+
+                        _, cfm_loss = denoiser(
+                            cond=cond_features, mask=cond_mask_active,
+                            targets=target_emb)
+
                 distill_loss = (args.distill_weight * kl_loss
-                                + args.mse_weight * mse_loss)
+                                + args.mse_weight * mse_loss
+                                + getattr(args, "latent_distill_weight", 0.0) * cfm_loss)
                 loss = task_loss + distill_loss
                 loss.backward()
-                nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
+                clip_params = trainable_params + denoiser_params
+                nn.utils.clip_grad_norm_(clip_params, args.grad_clip)
                 optimizer.step()
                 scheduler.step()
 
@@ -1357,13 +2095,14 @@ def run_training(args):
                 distill_losses_log.append(distill_loss.item())
                 kl_losses_log.append(kl_loss.item())
                 mse_losses_log.append(mse_loss.item())
+                cfm_losses_log.append(float(cfm_loss.item()))
                 all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
                 all_labels.append(pyg_batch.y.cpu().numpy())
         else:
-            # --- GRED/hybrid path: task loss only ---
+            # --- Task-only path (no extracted targets) ---
             for batch_data in active_loader:
                 attn_weights_batch = None
-                if is_gred:
+                if is_hybrid:
                     if use_attn_weighting:
                         (pyg_batch, dist_masks_batch, node_masks_batch,
                          attn_weights_batch) = batch_data
@@ -1378,14 +2117,38 @@ def run_training(args):
                     dist_masks_batch = None
                     node_masks_batch = None
 
+                # Self-attention-weighting: harvest student's own attention
+                # via a no-grad pass A, then use it as GRED weights in pass B.
+                self_attn_weights = None
+                if is_hybrid and use_self_attn_weighting:
+                    dense_x_s, dense_mask_s = student.encode_dense(pyg_batch)
+                    max_N_b = dense_x_s.shape[1]
+                    with torch.no_grad():
+                        cond_A = student.encode_gred(
+                            dense_x_s, dist_masks_batch, node_masks_batch)
+                        _, _, attns_A = student(
+                            pyg_batch, dist_masks_batch, node_masks_batch,
+                            precomputed_dense=(dense_x_s, dense_mask_s),
+                            precomputed_gred=cond_A,
+                            return_attention=True,
+                        )
+                    self_attn_weights = reduce_student_attn_to_weights(
+                        attns_A, max_N_b)
+
                 optimizer.zero_grad()
 
-                if is_gred and attn_weights_batch is not None:
+                if is_hybrid and attn_weights_batch is not None:
                     logits, _ = student(
                         pyg_batch, dist_masks_batch, node_masks_batch,
                         attn_weights=attn_weights_batch)
-                else:
+                elif is_hybrid and self_attn_weights is not None:
+                    logits, _ = student(
+                        pyg_batch, dist_masks_batch, node_masks_batch,
+                        attn_weights=self_attn_weights)
+                elif is_hybrid:
                     logits, _ = student(pyg_batch, dist_masks_batch, node_masks_batch)
+                else:
+                    logits, _ = student(pyg_batch)
                 task_loss = loss_fn(logits, pyg_batch.y)
 
                 task_loss.backward()
@@ -1405,15 +2168,17 @@ def run_training(args):
         mean_distill = float(np.mean(distill_losses_log))
         mean_kl = float(np.mean(kl_losses_log)) if kl_losses_log else 0.0
         mean_mse = float(np.mean(mse_losses_log)) if mse_losses_log else 0.0
+        mean_cfm = float(np.mean(cfm_losses_log)) if cfm_losses_log else 0.0
 
         val_ap = evaluate(student, val_loader, args)
         test_ap = evaluate(student, test_loader, args)
 
         elapsed = time.time() - epoch_start
         if use_distillation:
+            cfm_str = f" cfm={mean_cfm:.4f}" if denoiser is not None else ""
             print(f"Epoch {epoch:3d}/{args.max_epochs} [{elapsed:.1f}s] | "
                   f"task={mean_task:.4f} distill={mean_distill:.4f} "
-                  f"(kl={mean_kl:.4f} mse={mean_mse:.6f}) "
+                  f"(kl={mean_kl:.4f} mse={mean_mse:.6f}{cfm_str}) "
                   f"(thresh={args.distill_loss_threshold}) | "
                   f"train_AP={train_ap:.4f} val_AP={val_ap:.4f} test_AP={test_ap:.4f}",
                   flush=True)
@@ -1427,10 +2192,15 @@ def run_training(args):
             best_val_ap = val_ap
             best_epoch = epoch
             patience_counter = 0
-            torch.save({
+            ckpt_payload = {
                 "model_state": student.state_dict(),
                 "epoch": epoch, "val_ap": val_ap, "test_ap": test_ap,
-            }, os.path.join(args.save_dir, "attn_distill_best.pt"))
+            }
+            if denoiser is not None:
+                ckpt_payload["denoiser_state"] = denoiser.state_dict()
+            torch.save(
+                ckpt_payload,
+                os.path.join(args.save_dir, "attn_distill_best.pt"))
             print(f"  -> New best val_AP={val_ap:.4f} (test={test_ap:.4f})")
         else:
             patience_counter += 1
@@ -1450,10 +2220,12 @@ def run_training(args):
 def evaluate(model, loader, args):
     model.eval()
     backbone = getattr(args, 'backbone', 'vanilla_gt')
-    is_gred = backbone in ("gred", "hybrid")
+    is_hybrid = (backbone == "hybrid")
+    use_self_attn_weighting = (is_hybrid
+                               and getattr(args, 'use_self_attn_weighting', False))
     all_preds, all_labels = [], []
     for batch_data in loader:
-        if is_gred:
+        if is_hybrid:
             # Loader yields 3-tuple (no attn weights) or 4-tuple (with weights).
             if len(batch_data) == 4:
                 batch, dist_masks_batch, node_masks_batch, attn_weights_batch = batch_data
@@ -1468,6 +2240,25 @@ def evaluate(model, loader, args):
                 logits, _ = model(
                     batch, dist_masks_batch, node_masks_batch,
                     attn_weights=attn_weights_batch)
+            elif use_self_attn_weighting:
+                # Two-pass: pass A harvests student's own attention, pass B
+                # uses it as GRED weights. We're already inside torch.no_grad,
+                # so both passes are grad-free.
+                dense_x_s, dense_mask_s = model.encode_dense(batch)
+                max_N_b = dense_x_s.shape[1]
+                cond_A = model.encode_gred(
+                    dense_x_s, dist_masks_batch, node_masks_batch)
+                _, _, attns_A = model(
+                    batch, dist_masks_batch, node_masks_batch,
+                    precomputed_dense=(dense_x_s, dense_mask_s),
+                    precomputed_gred=cond_A,
+                    return_attention=True,
+                )
+                self_w = reduce_student_attn_to_weights(attns_A, max_N_b)
+                logits, _ = model(
+                    batch, dist_masks_batch, node_masks_batch,
+                    precomputed_dense=(dense_x_s, dense_mask_s),
+                    attn_weights=self_w)
             else:
                 logits, _ = model(batch, dist_masks_batch, node_masks_batch)
         else:
@@ -1495,8 +2286,9 @@ def main():
 
     # Backbone
     p.add_argument("--backbone", type=str, default="vanilla_gt",
-                   choices=["vanilla_gt", "gred", "hybrid"],
-                   help="Backbone architecture: vanilla_gt, gred, or hybrid")
+                   choices=["vanilla_gt", "hybrid"],
+                   help="Backbone architecture: vanilla_gt or hybrid. "
+                        "Pure-GRED is no longer supported.")
 
     # Model architecture
     p.add_argument("--hidden_dim", type=int, default=256)
@@ -1511,11 +2303,11 @@ def main():
     p.add_argument("--lap_pe_dim", type=int, default=8,
                    help="Number of Laplacian eigenvectors for positional encoding")
 
-    # GRED-specific
+    # GRED-specific (used only when --backbone hybrid)
     p.add_argument("--state_dim", type=int, default=88,
-                   help="LRU complex state dimension (GRED/hybrid only)")
+                   help="LRU complex state dimension (hybrid only)")
     p.add_argument("--num_gred_layers", type=int, default=8,
-                   help="Number of GRED layers (GRED/hybrid only)")
+                   help="Number of GRED layers (hybrid only)")
     p.add_argument("--num_transformer_layers", type=int, default=2,
                    help="Number of transformer layers for proxy integration (hybrid only)")
     p.add_argument("--gred_expand", type=int, default=1,
@@ -1588,13 +2380,72 @@ def main():
                         "opt_loss >= threshold are excluded from distillation (but "
                         "still contribute to task BCE loss).")
 
-    # Attention-weighted GRED aggregation (train phase, GRED/hybrid backbones)
+    # Attention-weighted GRED aggregation (train phase, hybrid backbone only)
     p.add_argument("--use_attn_weighting", action=argparse.BooleanOptionalAction,
                    default=False,
-                   help="GRED/hybrid only: weight each per-hop aggregation by "
+                   help="Hybrid only: weight each per-hop GRED aggregation by "
                         "the saved teacher attention (last layer, max over "
                         "heads). Requires extracted attention for train, val, "
                         "and test splits. Stage 1 oracle setup.")
+    p.add_argument("--use_self_attn_weighting", action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help="Hybrid only: weight each per-hop GRED aggregation by "
+                        "the STUDENT'S OWN transformer attention from a "
+                        "preceding no-grad pass (last layer, max over heads). "
+                        "Two passes per step: pass A produces attention "
+                        "(no-grad, no GRED weighting), pass B re-runs with "
+                        "those weights and computes losses. Mutually exclusive "
+                        "with --use_attn_weighting. Should normally be combined "
+                        "with attention KL/MSE distillation so the student's "
+                        "attention is trained against the teacher's optimal "
+                        "attention; otherwise the weights are uninformative.")
+
+    # Latent embedding flow-matching distillation (train phase, both backbones).
+    # Trains a NodeEmbeddingFlowDenoiser as an auxiliary head: it predicts the
+    # vector field from N(0, I) to the teacher's post-proxy pre-attention
+    # node embeddings, conditioned on the student's matching upstream features.
+    # Conditioning differs by backbone:
+    #   vanilla_gt: raw encoder output (encode_dense).
+    #   hybrid:     post-GRED features (encode_gred(encode_dense)).
+    # In both cases the teacher target is captured via a forward pre-hook on
+    # the layer that runs immediately AFTER the proxy injection — so the gap
+    # being denoised is exactly one routing step. Requires the extract phase
+    # to have saved per-graph 'post_emb' tensors. DiffGraph-style "denoise the
+    # gap" supervision; orthogonal to attention KL/MSE.
+    p.add_argument("--use_latent_embedding_distill",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   help="Add a CFM auxiliary loss that trains a denoiser to "
+                        "map student upstream features to teacher post-proxy "
+                        "pre-attention embeddings. Works for both vanilla_gt "
+                        "and hybrid backbones.")
+    p.add_argument("--latent_distill_weight", type=float, default=0.0,
+                   help="Weight on the latent-embedding flow-matching loss. "
+                        "Set >0 (e.g. 0.1-1.0) to enable. The flag "
+                        "--use_latent_embedding_distill must also be on.")
+    p.add_argument("--denoiser_dim", type=int, default=None,
+                   help="Internal dim for the latent-embedding denoiser. "
+                        "Defaults to --hidden_dim.")
+    p.add_argument("--denoiser_layers", type=int, default=4,
+                   help="Number of layers in the latent-embedding denoiser.")
+    p.add_argument("--denoiser_heads", type=int, default=None,
+                   help="Number of attention heads in the denoiser. Defaults "
+                        "to --num_heads.")
+    p.add_argument("--denoiser_dropout", type=float, default=None,
+                   help="Dropout for the denoiser. Defaults to --dropout.")
+    p.add_argument("--denoiser_euler_steps", type=int, default=4,
+                   help="Number of Euler integration steps used at inference "
+                        "for the latent-embedding denoiser. Training is one "
+                        "CFM step per batch regardless.")
+    p.add_argument("--denoiser_lr", type=float, default=None,
+                   help="Optional separate learning rate for the denoiser. "
+                        "Defaults to --lr.")
+    p.add_argument("--latent_uncond_train_prob", type=float, default=0.1,
+                   help="Probability of training the unconditional CFG branch "
+                        "of the denoiser per batch.")
+    p.add_argument("--latent_guidance_scale", type=float, default=1.0,
+                   help="Default classifier-free-guidance scale for denoiser "
+                        "inference. 1.0 = pure conditional, >1.0 extrapolates "
+                        "toward the conditioning.")
 
     # Training (train phase)
     p.add_argument("--lr", type=float, default=5e-5)

@@ -23,14 +23,14 @@ class NodeEncoder(nn.Module):
         self.num_atom_features = len(FULL_ATOM_FEATURE_DIMS)
 
         self.atom_feature_embeddings = nn.ModuleList([
-            nn.Embedding(num_embeddings=dim, embedding_dim=hidden_dim*8)
+            nn.Embedding(num_embeddings=dim, embedding_dim=hidden_dim)
             for dim in FULL_ATOM_FEATURE_DIMS
         ])
         for emb in self.atom_feature_embeddings:
             nn.init.normal_(emb.weight, std=0.01)
 
         self.atom_post = nn.Sequential(
-            nn.Linear(hidden_dim*8, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
         )
 
@@ -99,7 +99,19 @@ class TransformerLayer(nn.Module):
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.norm2 = nn.LayerNorm(hidden_dim)
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask=None, return_attention=False):
+        """Pre-norm self-attention + FFN.
+
+        Args:
+            x:    (B, N, d) input.
+            mask: (B, N) bool or None. True = real token.
+            return_attention: if True, also return the post-softmax,
+                pre-dropout attention weights (B, H, N, N) detached from
+                the autograd graph. Used by attention distillation.
+        Returns:
+            x                       if return_attention is False.
+            (x, attn_w_clean)       if return_attention is True.
+        """
         B, N, d = x.shape
         normed = self.norm1(x)
 
@@ -118,11 +130,17 @@ class TransformerLayer(nn.Module):
 
         attn_w = F.softmax(attn, dim=-1)
         attn_w = torch.nan_to_num(attn_w, nan=0.0)
-        attn_w = self.attn_drop(attn_w)
+        # Snapshot the clean post-softmax weights BEFORE dropout, so distillation
+        # targets reflect the deterministic attention pattern (the dropout mask
+        # is a stochastic train-time artefact we don't want to distill).
+        attn_w_clean = attn_w.detach().clone() if return_attention else None
+        attn_w_dropped = self.attn_drop(attn_w)
 
-        out = (attn_w @ v).transpose(1, 2).reshape(B, N, d)
+        out = (attn_w_dropped @ v).transpose(1, 2).reshape(B, N, d)
         x = x + self.res_drop(self.wout(out))
         x = x + self.res_drop(self.ff(self.norm2(x)))
+        if return_attention:
+            return x, attn_w_clean
         return x
 
 
@@ -467,12 +485,18 @@ class GREDLayer(nn.Module):
             act=act,
         )
 
-    def forward(self, h, dist_masks, node_masks=None):
+    def forward(self, h, dist_masks, node_masks=None, attn_weights=None):
         """
         Args:
             h: (B, N, d) node features.
             dist_masks: (B, K, N, N) float distance masks (1 where d(v,u)==k).
             node_masks: (B, N) boolean — True for real nodes. Optional.
+            attn_weights: optional (B, N, N) — multiplicative weight on each
+                (target=v, source=u) pair, broadcast over the K hop axis. The
+                aggregation becomes
+                    agg[v, k] = sum_{u : d(v,u)=k} attn_weights[v, u] * h_u
+                No normalization is applied; weights need not sum to 1.
+                Pass None for vanilla GRED behavior.
         Returns:
             h_out: (B, N, d) updated node features.
         """
@@ -487,6 +511,10 @@ class GREDLayer(nn.Module):
         # Reshape for batched matmul: (B*K, N, N) @ (B*K, N, d)
         # Expand h to (B, K, N, d) then reshape
         dm = dist_masks  # (B, K, N, N)
+        if attn_weights is not None:
+            # Broadcast (B, N, N) over the hop axis: every (v, u) pair across
+            # all hops gets multiplied by the same attn_weights[v, u].
+            dm = dm * attn_weights.unsqueeze(1)  # (B, K, N, N)
         h_expanded = h.unsqueeze(1).expand(B, K, N, d)  # (B, K, N, d)
         dm_flat = dm.reshape(B * K, N, N)
         h_flat = h_expanded.reshape(B * K, N, d)
@@ -567,7 +595,8 @@ class GREDEncoder(nn.Module):
         return to_dense_batch(h, batch.batch)
 
     def forward(self, batch, dist_masks, node_masks, proxy_embeddings=None,
-                precomputed_dense=None, readout_scope="all_tokens"):
+                precomputed_dense=None, readout_scope="all_tokens",
+                attn_weights=None):
         """
         Args:
             batch: PyG Batch object.
@@ -577,6 +606,8 @@ class GREDEncoder(nn.Module):
                               transformer layers after GRED encoding.
             precomputed_dense: optional (dense_x, dense_mask) to skip re-encoding.
             readout_scope: "nodes_only" or "all_tokens".
+            attn_weights: optional (B, max_N, max_N) — passed unchanged to every
+                GRED layer; weights the per-hop aggregation. None = vanilla GRED.
         Returns:
             logits: (B, output_dim)
             node_embeddings: (total_N, d) flat
@@ -591,7 +622,7 @@ class GREDEncoder(nn.Module):
         # Run GRED layers
         h = dense_x
         for layer in self.layers:
-            h = layer(h, dist_masks, node_masks)
+            h = layer(h, dist_masks, node_masks, attn_weights=attn_weights)
 
         # If proxy embeddings provided, we need transformer layers to integrate them.
         # For standalone GRED (no proxies), skip this.
@@ -682,19 +713,22 @@ class GREDHybridTransformer(nn.Module):
         h = self.encode_nodes(batch)
         return to_dense_batch(h, batch.batch)
 
-    def encode_gred(self, dense_x, dist_masks, node_masks):
+    def encode_gred(self, dense_x, dist_masks, node_masks, attn_weights=None):
         """
         Run GRED layers on dense node embeddings.
+
+        attn_weights: optional (B, max_N, max_N) — passed to every GRED layer.
         Returns: (B, max_N, d) GRED-encoded node features.
         """
         h = dense_x
         for layer in self.gred_layers:
-            h = layer(h, dist_masks, node_masks)
+            h = layer(h, dist_masks, node_masks, attn_weights=attn_weights)
         return h
 
     def forward(self, batch, dist_masks, node_masks, proxy_embeddings=None,
                 precomputed_dense=None, precomputed_gred=None,
-                readout_scope="all_tokens", disable_proxy_injection=False):
+                readout_scope="all_tokens", disable_proxy_injection=False,
+                attn_weights=None, return_attention=False):
         """
         Args:
             batch: PyG Batch object.
@@ -706,9 +740,19 @@ class GREDHybridTransformer(nn.Module):
             readout_scope: "nodes_only" or "all_tokens".
             disable_proxy_injection: if True, force the no-proxy path regardless
                 of ``proxy_embeddings`` or an attached ``multi_point_proxy``.
+            attn_weights: optional (B, max_N, max_N) — multiplicative weight on
+                each (target, source) pair, applied uniformly across GRED hops
+                in every GRED layer. None = vanilla GRED behavior. Ignored when
+                ``precomputed_gred`` is supplied (the GRED stack has already run).
+            return_attention: if True, also return a list of per-transformer-layer
+                post-softmax attention weights (B, H, N_aug, N_aug), captured
+                BEFORE attention dropout and detached from the autograd graph.
+                Used for attention distillation against a hybrid teacher.
         Returns:
             logits: (B, output_dim)
             node_embeddings: (total_N, d) flat
+            (optional) attentions: list of length len(transformer_layers), each
+                tensor (B, H, N_aug, N_aug). Only returned if return_attention.
         """
         if precomputed_dense is not None:
             dense_x, dense_mask = precomputed_dense
@@ -721,12 +765,16 @@ class GREDHybridTransformer(nn.Module):
         if precomputed_gred is not None:
             h = precomputed_gred
         else:
-            h = self.encode_gred(dense_x, dist_masks, node_masks)
+            h = self.encode_gred(dense_x, dist_masks, node_masks,
+                                  attn_weights=attn_weights)
 
         if disable_proxy_injection:
             proxy_embeddings = None
         use_multi_point = (self.multi_point_proxy is not None
                            and not disable_proxy_injection)
+
+        # Optional per-layer attention collector for distillation.
+        attentions = [] if return_attention else None
 
         # Transformer layers with optional proxy integration
         if use_multi_point:
@@ -757,7 +805,11 @@ class GREDHybridTransformer(nn.Module):
                     total_aux = total_aux + aux * decay
                     point_idx += 1
 
-                h_aug = layer(h_aug, aug_mask)
+                if return_attention:
+                    h_aug, attn_w = layer(h_aug, aug_mask, return_attention=True)
+                    attentions.append(attn_w)
+                else:
+                    h_aug = layer(h_aug, aug_mask)
 
             self._last_mp_aux_loss = total_aux
 
@@ -767,7 +819,11 @@ class GREDHybridTransformer(nn.Module):
             h_aug = h
             aug_mask = dense_mask
             for layer in self.transformer_layers:
-                h_aug = layer(h_aug, aug_mask)
+                if return_attention:
+                    h_aug, attn_w = layer(h_aug, aug_mask, return_attention=True)
+                    attentions.append(attn_w)
+                else:
+                    h_aug = layer(h_aug, aug_mask)
 
         elif proxy_embeddings is not None:
             # ── Single-point N+M concat (existing behaviour) ──
@@ -778,14 +834,22 @@ class GREDHybridTransformer(nn.Module):
                 torch.ones(B, M, dtype=torch.bool, device=h.device)
             ], dim=1)
             for layer in self.transformer_layers:
-                h_aug = layer(h_aug, aug_mask)
+                if return_attention:
+                    h_aug, attn_w = layer(h_aug, aug_mask, return_attention=True)
+                    attentions.append(attn_w)
+                else:
+                    h_aug = layer(h_aug, aug_mask)
 
         else:
             # ── No proxies ──
             h_aug = h
             aug_mask = dense_mask
             for layer in self.transformer_layers:
-                h_aug = layer(h_aug, aug_mask)
+                if return_attention:
+                    h_aug, attn_w = layer(h_aug, aug_mask, return_attention=True)
+                    attentions.append(attn_w)
+                else:
+                    h_aug = layer(h_aug, aug_mask)
 
         # Readout
         if readout_scope == "all_tokens" and (
@@ -814,4 +878,7 @@ class GREDHybridTransformer(nn.Module):
         # Flat node embeddings (from the GRED-encoded nodes, post-transformer)
         orig_h = h_aug[:, :max_N, :]
         node_emb = orig_h[dense_mask]
+        if return_attention:
+            return logits, node_emb, attentions
         return logits, node_emb
+
