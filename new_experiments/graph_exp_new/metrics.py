@@ -1,10 +1,22 @@
+# metrics.py
 """
-Phase 1 Metrics: AP computation compatible with Peptides-func / LRGB evaluation protocol.
+LRGB Metrics + task abstraction.
+
+Original: macro-AP for Peptides-func.
+Extended: a small ``Task`` object (built from ``data.get_dataset_info``) that
+encapsulates the per-dataset differences in loss, prediction formatting,
+label numpy conversion, and metric. Training scripts get one ``Task`` from
+``--dataset`` and replace every hardcoded ``BCEWithLogitsLoss`` /
+``compute_macro_ap`` / ``torch.sigmoid`` site with task methods so adding
+a new LRGB dataset never requires editing the training scripts again.
 """
 
 import torch
+import torch.nn as nn
 import numpy as np
-from sklearn.metrics import average_precision_score
+from sklearn.metrics import average_precision_score, f1_score
+
+from data import get_dataset_info
 
 
 def compute_macro_ap(y_pred: np.ndarray, y_true: np.ndarray) -> float:
@@ -137,3 +149,134 @@ def evaluate(model, loader, device, proxy_fn=None):
     y_true = np.concatenate(all_labels, axis=0)
     ap = compute_macro_ap(y_pred, y_true)
     return ap, float(np.mean(losses))
+
+
+# ================================================================
+# DATASET-AGNOSTIC METRICS
+# ================================================================
+
+def compute_mae(y_pred: np.ndarray, y_true: np.ndarray) -> float:
+    """Mean Absolute Error — LRGB Peptides-struct standard metric."""
+    if y_pred.size == 0:
+        return 0.0
+    return float(np.mean(np.abs(y_pred.astype(np.float64)
+                                - y_true.astype(np.float64))))
+
+
+def compute_node_f1_macro(y_pred: np.ndarray, y_true: np.ndarray) -> float:
+    """Macro-averaged F1 over classes for per-node predictions.
+
+    LRGB PascalVOC-SP standard metric. ``y_pred`` is expected to be argmaxed
+    class indices, shape (N,). ``y_true`` is shape (N,) long. Padding
+    positions should already be removed (or use ``ignore_index=-1`` upstream).
+    """
+    if y_pred.size == 0:
+        return 0.0
+    valid = y_true >= 0
+    if valid.sum() == 0:
+        return 0.0
+    return float(f1_score(y_true[valid], y_pred[valid],
+                          average="macro", zero_division=0))
+
+
+# ================================================================
+# TASK ABSTRACTION
+# ================================================================
+
+class Task:
+    """Per-dataset task helpers driven by the LRGB registry.
+
+    A ``Task`` packages everything that varies between LRGB datasets so the
+    training scripts stay dataset-agnostic. Resolve once from ``args.dataset``:
+
+        task = Task(args.dataset)
+
+    Then replace hardcoded sites:
+        nn.BCEWithLogitsLoss()                      -> task.loss_fn
+        loss_fn(logits, batch.y)                    -> task.loss(logits, batch.y)
+        torch.sigmoid(logits).detach().cpu().numpy() -> task.predict(logits)
+        batch.y.cpu().numpy()                        -> task.labels_to_numpy(batch.y)
+        compute_macro_ap(preds, labels)             -> task.compute_metric(preds, labels)
+    """
+
+    def __init__(self, dataset_name):
+        info = get_dataset_info(dataset_name)
+        self.dataset_name = dataset_name
+        self.output_dim = info["output_dim"]
+        self.task_type = info["task_type"]   # multi_label | regression | multiclass
+        self.level = info["level"]           # graph | node
+        self.node_encoder = info["node_encoder"]
+        self.node_feat_dim = info["node_feat_dim"]
+        self.metric_name = info["metric_name"]
+
+        if self.task_type == "multi_label":
+            self.loss_fn = nn.BCEWithLogitsLoss()
+        elif self.task_type == "regression":
+            # LRGB Peptides-struct uses L1 / MAE.
+            self.loss_fn = nn.L1Loss()
+        elif self.task_type == "multiclass":
+            # ignore_index=-1 leaves room for masked padding in node targets.
+            self.loss_fn = nn.CrossEntropyLoss(ignore_index=-1)
+        else:
+            raise ValueError(f"Unknown task_type: {self.task_type}")
+
+    # --- Loss --------------------------------------------------------
+    def loss(self, logits, y):
+        """Compute the task loss with the right dtype/shape coercion.
+
+        Expected shapes:
+          - multi_label:  logits (B, K) float;   y (B, K) float-or-bool
+          - regression:   logits (B, K) float;   y (B, K) float
+          - multiclass:   logits (N, K) float;   y (N,) long (per-node tasks)
+        """
+        if self.task_type == "multi_label":
+            return self.loss_fn(logits, y.float())
+        if self.task_type == "regression":
+            return self.loss_fn(logits, y.float())
+        if self.task_type == "multiclass":
+            return self.loss_fn(logits, y.long())
+        raise ValueError(f"Unknown task_type: {self.task_type}")
+
+    # --- Numpy adapters for metric accumulation ---------------------
+    def predict(self, logits) -> np.ndarray:
+        """Convert raw logits into the numpy format ``compute_metric`` expects."""
+        if self.task_type == "multi_label":
+            return torch.sigmoid(logits).detach().cpu().numpy()
+        if self.task_type == "regression":
+            return logits.detach().cpu().numpy()
+        if self.task_type == "multiclass":
+            return logits.argmax(dim=-1).detach().cpu().numpy()
+        raise ValueError(f"Unknown task_type: {self.task_type}")
+
+    def labels_to_numpy(self, y) -> np.ndarray:
+        """Convert ground-truth tensors to numpy aligned with ``predict``."""
+        return y.detach().cpu().numpy()
+
+    # --- Final metric -----------------------------------------------
+    def compute_metric(self, preds: np.ndarray, labels: np.ndarray) -> float:
+        if self.metric_name == "macro_ap":
+            return compute_macro_ap(preds, labels)
+        if self.metric_name == "mae":
+            return compute_mae(preds, labels)
+        if self.metric_name == "node_f1_macro":
+            return compute_node_f1_macro(preds, labels)
+        raise ValueError(f"Unknown metric_name: {self.metric_name}")
+
+    # --- Friendlier metric direction (higher_is_better) -------------
+    @property
+    def higher_is_better(self) -> bool:
+        # AP and F1 are higher-is-better; MAE is lower-is-better.
+        return self.metric_name in ("macro_ap", "node_f1_macro")
+
+    @property
+    def metric_label(self) -> str:
+        return {
+            "macro_ap": "AP",
+            "mae": "MAE",
+            "node_f1_macro": "F1",
+        }[self.metric_name]
+
+
+def build_task(dataset_name) -> Task:
+    """Convenience constructor — used at the top of every training script."""
+    return Task(dataset_name)

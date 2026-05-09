@@ -53,7 +53,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from data import get_loaders, _compute_dist_mask_single
 from models import NodeEncoder, GraphTransformer, GREDHybridTransformer
-from metrics import compute_macro_ap
+from metrics import compute_macro_ap, build_task
 from mmd import mmd_squared
 
 
@@ -214,15 +214,20 @@ class TransformerLayerWithAttn(nn.Module):
 class GraphTransformerWithCrossAttn(nn.Module):
     def __init__(self, num_layers=5, num_heads=8, hidden_dim=64,
                  output_dim=10, dropout=0.3, num_cross_layers=None,
-                 use_proxy_self_attn=True, use_parameter_free_proxy=False):
+                 use_proxy_self_attn=True, use_parameter_free_proxy=False,
+                 dataset_name="Peptides-func", task_level="graph"):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.dataset_name = dataset_name
+        self.task_level = task_level
         # When True, the cross_attn_layers ModuleList is left in place (so checkpoints
         # and other files that import this class still work) but is bypassed in the
         # forward pass in favor of parameter_free_proxy_routing.
         self.use_parameter_free_proxy = use_parameter_free_proxy
-        self.encoder = NodeEncoder(hidden_dim)
+        from models import build_node_encoder
+        self.encoder = build_node_encoder(hidden_dim, lap_pe_dim=0,
+                                          dataset_name=dataset_name)
 
         self.layers = nn.ModuleList([
             TransformerLayerWithAttn(hidden_dim, num_heads, dropout)
@@ -276,8 +281,13 @@ class GraphTransformerWithCrossAttn(nn.Module):
                 all_attn.append(attn_w)
 
         node_emb_masked = dense_x[dense_mask]
-        pooled = global_mean_pool(node_emb_masked, batch.batch)
-        logits = self.head(pooled)
+        if self.task_level == "node":
+            # Per-node prediction (e.g. PascalVOC-SP): apply head to flat node
+            # embeddings; logits come out (total_real_nodes, num_classes).
+            logits = self.head(node_emb_masked)
+        else:
+            pooled = global_mean_pool(node_emb_masked, batch.batch)
+            logits = self.head(pooled)
 
         # Build a return tuple incrementally for backwards-compat with the
         # 2-tuple (logits, node_emb_masked) and 3-tuple (..., all_attn) callers.
@@ -305,12 +315,16 @@ def build_model(args):
     """
     lap_pe_dim = args.lap_pe_dim if getattr(args, 'use_lap_pe', False) else 0
     backbone = getattr(args, 'backbone', 'vanilla_gt')
+    output_dim = args.task.output_dim
+    task_level = args.task.level
+    dataset_name = args.dataset
     if backbone == "vanilla_gt":
         return GraphTransformerWithCrossAttn(
             num_layers=args.num_layers, num_heads=args.num_heads,
-            hidden_dim=args.hidden_dim, output_dim=args.output_dim,
+            hidden_dim=args.hidden_dim, output_dim=output_dim,
             dropout=args.dropout,
             use_parameter_free_proxy=getattr(args, 'use_parameter_free_proxy', True),
+            dataset_name=dataset_name, task_level=task_level,
         )
     elif backbone == "hybrid":
         return GREDHybridTransformer(
@@ -319,8 +333,9 @@ def build_model(args):
             num_transformer_layers=args.num_transformer_layers,
             num_heads=args.num_heads, expand=args.gred_expand,
             r_min=args.r_min, r_max=args.r_max, max_phase=args.max_phase,
-            dropout=args.dropout, act=args.gred_act, output_dim=args.output_dim,
+            dropout=args.dropout, act=args.gred_act, output_dim=output_dim,
             lap_pe_dim=lap_pe_dim,
+            dataset_name=dataset_name, task_level=task_level,
         )
     else:
         raise ValueError(
@@ -354,8 +369,36 @@ def _build_dist_and_node_masks_for_batch(pyg_batch, max_hops, device):
 # PROXY OPTIMIZATION
 # ================================================================
 
-def _per_sample_bce(logits, labels):
-    return F.binary_cross_entropy_with_logits(logits, labels, reduction="none").mean(dim=1)
+def _per_sample_bce(logits, labels, task=None):
+    """Per-sample task loss used by proxy extraction.
+
+    Returns a (B,) tensor of per-graph losses so the proxy optimizer can
+    early-exit per sample. Dispatches on ``task.task_type``:
+
+      - multi_label  -> mean BCE over classes      (Peptides-func)
+      - regression   -> mean L1   over targets     (Peptides-struct)
+      - multiclass   -> mean CE   over real nodes  (PascalVOC-SP, per-node)
+
+    Falls back to BCE (legacy) if ``task`` is None to keep older callers
+    working unchanged.
+    """
+    if task is None or task.task_type == "multi_label":
+        return F.binary_cross_entropy_with_logits(
+            logits, labels.float(), reduction="none").mean(dim=1)
+    if task.task_type == "regression":
+        return F.l1_loss(logits, labels.float(), reduction="none").mean(dim=1)
+    if task.task_type == "multiclass":
+        # logits: (total_nodes, C); labels: (total_nodes,) long with -1 padding.
+        # We don't have batch indices here cheaply, so collapse to a scalar
+        # repeated over B — proxy extraction's early-exit then becomes
+        # batch-global rather than per-sample, which is acceptable for VOC.
+        valid = labels >= 0
+        if valid.sum() == 0:
+            return logits.new_zeros(1)
+        ce = F.cross_entropy(logits[valid], labels[valid].long(),
+                             reduction="mean")
+        return ce.unsqueeze(0)
+    raise ValueError(f"Unknown task_type: {task.task_type}")
 
 
 @torch.no_grad()
@@ -383,7 +426,7 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
 
     logits_base, _, _ = model(batch, precomputed_dense=(dense_x, dense_mask),
                                return_attention=True)
-    base_loss = _per_sample_bce(logits_base, batch.y)
+    base_loss = _per_sample_bce(logits_base, batch.y, task=getattr(args, 'task', None))
     best_loss = base_loss.clone()
     best_proxy = proxy.detach().clone()
 
@@ -402,7 +445,7 @@ def optimize_proxies_for_batch(model, batch, dense_x, dense_mask, args):
             logits, _, _ = model(batch, proxy_embeddings=proxy,
                                   precomputed_dense=(dense_x, dense_mask),
                                   return_attention=True)
-            task_loss = _per_sample_bce(logits, batch.y)
+            task_loss = _per_sample_bce(logits, batch.y, task=getattr(args, 'task', None))
 
             if mmd_lambda > 0:
                 mmd_losses = []
@@ -477,7 +520,7 @@ def optimize_proxies_for_batch_hybrid(model, batch, dense_x, dense_mask,
         precomputed_dense=(dense_x, dense_mask),
         precomputed_gred=h_gred,
     )
-    base_loss = _per_sample_bce(logits_base, batch.y)
+    base_loss = _per_sample_bce(logits_base, batch.y, task=getattr(args, 'task', None))
     best_loss = base_loss.clone()
     best_proxy = proxy.detach().clone()
 
@@ -496,7 +539,7 @@ def optimize_proxies_for_batch_hybrid(model, batch, dense_x, dense_mask,
                 precomputed_dense=(dense_x, dense_mask),
                 precomputed_gred=h_gred,
             )
-            task_loss = _per_sample_bce(logits, batch.y)
+            task_loss = _per_sample_bce(logits, batch.y, task=getattr(args, 'task', None))
 
             if mmd_lambda > 0:
                 mmd_losses = []
@@ -550,6 +593,7 @@ def run_pretrain(args):
         use_dist_masks=is_hybrid, max_hops=getattr(args, 'max_hops', 40),
         dist_mask_workers=getattr(args, 'dist_mask_workers', 8),
         use_lap_pe=use_lap_pe, lap_pe_dim=lap_pe_dim,
+        dataset_name=args.dataset,
     )
 
     model = build_model(args).to(args.device)
@@ -579,8 +623,11 @@ def run_pretrain(args):
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    loss_fn = nn.BCEWithLogitsLoss()
-    best_val_ap = 0.0
+    # Task-driven loss/metric (BCE / L1 / CE selected by --dataset).
+    task = args.task
+    metric_label = task.metric_label
+    higher_better = task.higher_is_better
+    best_val_ap = -float("inf") if higher_better else float("inf")
     best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
@@ -616,16 +663,16 @@ def run_pretrain(args):
             batch, dist_masks_batch, node_masks_batch = _unpack_batch(batch_data)
             optimizer.zero_grad()
             logits, _ = _forward_no_proxy(batch, dist_masks_batch, node_masks_batch)
-            loss = loss_fn(logits, batch.y)
+            loss = task.loss(logits, batch.y)
             loss.backward()
             nn.utils.clip_grad_norm_(trainable_params, args.s1_grad_clip)
             optimizer.step()
             scheduler.step()
             train_losses.append(loss.item())
-            all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
-            all_labels.append(batch.y.cpu().numpy())
+            all_preds.append(task.predict(logits))
+            all_labels.append(task.labels_to_numpy(batch.y))
 
-        train_ap = compute_macro_ap(
+        train_ap = task.compute_metric(
             np.concatenate(all_preds), np.concatenate(all_labels))
         train_loss = float(np.mean(train_losses))
 
@@ -636,10 +683,10 @@ def run_pretrain(args):
             for batch_data in val_loader:
                 batch, dist_masks_batch, node_masks_batch = _unpack_batch(batch_data)
                 logits, _ = _forward_no_proxy(batch, dist_masks_batch, node_masks_batch)
-                val_losses.append(loss_fn(logits, batch.y).item())
-                val_preds.append(torch.sigmoid(logits).cpu().numpy())
-                val_labels.append(batch.y.cpu().numpy())
-        val_ap = compute_macro_ap(
+                val_losses.append(task.loss(logits, batch.y).item())
+                val_preds.append(task.predict(logits))
+                val_labels.append(task.labels_to_numpy(batch.y))
+        val_ap = task.compute_metric(
             np.concatenate(val_preds), np.concatenate(val_labels))
         val_loss = float(np.mean(val_losses))
 
@@ -650,8 +697,8 @@ def run_pretrain(args):
             mem_str = f" mem={mem_mb:.0f}MB"
             torch.cuda.reset_peak_memory_stats()
         log_line = (f"Epoch {epoch:3d}/{args.s1_max_epochs} [{elapsed:.1f}s{mem_str}] | "
-                    f"train_loss={train_loss:.4f} train_AP={train_ap:.4f} | "
-                    f"val_loss={val_loss:.4f} val_AP={val_ap:.4f}")
+                    f"train_loss={train_loss:.4f} train_{metric_label}={train_ap:.4f} | "
+                    f"val_loss={val_loss:.4f} val_{metric_label}={val_ap:.4f}")
 
         # Test every 10 epochs
         if epoch % 10 == 0:
@@ -661,17 +708,17 @@ def run_pretrain(args):
                 for batch_data in test_loader:
                     batch, dist_masks_batch, node_masks_batch = _unpack_batch(batch_data)
                     logits, _ = _forward_no_proxy(batch, dist_masks_batch, node_masks_batch)
-                    test_preds.append(torch.sigmoid(logits).cpu().numpy())
-                    test_labels.append(batch.y.cpu().numpy())
-            test_ap = compute_macro_ap(
+                    test_preds.append(task.predict(logits))
+                    test_labels.append(task.labels_to_numpy(batch.y))
+            test_ap = task.compute_metric(
                 np.concatenate(test_preds), np.concatenate(test_labels))
-            log_line += f" | test_AP={test_ap:.4f}"
+            log_line += f" | test_{metric_label}={test_ap:.4f}"
 
         print(log_line, flush=True)
 
-        # Early stopping
+        # Early stopping (direction depends on task.higher_is_better).
         improved_val_loss = val_loss < best_val_loss
-        improved_val_ap = val_ap > best_val_ap
+        improved_val_ap = (val_ap > best_val_ap) if higher_better else (val_ap < best_val_ap)
         if improved_val_loss or improved_val_ap:
             if improved_val_loss:
                 best_val_loss = val_loss
@@ -685,17 +732,17 @@ def run_pretrain(args):
                 "args": vars(args),
             }, save_path)
             print(f"  -> New best: val_loss={best_val_loss:.4f} "
-                  f"val_AP={best_val_ap:.4f}, saved", flush=True)
+                  f"val_{metric_label}={best_val_ap:.4f}, saved", flush=True)
         else:
             patience_counter += 1
             if patience_counter >= args.s1_patience:
                 print(f"Early stopping at epoch {epoch}. "
-                      f"Best val_loss={best_val_loss:.4f} val_AP={best_val_ap:.4f} "
+                      f"Best val_loss={best_val_loss:.4f} val_{metric_label}={best_val_ap:.4f} "
                       f"at epoch {best_epoch}.", flush=True)
                 break
 
     print(f"Pretrain done. Best val_loss={best_val_loss:.4f} "
-          f"val_AP={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
+          f"val_{metric_label}={best_val_ap:.4f} at epoch {best_epoch}.", flush=True)
     return save_path
 
 
@@ -961,6 +1008,7 @@ def run_extraction(args):
     _, _, _, train_ds, val_ds, test_ds = get_loaders(
         batch_size=args.batch_size, num_workers=args.num_workers,
         use_lap_pe=use_lap_pe, lap_pe_dim=lap_pe_dim,
+        dataset_name=args.dataset,
     )
     # Use non-shuffled loaders so sample_idx == dataset index
     from torch_geometric.loader import DataLoader as PyGDataLoader
@@ -983,10 +1031,11 @@ def run_extraction(args):
     else:
         teacher = GraphTransformerWithCrossAttn(
             num_layers=args.num_layers, num_heads=args.num_heads,
-            hidden_dim=args.hidden_dim, output_dim=args.output_dim,
+            hidden_dim=args.hidden_dim, output_dim=args.task.output_dim,
             dropout=args.dropout, num_cross_layers=args.num_cross_layers,
             use_proxy_self_attn=args.use_proxy_self_attn,
             use_parameter_free_proxy=getattr(args, 'use_parameter_free_proxy', True),
+            dataset_name=args.dataset, task_level=args.task.level,
         ).to(args.device)
 
     pretrained_state = ckpt["model_state"]
@@ -1417,248 +1466,171 @@ def attention_distillation_loss(student_attns, teacher_attns_padded, mask,
 
 
 # ================================================================
-# LATENT EMBEDDING FLOW-MATCHING DENOISER
+# LATENT EMBEDDING DDPM DENOISER (DiffGraph-style)
 # ================================================================
 #
 # Companion auxiliary head for distilling teacher post-routing node embeddings
-# into the student. Inspired by DiffGraph (arXiv 2501.02313): treat the gap
-# between the student's pre-routing embedding and the teacher's post-routing
-# embedding as noise to be removed via a learnt vector field.
+# into the student. Following DiffGraph (arXiv 2501.02313): a minimal
+# DDPM-style ε-prediction denoiser with a 2-linear-layer MLP backbone that
+# takes concat([x_t, cond, t_emb]) and predicts the per-step Gaussian noise.
 #
-# Reuses the structure of FlowMatchingGenerator from generators.py
-# (sinusoidal time embedding + denoiser layers with time conditioning,
-# self-/cross-attention, FFN), but operates on per-node embeddings of
-# variable length instead of a fixed proxy bundle, and uses self-attention on
-# the noisy node tokens plus cross-attention to the student's pre-routing
-# embeddings as the conditioning signal.
+# Training loss: standard DDPM ε-prediction MSE
+#   t ~ U{0, ..., T-1}
+#   ε ~ N(0, I)
+#   x_t = sqrt(α̅_t) * x_0 + sqrt(1 - α̅_t) * ε       (target is teacher post_emb)
+#   loss = MSE( ε_θ(x_t, t | cond), ε )                (averaged over real nodes)
+# Linear β schedule. No classifier-free guidance; the conditioning is the
+# student's upstream node embeddings and is always present.
 #
-# Training loss: conditional flow matching (CFM)
-#   t ~ U(0, 1)
-#   z_0 ~ N(0, I)
-#   x_1 = teacher post-routing embedding (target)
-#   x_t = (1 - t) * z_0 + t * x_1
-#   v_target = x_1 - z_0
-#   loss   = MSE( v_theta(x_t, t | s_student), v_target )
-# Optionally with classifier-free guidance dropout: with probability
-# ``uncond_train_prob`` the conditioning is replaced with zeros so the same
-# network learns both conditional and unconditional vector fields.
+# At the existing call site (training), only the loss is consumed, so the
+# expensive reverse chain is skipped during training. Inference path is
+# implemented for future use (e.g. exp 3) but not invoked by the train loop.
 
-class _NodeDenoiserLayer(nn.Module):
-    """Single denoiser layer for per-node flow matching.
+class NodeEmbeddingDDPMDenoiser(nn.Module):
+    """DiffGraph-style DDPM denoiser over per-node embeddings.
 
-    Position-wise structure: only cross-attention from each noisy token to the
-    student conditioning, then a position-wise FFN. There is intentionally NO
-    self-attention over noisy tokens — letting noisy positions attend to other
-    noisy positions just spreads noise across the sequence with no clean
-    reference to recover from. All node-to-node interaction structure must come
-    through the conditioning (which itself was produced by a GNN/transformer
-    encoder that already mixed neighborhood information). Time embedding is
-    added additively to x_t at the start of each layer.
+    Architecture: a small MLP (2 linear layers by default) maps
+    concat([x_t, cond, t_emb]) → predicted noise ε. No attention, no
+    cross-attention — exactly the simple denoiser DiffGraph uses.
+
+    Input: padded student conditioning (B, N, d_node), boolean mask (B, N)
+           (True = real node), and optionally targets (B, N, d_node).
+
+    Output (compatible with the previous CFM denoiser's call signature):
+        - Training (targets given): returns (None, ddpm_loss). The sample is
+          not used by the existing call site, so we skip the reverse chain.
+        - Inference (targets None): returns (sample, None) via a full reverse
+          DDPM chain from N(0, I).
     """
-    def __init__(self, dim, num_heads, dropout):
-        super().__init__()
-        self.cross_attn = nn.MultiheadAttention(
-            dim, num_heads, dropout=dropout, batch_first=True)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, dim * 4),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(dim * 4, dim),
-        )
-
-    def forward(self, x_t, t_emb, cond, key_padding_mask):
-        """
-        Args:
-            x_t: (B, N, dim) noisy node tokens.
-            t_emb: (B, 1, dim) per-batch time embedding (broadcast over N).
-            cond: (B, N, dim) student conditioning (pre-routing node embedding).
-            key_padding_mask: (B, N) — True = padding (passed straight to MHA).
-        """
-        x_t = x_t + t_emb
-
-        # Cross-attention from each noisy token to the (clean) conditioning.
-        # Q = noisy token, K/V = student conditioning.
-        normed = self.norm1(x_t)
-        ca, _ = self.cross_attn(
-            normed, cond, cond, key_padding_mask=key_padding_mask)
-        x_t = x_t + ca
-
-        # Position-wise FFN — no cross-position mixing on the noisy side.
-        x_t = x_t + self.ffn(self.norm2(x_t))
-        return x_t
-
-
-class NodeEmbeddingFlowDenoiser(nn.Module):
-    """Flow-matching denoiser over per-node embeddings.
-
-    Input: padded student node embeddings (B, N, d_node), boolean mask (B, N),
-           and optionally targets (B, N, d_node) for the CFM training loss.
-    Output:
-        - During training (targets given): predicted vector field v (B, N, d_node)
-          and a CFM loss scalar.
-        - During inference (targets None): generated denoised embeddings via
-          Euler integration from N(0, I), and aux_loss=None.
-    """
-    def __init__(self, node_dim, denoiser_dim=128, num_layers=4, num_heads=8,
-                 dropout=0.1, euler_steps=4, uncond_train_prob=0.1,
-                 guidance_scale_default=1.0):
+    def __init__(self, node_dim, denoiser_dim=128, num_layers=2, dropout=0.1,
+                 num_diffusion_steps=1000, beta_start=1e-4, beta_end=0.02):
         super().__init__()
         self.node_dim = node_dim
         self.denoiser_dim = denoiser_dim
-        self.euler_steps = max(1, int(euler_steps))
-        self.uncond_train_prob = float(uncond_train_prob)
-        self.guidance_scale_default = float(guidance_scale_default)
+        self.num_layers = max(2, int(num_layers))
+        self.T = int(num_diffusion_steps)
 
-        self.input_proj = (nn.Linear(node_dim, denoiser_dim)
-                           if node_dim != denoiser_dim else nn.Identity())
-        self.cond_proj = (nn.Linear(node_dim, denoiser_dim)
-                          if node_dim != denoiser_dim else nn.Identity())
-        self.output_proj = (nn.Linear(denoiser_dim, node_dim)
-                            if node_dim != denoiser_dim else nn.Identity())
+        # ---- Linear β schedule + DDPM bookkeeping (precomputed buffers).
+        betas = torch.linspace(beta_start, beta_end, self.T)
+        alphas = 1.0 - betas
+        alpha_bars = torch.cumprod(alphas, dim=0)
+        self.register_buffer("betas", betas)
+        self.register_buffer("alphas", alphas)
+        self.register_buffer("alpha_bars", alpha_bars)
+        self.register_buffer("sqrt_alpha_bars", torch.sqrt(alpha_bars))
+        self.register_buffer(
+            "sqrt_one_minus_alpha_bars", torch.sqrt(1.0 - alpha_bars))
 
+        # ---- Sinusoidal time embedding → small MLP, broadcast over N tokens.
         self.time_mlp = nn.Sequential(
             nn.Linear(denoiser_dim, denoiser_dim),
-            nn.GELU(),
+            nn.SiLU(),
             nn.Linear(denoiser_dim, denoiser_dim),
         )
 
-        self.layers = nn.ModuleList([
-            _NodeDenoiserLayer(denoiser_dim, num_heads, dropout)
-            for _ in range(num_layers)
-        ])
+        # ---- 2-layer (or deeper) MLP ε predictor on concat features.
+        # Input: [x_t (d_node) || cond (d_node) || t_emb (denoiser_dim)].
+        in_dim = node_dim + node_dim + denoiser_dim
+        layers = [nn.Linear(in_dim, denoiser_dim),
+                  nn.SiLU(), nn.Dropout(dropout)]
+        # Optional extra hidden layers if num_layers > 2.
+        for _ in range(self.num_layers - 2):
+            layers += [nn.Linear(denoiser_dim, denoiser_dim),
+                       nn.SiLU(), nn.Dropout(dropout)]
+        layers.append(nn.Linear(denoiser_dim, node_dim))
+        self.mlp = nn.Sequential(*layers)
 
-    def _sinusoidal_time(self, t):
-        """Sinusoidal embedding for scalar time. t: (B,) -> (B, denoiser_dim)."""
+    def _sinusoidal_time(self, t_int):
+        """Sinusoidal embedding for integer time steps. t_int: (B,) long."""
         half = self.denoiser_dim // 2
+        device = t_int.device
         freqs = torch.exp(
             -math.log(10000.0)
-            * torch.arange(half, device=t.device, dtype=t.dtype) / half
+            * torch.arange(half, device=device, dtype=torch.float32) / half
         )
-        args = t.unsqueeze(-1) * freqs.unsqueeze(0)  # (B, half)
+        args = t_int.float().unsqueeze(-1) * freqs.unsqueeze(0)  # (B, half)
         emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
         # If denoiser_dim is odd, pad the last dim (rare but defensive).
         if emb.shape[-1] < self.denoiser_dim:
             emb = F.pad(emb, (0, self.denoiser_dim - emb.shape[-1]))
         return emb
 
-    def _denoise(self, x_t, t, cond, mask):
-        """Predict vector field v(x_t, t | cond).
+    def _predict_eps(self, x_t, t_int, cond):
+        """Predict ε_t from (x_t, cond, t).
 
         Args:
             x_t: (B, N, node_dim) — noisy embeddings.
-            t: (B,) — time values in [0, 1].
-            cond: (B, N, node_dim) — student conditioning (zeros for the
-                  unconditional CFG branch).
-            mask: (B, N) — True = real node, False = padding.
+            t_int: (B,) long — discrete diffusion step indices.
+            cond: (B, N, node_dim) — student conditioning.
         Returns:
-            v: (B, N, node_dim).
+            eps_pred: (B, N, node_dim).
         """
-        x_proj = self.input_proj(x_t)
-        c_proj = self.cond_proj(cond)
+        t_emb = self._sinusoidal_time(t_int)         # (B, denoiser_dim)
+        t_emb = self.time_mlp(t_emb)                 # (B, denoiser_dim)
+        t_emb_b = t_emb.unsqueeze(1).expand(-1, x_t.shape[1], -1)
+        h = torch.cat([x_t, cond, t_emb_b], dim=-1)  # (B, N, in_dim)
+        return self.mlp(h)                           # (B, N, node_dim)
 
-        t_emb = self._sinusoidal_time(t)              # (B, denoiser_dim)
-        t_emb = self.time_mlp(t_emb).unsqueeze(1)     # (B, 1, denoiser_dim)
-
-        key_padding_mask = ~mask  # MHA expects True = ignore
-
-        h = x_proj
-        for layer in self.layers:
-            h = layer(h, t_emb, c_proj, key_padding_mask)
-
-        return self.output_proj(h)
-
-    def _null_condition(self, cond):
-        return torch.zeros_like(cond)
-
-    def forward(self, cond, mask, targets=None, run_uncond=None,
-                guidance_scale=None):
+    def forward(self, cond, mask, targets=None):
         """
-        Conditional flow matching.
-
-        - Training (targets given): returns (proxy denoised sample, cfm_loss).
-        - Inference (targets None): returns (denoised sample, None).
+        - Training (targets given): returns (None, ddpm_loss).
+        - Inference (targets None): returns (sample, None).
         """
         B, N, d = cond.shape
         device = cond.device
 
         if targets is not None:
-            t = torch.rand(B, device=device)              # (B,)
-            z_0 = torch.randn(B, N, d, device=device)
-            t_b = t.view(B, 1, 1)
-            x_t = (1 - t_b) * z_0 + t_b * targets
-            u = targets - z_0                              # target vector field
+            # Sample diffusion step + noise; form x_t.
+            t = torch.randint(0, self.T, (B,), device=device)
+            eps = torch.randn_like(targets)
+            sqrt_ab = self.sqrt_alpha_bars[t].view(B, 1, 1)
+            sqrt_omab = self.sqrt_one_minus_alpha_bars[t].view(B, 1, 1)
+            x_t = sqrt_ab * targets + sqrt_omab * eps
 
-            v_cond = self._denoise(x_t, t, cond, mask)
-            # Mask the loss to real nodes only, per-entry MSE.
-            entry_mask = mask.unsqueeze(-1).float()        # (B, N, 1)
-            sq_err_cond = ((v_cond - u) ** 2) * entry_mask
+            eps_pred = self._predict_eps(x_t, t, cond)
+
+            # MSE on real-node entries only.
+            entry_mask = mask.unsqueeze(-1).float()
+            sq_err = (eps_pred - eps) ** 2 * entry_mask
             denom = entry_mask.sum().clamp_min(1.0) * d
-            cond_loss = sq_err_cond.sum() / denom
-            cfm_loss = cond_loss
+            ddpm_loss = sq_err.sum() / denom
+            # Skip reverse-chain sampling during training — the call site
+            # discards the sample anyway and only consumes the loss.
+            return None, ddpm_loss
 
-            if run_uncond is None:
-                run_uncond = torch.rand(1).item() < self.uncond_train_prob
-            if run_uncond:
-                v_free = self._denoise(
-                    x_t, t, self._null_condition(cond), mask)
-                sq_err_free = ((v_free - u) ** 2) * entry_mask
-                uncond_loss = sq_err_free.sum() / denom
-                cfm_loss = 0.5 * (cond_loss + uncond_loss)
-
-            with torch.no_grad():
-                sample = self._euler_sample(
-                    cond, mask,
-                    guidance_scale=guidance_scale or 1.0)
-            return sample, cfm_loss
-
-        if guidance_scale is None:
-            guidance_scale = self.guidance_scale_default
-        sample = self._euler_sample(cond, mask, guidance_scale=guidance_scale)
+        # Inference: full reverse chain.
+        sample = self._sample(cond, mask)
         return sample, None
 
-    def _euler_sample(self, cond, mask, guidance_scale=1.0):
-        """Generate denoised node embeddings via Euler integration t: 0 -> 1."""
+    @torch.no_grad()
+    def _sample(self, cond, mask):
+        """Run the reverse DDPM chain to produce x_0 ~ p_θ(x_0 | cond)."""
         B, N, d = cond.shape
         device = cond.device
-        dt = 1.0 / self.euler_steps
         z = torch.randn(B, N, d, device=device)
-
-        for step in range(self.euler_steps):
-            t_val = step * dt
-            t = torch.full((B,), t_val, device=device)
-            v_cond = self._denoise(z, t, cond, mask)
-            if guidance_scale == 1.0:
-                v = v_cond
+        for t_idx in reversed(range(self.T)):
+            t_b = torch.full((B,), t_idx, dtype=torch.long, device=device)
+            eps_pred = self._predict_eps(z, t_b, cond)
+            beta_t = self.betas[t_idx]
+            ab_t = self.alpha_bars[t_idx]
+            a_t = self.alphas[t_idx]
+            coef = (1.0 - a_t) / torch.sqrt(1.0 - ab_t)
+            mean = (z - coef * eps_pred) / torch.sqrt(a_t)
+            if t_idx > 0:
+                noise = torch.randn_like(z)
+                z = mean + torch.sqrt(beta_t) * noise
             else:
-                v_free = self._denoise(
-                    z, t, self._null_condition(cond), mask)
-                v = v_free + guidance_scale * (v_cond - v_free)
-            z = z + dt * v
+                z = mean
         # Zero out padded positions so downstream consumers don't see noise there.
         z = z * mask.unsqueeze(-1).float()
         return z
 
-    def forward_differentiable(self, cond, mask, euler_steps=None):
-        """Differentiable single-/few-step generation for end-to-end finetuning.
 
-        Same as ``_euler_sample`` but gradients flow back through v_theta. Use
-        only with small ``euler_steps`` to keep the unrolled graph manageable.
-        """
-        if euler_steps is None:
-            euler_steps = self.euler_steps
-        euler_steps = max(1, int(euler_steps))
-        B, N, d = cond.shape
-        device = cond.device
-        dt = 1.0 / euler_steps
-        z = torch.randn(B, N, d, device=device)
-        for step in range(euler_steps):
-            t_val = step * dt
-            t = torch.full((B,), t_val, device=device)
-            v = self._denoise(z, t, cond, mask)
-            z = z + dt * v
-        return z * mask.unsqueeze(-1).float()
+# Backwards-compatible alias: keep the old name pointing at the new class so
+# any external imports / saved state-dicts referencing the old symbol keep
+# resolving (the underlying parameters/buffers are different, so checkpoint
+# state dicts from the old CFM denoiser won't load — but the symbol exists).
+NodeEmbeddingFlowDenoiser = NodeEmbeddingDDPMDenoiser
 
 
 # ================================================================
@@ -1728,7 +1700,7 @@ def run_training(args):
               f"{getattr(args, 'use_latent_embedding_distill', False)}")
         if getattr(args, 'use_latent_embedding_distill', False):
             print(f"  latent_distill_weight="
-                  f"{getattr(args, 'latent_distill_weight', 0.0)}  (CFM term)")
+                  f"{getattr(args, 'latent_distill_weight', 0.0)}  (DDPM term)")
         print(f"  targets from: {targets_path}")
     else:
         print(f"  distill_weight=N/A (task-only)")
@@ -1746,6 +1718,7 @@ def run_training(args):
         use_dist_masks=is_hybrid, max_hops=max_hops,
         dist_mask_workers=getattr(args, 'dist_mask_workers', 8),
         use_lap_pe=use_lap_pe, lap_pe_dim=lap_pe_dim,
+        dataset_name=args.dataset,
     )
 
     if use_distillation:
@@ -1827,26 +1800,26 @@ def run_training(args):
     if use_latent_embedding_distill:
         # Resolve denoiser hyperparams: None defaults inherit from main model.
         d_dim = getattr(args, "denoiser_dim", None) or args.hidden_dim
-        d_layers = getattr(args, "denoiser_layers", 4) or 4
-        d_heads = getattr(args, "denoiser_heads", None) or args.num_heads
+        d_layers = getattr(args, "denoiser_layers", 2) or 2
         d_drop = getattr(args, "denoiser_dropout", None)
         if d_drop is None:
             d_drop = args.dropout
-        d_euler = getattr(args, "denoiser_euler_steps", 4) or 4
-        denoiser = NodeEmbeddingFlowDenoiser(
+        d_T = int(getattr(args, "num_diffusion_steps", 1000) or 1000)
+        d_beta_start = float(getattr(args, "diff_beta_start", 1e-4))
+        d_beta_end = float(getattr(args, "diff_beta_end", 0.02))
+        denoiser = NodeEmbeddingDDPMDenoiser(
             node_dim=args.hidden_dim,
             denoiser_dim=d_dim,
             num_layers=d_layers,
-            num_heads=d_heads,
             dropout=d_drop,
-            euler_steps=d_euler,
-            uncond_train_prob=getattr(args, "latent_uncond_train_prob", 0.1),
-            guidance_scale_default=getattr(args, "latent_guidance_scale", 1.0),
+            num_diffusion_steps=d_T,
+            beta_start=d_beta_start,
+            beta_end=d_beta_end,
         ).to(args.device)
-        print(f"  Latent embedding denoiser: "
+        print(f"  Latent embedding denoiser (DDPM, DiffGraph-style MLP): "
               f"node_dim={args.hidden_dim}  "
-              f"dim={d_dim}  layers={d_layers}  heads={d_heads}  "
-              f"euler_steps={d_euler}  "
+              f"dim={d_dim}  layers={d_layers}  "
+              f"T={d_T}  betas=[{d_beta_start:g},{d_beta_end:g}]  "
               f"latent_distill_weight={args.latent_distill_weight}")
         print(f"  Latent denoiser parameters: "
               f"{sum(p.numel() for p in denoiser.parameters()):,}")
@@ -1855,7 +1828,8 @@ def run_training(args):
     print("\nBaseline (pretrained, no distillation):")
     baseline_val_ap = evaluate(student, val_loader, args)
     baseline_test_ap = evaluate(student, test_loader, args)
-    print(f"  val_AP={baseline_val_ap:.4f}  test_AP={baseline_test_ap:.4f}")
+    print(f"  val_{args.task.metric_label}={baseline_val_ap:.4f}  "
+          f"test_{args.task.metric_label}={baseline_test_ap:.4f}")
 
     # Only train encoder + self-attention + head
     trainable_params = []
@@ -1892,8 +1866,11 @@ def run_training(args):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=total_steps, eta_min=1e-7)
 
-    loss_fn = nn.BCEWithLogitsLoss()
-    best_val_ap = 0.0
+    # Task-driven loss/metric (BCE / L1 / CE selected by --dataset).
+    task = args.task
+    metric_label = task.metric_label
+    higher_better = task.higher_is_better
+    best_val_ap = -float("inf") if higher_better else float("inf")
     best_epoch = -1
     patience_counter = 0
 
@@ -1908,7 +1885,7 @@ def run_training(args):
 
         if use_distillation:
             # --- Distillation path: attention KL/MSE (both backbones, when
-            #     attention targets were extracted) + latent-embedding CFM
+            #     attention targets were extracted) + latent-embedding DDPM
             #     (both backbones) + task loss ---
             # collate_attn_targets returns a 7-tuple:
             #   pyg_batch, teacher_attns_padded, attn_masks, _attn_w,
@@ -1978,7 +1955,7 @@ def run_training(args):
 
                     # ---- Pass B: scored forward (with grad) ----------------
                     if denoiser is not None:
-                        # Compute GRED once WITH grad — gradient from the CFM
+                        # Compute GRED once WITH grad — gradient from the DDPM
                         # loss should flow back through these layers so the
                         # student's GRED is trained to produce features that
                         # the denoiser can map onto the teacher target. Reuse
@@ -2022,7 +1999,7 @@ def run_training(args):
                     cond_features = dense_x_s if denoiser is not None else None
 
                 # Task loss
-                task_loss = loss_fn(logits, pyg_batch.y)
+                task_loss = task.loss(logits, pyg_batch.y)
 
                 # Attention KL/MSE: both backbones, when attention targets
                 # were extracted and the student forward returned per-layer
@@ -2096,8 +2073,8 @@ def run_training(args):
                 kl_losses_log.append(kl_loss.item())
                 mse_losses_log.append(mse_loss.item())
                 cfm_losses_log.append(float(cfm_loss.item()))
-                all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
-                all_labels.append(pyg_batch.y.cpu().numpy())
+                all_preds.append(task.predict(logits))
+                all_labels.append(task.labels_to_numpy(pyg_batch.y))
         else:
             # --- Task-only path (no extracted targets) ---
             for batch_data in active_loader:
@@ -2149,7 +2126,7 @@ def run_training(args):
                     logits, _ = student(pyg_batch, dist_masks_batch, node_masks_batch)
                 else:
                     logits, _ = student(pyg_batch)
-                task_loss = loss_fn(logits, pyg_batch.y)
+                task_loss = task.loss(logits, pyg_batch.y)
 
                 task_loss.backward()
                 nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
@@ -2159,10 +2136,10 @@ def run_training(args):
                 train_losses.append(task_loss.item())
                 task_losses_log.append(task_loss.item())
                 distill_losses_log.append(0.0)
-                all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
-                all_labels.append(pyg_batch.y.cpu().numpy())
+                all_preds.append(task.predict(logits))
+                all_labels.append(task.labels_to_numpy(pyg_batch.y))
 
-        train_ap = compute_macro_ap(
+        train_ap = task.compute_metric(
             np.concatenate(all_preds), np.concatenate(all_labels))
         mean_task = float(np.mean(task_losses_log))
         mean_distill = float(np.mean(distill_losses_log))
@@ -2180,15 +2157,18 @@ def run_training(args):
                   f"task={mean_task:.4f} distill={mean_distill:.4f} "
                   f"(kl={mean_kl:.4f} mse={mean_mse:.6f}{cfm_str}) "
                   f"(thresh={args.distill_loss_threshold}) | "
-                  f"train_AP={train_ap:.4f} val_AP={val_ap:.4f} test_AP={test_ap:.4f}",
+                  f"train_{metric_label}={train_ap:.4f} val_{metric_label}={val_ap:.4f} "
+                  f"test_{metric_label}={test_ap:.4f}",
                   flush=True)
         else:
             print(f"Epoch {epoch:3d}/{args.max_epochs} [{elapsed:.1f}s] | "
                   f"task={mean_task:.4f} distill={mean_distill:.4f} | "
-                  f"train_AP={train_ap:.4f} val_AP={val_ap:.4f} test_AP={test_ap:.4f}",
+                  f"train_{metric_label}={train_ap:.4f} val_{metric_label}={val_ap:.4f} "
+                  f"test_{metric_label}={test_ap:.4f}",
                   flush=True)
 
-        if val_ap > best_val_ap:
+        improved = (val_ap > best_val_ap) if higher_better else (val_ap < best_val_ap)
+        if improved:
             best_val_ap = val_ap
             best_epoch = epoch
             patience_counter = 0
@@ -2201,15 +2181,15 @@ def run_training(args):
             torch.save(
                 ckpt_payload,
                 os.path.join(args.save_dir, "attn_distill_best.pt"))
-            print(f"  -> New best val_AP={val_ap:.4f} (test={test_ap:.4f})")
+            print(f"  -> New best val_{metric_label}={val_ap:.4f} (test={test_ap:.4f})")
         else:
             patience_counter += 1
             if patience_counter >= args.patience:
                 print(f"Early stopping at epoch {epoch}.")
                 break
 
-    print(f"\nDone. Baseline val_AP={baseline_val_ap:.4f} | "
-          f"Best distilled val_AP={best_val_ap:.4f} at epoch {best_epoch}")
+    print(f"\nDone. Baseline val_{metric_label}={baseline_val_ap:.4f} | "
+          f"Best distilled val_{metric_label}={best_val_ap:.4f} at epoch {best_epoch}")
 
 
 # ================================================================
@@ -2219,6 +2199,7 @@ def run_training(args):
 @torch.no_grad()
 def evaluate(model, loader, args):
     model.eval()
+    task = getattr(args, 'task', None)
     backbone = getattr(args, 'backbone', 'vanilla_gt')
     is_hybrid = (backbone == "hybrid")
     use_self_attn_weighting = (is_hybrid
@@ -2264,8 +2245,14 @@ def evaluate(model, loader, args):
         else:
             batch = batch_data.to(args.device)
             logits, _ = model(batch, return_attention=False)
-        all_preds.append(torch.sigmoid(logits).cpu().numpy())
-        all_labels.append(batch.y.cpu().numpy())
+        if task is not None:
+            all_preds.append(task.predict(logits))
+            all_labels.append(task.labels_to_numpy(batch.y))
+        else:
+            all_preds.append(torch.sigmoid(logits).cpu().numpy())
+            all_labels.append(batch.y.cpu().numpy())
+    if task is not None:
+        return task.compute_metric(np.concatenate(all_preds), np.concatenate(all_labels))
     return compute_macro_ap(np.concatenate(all_preds), np.concatenate(all_labels))
 
 
@@ -2400,10 +2387,11 @@ def main():
                         "attention is trained against the teacher's optimal "
                         "attention; otherwise the weights are uninformative.")
 
-    # Latent embedding flow-matching distillation (train phase, both backbones).
-    # Trains a NodeEmbeddingFlowDenoiser as an auxiliary head: it predicts the
-    # vector field from N(0, I) to the teacher's post-proxy pre-attention
-    # node embeddings, conditioned on the student's matching upstream features.
+    # Latent embedding DDPM distillation (train phase, both backbones).
+    # Trains a NodeEmbeddingDDPMDenoiser as an auxiliary head: a small MLP
+    # predicts per-step Gaussian noise ε given concat([x_t, cond, t_emb]),
+    # where the target x_0 is the teacher's post-proxy pre-attention node
+    # embedding and cond is the student's matching upstream features.
     # Conditioning differs by backbone:
     #   vanilla_gt: raw encoder output (encode_dense).
     #   hybrid:     post-GRED features (encode_gred(encode_dense)).
@@ -2414,38 +2402,45 @@ def main():
     # gap" supervision; orthogonal to attention KL/MSE.
     p.add_argument("--use_latent_embedding_distill",
                    action=argparse.BooleanOptionalAction, default=False,
-                   help="Add a CFM auxiliary loss that trains a denoiser to "
+                   help="Add a DDPM auxiliary loss that trains a denoiser to "
                         "map student upstream features to teacher post-proxy "
                         "pre-attention embeddings. Works for both vanilla_gt "
                         "and hybrid backbones.")
     p.add_argument("--latent_distill_weight", type=float, default=0.0,
-                   help="Weight on the latent-embedding flow-matching loss. "
+                   help="Weight on the latent-embedding DDPM loss. "
                         "Set >0 (e.g. 0.1-1.0) to enable. The flag "
                         "--use_latent_embedding_distill must also be on.")
     p.add_argument("--denoiser_dim", type=int, default=None,
                    help="Internal dim for the latent-embedding denoiser. "
                         "Defaults to --hidden_dim.")
-    p.add_argument("--denoiser_layers", type=int, default=4,
-                   help="Number of layers in the latent-embedding denoiser.")
-    p.add_argument("--denoiser_heads", type=int, default=None,
-                   help="Number of attention heads in the denoiser. Defaults "
-                        "to --num_heads.")
+    p.add_argument("--denoiser_layers", type=int, default=2,
+                   help="Number of layers in the DDPM MLP denoiser. Default "
+                        "is 2 (DiffGraph-style: one hidden + one output).")
     p.add_argument("--denoiser_dropout", type=float, default=None,
                    help="Dropout for the denoiser. Defaults to --dropout.")
-    p.add_argument("--denoiser_euler_steps", type=int, default=4,
-                   help="Number of Euler integration steps used at inference "
-                        "for the latent-embedding denoiser. Training is one "
-                        "CFM step per batch regardless.")
     p.add_argument("--denoiser_lr", type=float, default=None,
                    help="Optional separate learning rate for the denoiser. "
                         "Defaults to --lr.")
+    # ---- DDPM schedule ----
+    p.add_argument("--num_diffusion_steps", type=int, default=1000,
+                   help="Number of diffusion timesteps T for the DDPM denoiser.")
+    p.add_argument("--diff_beta_start", type=float, default=1e-4,
+                   help="Linear-schedule β_0 for the DDPM denoiser.")
+    p.add_argument("--diff_beta_end", type=float, default=0.02,
+                   help="Linear-schedule β_T for the DDPM denoiser.")
+    # ---- Deprecated (kept for CLI compatibility; ignored by DDPM denoiser). ----
+    p.add_argument("--denoiser_heads", type=int, default=None,
+                   help="[DEPRECATED] No-op under the DDPM MLP denoiser; "
+                        "retained only so old run scripts keep parsing.")
+    p.add_argument("--denoiser_euler_steps", type=int, default=4,
+                   help="[DEPRECATED] No-op under the DDPM denoiser (no Euler "
+                        "integration). Retained only for CLI compatibility.")
     p.add_argument("--latent_uncond_train_prob", type=float, default=0.1,
-                   help="Probability of training the unconditional CFG branch "
-                        "of the denoiser per batch.")
+                   help="[DEPRECATED] No-op under the DDPM denoiser (no CFG "
+                        "branch). Retained only for CLI compatibility.")
     p.add_argument("--latent_guidance_scale", type=float, default=1.0,
-                   help="Default classifier-free-guidance scale for denoiser "
-                        "inference. 1.0 = pure conditional, >1.0 extrapolates "
-                        "toward the conditioning.")
+                   help="[DEPRECATED] No-op under the DDPM denoiser (no CFG). "
+                        "Retained only for CLI compatibility.")
 
     # Training (train phase)
     p.add_argument("--lr", type=float, default=5e-5)
@@ -2457,9 +2452,20 @@ def main():
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--device", type=str, default=None)
 
+    # Dataset selection (LRGB). A single switch flips loss, output dim, encoder
+    # type, and prediction level so no other CLI flags need to change.
+    p.add_argument("--dataset", type=str, default="Peptides-func",
+                   choices=["Peptides-func", "Peptides-struct", "PascalVOC-SP"],
+                   help="LRGB dataset name. Drives task loss, output_dim, "
+                        "node encoder, and prediction head/metric.")
+
     args, unknown = p.parse_known_args()
     if args.device is None:
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Resolve task once and stash on args; loss/predict/metric/level/encoder
+    # are now uniformly accessible as args.task.* throughout the script.
+    args.task = build_task(args.dataset)
+    args.output_dim = args.task.output_dim
     os.makedirs(args.save_dir, exist_ok=True)
     print(args.__dict__)
     print("Unknown args = ", unknown)
@@ -2485,5 +2491,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

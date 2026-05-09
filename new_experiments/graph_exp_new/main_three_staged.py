@@ -1,3 +1,4 @@
+# main_three_staged.py
 """
 Three-Staged Pipeline  generator trained directly on task loss.
 
@@ -30,7 +31,7 @@ from generators import (
     GREDLayersGenerator,
     CrossAttentionRouter, MultiPointProxyWrapper,
 )
-from metrics import compute_macro_ap
+from metrics import compute_macro_ap, build_task
 from losses import novelty_loss, inter_proxy_cosine_stats, proxy_diversity_loss
 from optim_utils import (
     build_grouped_optimizer_and_scheduler,
@@ -198,12 +199,19 @@ def build_parser():
                    help="Minimum LR floor for warmup-cosine schedule")
     p.add_argument("--warmup_ratio", type=float, default=0.05,
                    help="Warmup fraction of total optimization steps")
-    p.add_argument("--plateau_patience", type=int, default=15,
+    p.add_argument("--plateau_patience", type=int, default=5,
                    help="Patience for ReduceLROnPlateau scheduler on validation loss")
     p.add_argument("--recurrent_lr_factor", type=float, default=1.0,
                    help="LR multiplier for recurrent GRED parameters")
     p.add_argument("--save_dir", type=str, default="checkpoints_three_staged")
     p.add_argument("--device", type=str, default=None)
+
+    # Dataset selection (LRGB). One switch flips loss, output dim, encoder
+    # type, and prediction level so no other CLI flags need to change.
+    p.add_argument("--dataset", type=str, default="Peptides-func",
+                   choices=["Peptides-func", "Peptides-struct", "PascalVOC-SP"],
+                   help="LRGB dataset name. Drives task loss, output_dim, "
+                        "node encoder, and prediction head/metric.")
 
     return p
 
@@ -223,6 +231,10 @@ def parse_args():
         args.s3_lr_gen = args.s2_lr * 0.1
     if args.s3_lr_transformer is None:
         args.s3_lr_transformer = args.s3_lr_gen * 0.1
+    # Resolve task once and stash on args; loss/predict/metric/level/encoder
+    # are then uniformly accessible as args.task.* throughout the script.
+    args.task = build_task(args.dataset)
+    args.output_dim = args.task.output_dim
     print(args.__dict__)
     return args
 
@@ -296,20 +308,25 @@ def build_model(args):
     """Build backbone model based on --backbone arg."""
     lap_pe_dim = args.lap_pe_dim if args.use_lap_pe else 0
     cross_attn_router = _build_cross_attn_router(args)
+    dataset_name = getattr(args, "dataset", "Peptides-func")
+    task_level = args.task.level if hasattr(args, "task") else "graph"
+    output_dim = args.task.output_dim if hasattr(args, "task") else args.output_dim
     if args.backbone == "vanilla_gt":
         return GraphTransformer(
             num_layers=args.num_layers, num_heads=args.num_heads,
-            hidden_dim=args.hidden_dim, output_dim=args.output_dim,
+            hidden_dim=args.hidden_dim, output_dim=output_dim,
             dropout=args.dropout, lap_pe_dim=lap_pe_dim,
             cross_attn_router=cross_attn_router,
+            dataset_name=dataset_name, task_level=task_level,
         )
     elif args.backbone == "gred":
         return GREDEncoder(
             hidden_dim=args.hidden_dim, state_dim=args.state_dim,
             num_layers=args.num_gred_layers, expand=args.gred_expand,
             r_min=args.r_min, r_max=args.r_max, max_phase=args.max_phase,
-            dropout=args.dropout, act=args.gred_act, output_dim=args.output_dim,
+            dropout=args.dropout, act=args.gred_act, output_dim=output_dim,
             lap_pe_dim=lap_pe_dim,
+            dataset_name=dataset_name, task_level=task_level,
         )
     elif args.backbone == "hybrid":
         return GREDHybridTransformer(
@@ -318,9 +335,10 @@ def build_model(args):
             num_transformer_layers=args.num_transformer_layers,
             num_heads=args.num_heads, expand=args.gred_expand,
             r_min=args.r_min, r_max=args.r_max, max_phase=args.max_phase,
-            dropout=args.dropout, act=args.gred_act, output_dim=args.output_dim,
+            dropout=args.dropout, act=args.gred_act, output_dim=output_dim,
             lap_pe_dim=lap_pe_dim,
             cross_attn_router=cross_attn_router,
+            dataset_name=dataset_name, task_level=task_level,
         )
     else:
         raise ValueError(f"Unknown backbone: {args.backbone}")
@@ -433,11 +451,14 @@ def _generate_proxies(model, generator, batch, dense_x, dense_mask, args,
 
 @torch.no_grad()
 def downstream_eval(model, generator, loader, device, args):
-    """Evaluate generated proxies through frozen transformer. Returns (AP, loss)."""
+    """Evaluate generated proxies through frozen transformer.
+
+    Returns (metric, loss) — metric is task-specific (AP / MAE / F1).
+    """
     model.eval()
     if generator is not None:
         generator.eval()
-    loss_fn = nn.BCEWithLogitsLoss()
+    task = args.task
     all_preds, all_labels, losses = [], [], []
     is_gred = args.backbone in ("gred", "hybrid")
 
@@ -487,11 +508,11 @@ def downstream_eval(model, generator, loader, device, args):
                                   precomputed_dense=(dense_x, dense_mask),
                                   precomputed_gred=gred_h, readout_scope=args.readout_scope)
 
-        losses.append(loss_fn(logits, batch.y).item())
-        all_preds.append(torch.sigmoid(logits).cpu().numpy())
-        all_labels.append(batch.y.cpu().numpy())
+        losses.append(task.loss(logits, batch.y).item())
+        all_preds.append(task.predict(logits))
+        all_labels.append(task.labels_to_numpy(batch.y))
 
-    ap = compute_macro_ap(
+    ap = task.compute_metric(
         np.concatenate(all_preds, axis=0),
         np.concatenate(all_labels, axis=0),
     )
@@ -513,6 +534,7 @@ def mean_proxy_eval(model, generator, loader, device, args):
     if hasattr(model, 'multi_point_proxy') and model.multi_point_proxy is not None:
         return float('nan')
 
+    task = args.task
     all_preds, all_labels = [], []
     is_gred = args.backbone in ("gred", "hybrid")
 
@@ -553,10 +575,10 @@ def mean_proxy_eval(model, generator, loader, device, args):
         else:
             logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
 
-        all_preds.append(torch.sigmoid(logits).cpu().numpy())
-        all_labels.append(batch.y.cpu().numpy())
+        all_preds.append(task.predict(logits))
+        all_labels.append(task.labels_to_numpy(batch.y))
 
-    return compute_macro_ap(
+    return task.compute_metric(
         np.concatenate(all_preds, axis=0),
         np.concatenate(all_labels, axis=0),
     )
@@ -578,6 +600,7 @@ def run_stage1(args):
         use_dist_masks=is_gred, max_hops=args.max_hops,
         dist_mask_workers=args.dist_mask_workers,
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
+        dataset_name=args.dataset,
     )
 
     model = build_model(args).to(args.device)
@@ -598,9 +621,11 @@ def run_stage1(args):
         optimizer,
         patience=args.plateau_patience,
     )
-    loss_fn = nn.BCEWithLogitsLoss()
+    task = args.task
+    metric_label = task.metric_label
+    higher_better = task.higher_is_better
 
-    best_val_ap = 0.0
+    best_val_ap = -float("inf") if higher_better else float("inf")
     best_val_loss = float("inf")
     best_epoch = -1
     patience_counter = 0
@@ -630,16 +655,16 @@ def run_stage1(args):
                 logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
             elif args.backbone == "hybrid":
                 logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
-            loss = loss_fn(logits, batch.y)
+            loss = task.loss(logits, batch.y)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.s1_grad_clip)
             optimizer.step()
             scheduler.step()
             train_losses.append(loss.item())
-            all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
-            all_labels.append(batch.y.cpu().numpy())
+            all_preds.append(task.predict(logits))
+            all_labels.append(task.labels_to_numpy(batch.y))
 
-        train_ap = compute_macro_ap(np.concatenate(all_preds), np.concatenate(all_labels))
+        train_ap = task.compute_metric(np.concatenate(all_preds), np.concatenate(all_labels))
         train_loss = float(np.mean(train_losses))
 
         model.eval()
@@ -660,10 +685,10 @@ def run_stage1(args):
                     logits, _ = model(batch, readout_scope=args.readout_scope)
                 else:
                     logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
-                val_losses.append(loss_fn(logits, batch.y).item())
-                val_preds.append(torch.sigmoid(logits).cpu().numpy())
-                val_labels.append(batch.y.cpu().numpy())
-        val_ap = compute_macro_ap(np.concatenate(val_preds), np.concatenate(val_labels))
+                val_losses.append(task.loss(logits, batch.y).item())
+                val_preds.append(task.predict(logits))
+                val_labels.append(task.labels_to_numpy(batch.y))
+        val_ap = task.compute_metric(np.concatenate(val_preds), np.concatenate(val_labels))
         val_loss = float(np.mean(val_losses))
         plateau_scheduler.step(val_loss)
 
@@ -674,8 +699,8 @@ def run_stage1(args):
             mem_str = f" mem={mem_mb:.0f}MB"
             torch.cuda.reset_peak_memory_stats()
         log_line = (f"Epoch {epoch:3d}/{args.s1_max_epochs} [{elapsed:.1f}s{mem_str}] | "
-                    f"train_loss={train_loss:.4f} train_AP={train_ap:.4f} | "
-                    f"val_loss={val_loss:.4f} val_AP={val_ap:.4f}")
+                    f"train_loss={train_loss:.4f} train_{metric_label}={train_ap:.4f} | "
+                    f"val_loss={val_loss:.4f} val_{metric_label}={val_ap:.4f}")
 
         if epoch % 10 == 0:
             model.eval()
@@ -696,15 +721,15 @@ def run_stage1(args):
                         logits, _ = model(batch, readout_scope=args.readout_scope)
                     else:
                         logits, _ = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
-                    test_preds.append(torch.sigmoid(logits).cpu().numpy())
-                    test_labels.append(batch.y.cpu().numpy())
-            test_ap = compute_macro_ap(np.concatenate(test_preds), np.concatenate(test_labels))
-            log_line += f" | test_AP={test_ap:.4f}"
+                    test_preds.append(task.predict(logits))
+                    test_labels.append(task.labels_to_numpy(batch.y))
+            test_ap = task.compute_metric(np.concatenate(test_preds), np.concatenate(test_labels))
+            log_line += f" | test_{metric_label}={test_ap:.4f}"
 
         print(log_line, flush=True)
 
         improved_val_loss = val_loss < best_val_loss
-        improved_val_ap = val_ap > best_val_ap
+        improved_val_ap = (val_ap > best_val_ap) if higher_better else (val_ap < best_val_ap)
         if improved_val_loss or improved_val_ap:
             if improved_val_loss:
                 best_val_loss = val_loss
@@ -718,7 +743,7 @@ def run_stage1(args):
                 "args": vars(args),
             }, save_path)
             print(
-                f"  -> New best metrics: val_loss={best_val_loss:.4f} val_AP={best_val_ap:.4f}, saved",
+                f"  -> New best metrics: val_loss={best_val_loss:.4f} val_{metric_label}={best_val_ap:.4f}, saved",
                 flush=True,
             )
         else:
@@ -780,6 +805,7 @@ def run_stage2(args, model_path):
         use_dist_masks=is_gred, max_hops=args.max_hops,
         dist_mask_workers=args.dist_mask_workers,
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
+        dataset_name=args.dataset,
     )
 
     # Load and freeze model
@@ -821,9 +847,11 @@ def run_stage2(args, model_path):
         optimizer,
         patience=args.plateau_patience,
     )
-    loss_fn = nn.BCEWithLogitsLoss()
+    task = args.task
+    metric_label = task.metric_label
+    higher_better = task.higher_is_better
 
-    best_val_ap = 0.0
+    best_val_ap = -float("inf") if higher_better else float("inf")
     best_val_loss = float("inf")
     best_gen_loss = float("inf")
     best_epoch = -1
@@ -877,7 +905,7 @@ def run_stage2(args, model_path):
                 if aux_loss is not None and not isinstance(aux_loss, torch.Tensor):
                     aux_loss = torch.tensor(aux_loss, device=batch.x.device)
                 # For multi-point proxy, skip novelty and diversity loss
-                task_loss = loss_fn(logits, batch.y)
+                task_loss = task.loss(logits, batch.y)
                 loss = task_loss
                 if aux_loss is not None:
                     loss = loss + aux_loss
@@ -906,7 +934,7 @@ def run_stage2(args, model_path):
                     logits, node_emb = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
                     node_emb = None  # GRED has no proxy path, no novelty loss
 
-                task_loss = loss_fn(logits, batch.y)
+                task_loss = task.loss(logits, batch.y)
                 loss = task_loss
                 if aux_loss is not None:
                     loss = loss + aux_loss
@@ -981,8 +1009,8 @@ def run_stage2(args, model_path):
             print(
                 f"Epoch {epoch:3d}/{args.s2_max_epochs} [{elapsed:.1f}s{mem_str}] | "
                 f"task_loss={mean_train_loss:.4f} | "
-                f"val_AP={val_ap:.4f} mean_AP={mean_ap:.4f} delta={proxy_delta:+.4f} | "
-                f"test_AP={test_ap:.4f} | "
+                f"val_{metric_label}={val_ap:.4f} mean_{metric_label}={mean_ap:.4f} delta={proxy_delta:+.4f} | "
+                f"test_{metric_label}={test_ap:.4f} | "
                 f"cos_sim={mean_cos_sim:.4f} grad_norm={mean_grad_norm:.4f} "
                 f"attn_entr={attn_entropy:.4f} | "
                 f"novelty_loss={mean_novelty_loss:.4f} diversity_loss={mean_diversity_loss:.4f}",
@@ -1003,7 +1031,7 @@ def run_stage2(args, model_path):
 
             improved_gen_loss = mean_train_loss < best_gen_loss
             improved_val_loss = val_loss < best_val_loss
-            improved_val_ap = val_ap > best_val_ap
+            improved_val_ap = (val_ap > best_val_ap) if higher_better else (val_ap < best_val_ap)
             if improved_val_loss or improved_val_ap:  # improved_gen_loss
                 if improved_gen_loss:
                     best_gen_loss = mean_train_loss
@@ -1020,7 +1048,7 @@ def run_stage2(args, model_path):
                 }, save_path)
                 print(
                     f"  -> New best metrics: gen_loss={best_gen_loss:.4f} "
-                    f"val_loss={best_val_loss:.4f} val_AP={best_val_ap:.4f}",
+                    f"val_loss={best_val_loss:.4f} val_{metric_label}={best_val_ap:.4f}",
                     flush=True,
                 )
             else:
@@ -1068,6 +1096,7 @@ def run_stage3(args, model_path, generator_path):
         use_dist_masks=is_gred, max_hops=args.max_hops,
         dist_mask_workers=args.dist_mask_workers,
         use_lap_pe=args.use_lap_pe, lap_pe_dim=args.lap_pe_dim,
+        dataset_name=args.dataset,
     )
 
     # Load model
@@ -1087,7 +1116,9 @@ def run_stage3(args, model_path, generator_path):
         model.multi_point_proxy = multi_point_proxy
         print(f"  Multi-point proxy wrapper attached", flush=True)
 
-    loss_fn = nn.BCEWithLogitsLoss()
+    task = args.task
+    metric_label = task.metric_label
+    higher_better = task.higher_is_better
 
     # Phase A optimizer: generator only, transformer frozen
     _freeze(model)
@@ -1125,7 +1156,7 @@ def run_stage3(args, model_path, generator_path):
     sched_b = None
     plateau_scheduler_b = None
 
-    best_val_ap = 0.0
+    best_val_ap = -float("inf") if higher_better else float("inf")
     best_val_loss = float("inf")
     best_gen_loss = float("inf")
     best_epoch = -1
@@ -1238,7 +1269,7 @@ def run_stage3(args, model_path, generator_path):
                     aux_loss = None
 
                 # For multi-point proxy, skip novelty and diversity loss
-                task_loss = loss_fn(logits, batch.y)
+                task_loss = task.loss(logits, batch.y)
                 loss = task_loss
                 if aux_loss is not None:
                     loss = loss + aux_loss
@@ -1279,7 +1310,7 @@ def run_stage3(args, model_path, generator_path):
                         logits, node_emb = model(batch, dist_masks_batch, node_masks_batch, readout_scope=args.readout_scope)
                         node_emb = None  # GRED has no proxy path
 
-                    task_loss = loss_fn(logits, batch.y)
+                    task_loss = task.loss(logits, batch.y)
                     loss = task_loss
                     if aux_loss is not None:
                         loss = loss + aux_loss
@@ -1305,7 +1336,7 @@ def run_stage3(args, model_path, generator_path):
                         logits, _ = model(batch, dist_masks_batch, node_masks_batch,
                                           precomputed_dense=(dense_x, dense_mask),
                                           precomputed_gred=gred_h, readout_scope=args.readout_scope)
-                    task_loss = loss_fn(logits, batch.y)
+                    task_loss = task.loss(logits, batch.y)
                     loss = task_loss
                     aux_loss = None
                     # When use_proxy=False (proxy dropout), skip novelty and diversity
@@ -1322,12 +1353,12 @@ def run_stage3(args, model_path, generator_path):
             scheduler.step()
 
             train_losses.append(loss.item())
-            all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
-            all_labels.append(batch.y.cpu().numpy())
+            all_preds.append(task.predict(logits))
+            all_labels.append(task.labels_to_numpy(batch.y))
             epoch_novelty_losses.append(novelty_loss_val)
             epoch_diversity_losses.append(diversity_loss_val)
 
-        train_ap = compute_macro_ap(np.concatenate(all_preds), np.concatenate(all_labels))
+        train_ap = task.compute_metric(np.concatenate(all_preds), np.concatenate(all_labels))
         train_loss = float(np.mean(train_losses))
         mean_novelty_loss = float(np.mean(epoch_novelty_losses))
         mean_diversity_loss = float(np.mean(epoch_diversity_losses))
@@ -1347,17 +1378,17 @@ def run_stage3(args, model_path, generator_path):
             torch.cuda.reset_peak_memory_stats()
         print(
             f"Epoch {epoch:3d}/{args.s3_max_epochs} [{phase}][{elapsed:.1f}s{mem_str}] | "
-            f"train_loss={train_loss:.4f} train_AP={train_ap:.4f} | "
-            f"val_loss={val_loss:.4f} val_AP={val_ap:.4f} | "
-            f"test_AP={test_ap:.4f} | "
+            f"train_loss={train_loss:.4f} train_{metric_label}={train_ap:.4f} | "
+            f"val_loss={val_loss:.4f} val_{metric_label}={val_ap:.4f} | "
+            f"test_{metric_label}={test_ap:.4f} | "
             f"novelty_loss={mean_novelty_loss:.4f} diversity_loss={mean_diversity_loss:.4f}",
             flush=True,
         )
 
         improved_gen_loss = train_loss < best_gen_loss
         improved_val_loss = val_loss < best_val_loss
-        improved_val_ap = val_ap > best_val_ap
-        if improved_val_loss or improved_val_ap:  # improved_gen_loss or 
+        improved_val_ap = (val_ap > best_val_ap) if higher_better else (val_ap < best_val_ap)
+        if improved_val_loss or improved_val_ap:  # improved_gen_loss or
             if improved_gen_loss:
                 best_gen_loss = train_loss
             if improved_val_loss:
@@ -1374,7 +1405,7 @@ def run_stage3(args, model_path, generator_path):
             }, save_path)
             print(
                 f"  -> New best metrics: gen_loss={best_gen_loss:.4f} "
-                f"val_loss={best_val_loss:.4f} val_AP={best_val_ap:.4f} (test={test_ap:.4f})",
+                f"val_loss={best_val_loss:.4f} val_{metric_label}={best_val_ap:.4f} (test={test_ap:.4f})",
                 flush=True,
             )
         else:

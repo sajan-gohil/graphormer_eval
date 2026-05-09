@@ -1,9 +1,12 @@
+# models.py
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.utils import to_dense_batch
 from torch_geometric.nn import global_add_pool
+
+from data import get_dataset_info
 
 
 # OGB peptides categorical feature dimensions.
@@ -16,6 +19,11 @@ class NodeEncoder(nn.Module):
     For OGB peptides categorical node features, this matches the official
     implementation by summing per-feature embeddings. For other datasets,
     a simple dimension-matching fallback keeps the pipelines usable.
+
+    For non-Peptides LRGB datasets (e.g. PascalVOC-SP) prefer building via
+    :func:`build_node_encoder` — it returns ``LinearNodeEncoder`` with an
+    actual learnable input projection rather than this class's pad/truncate
+    fallback.
     """
     def __init__(self, hidden_dim=64, lap_pe_dim=0):
         super().__init__()
@@ -73,6 +81,64 @@ class NodeEncoder(nn.Module):
             h = h + self.lap_pe_encoder(lap_pe)
 
         return h
+
+
+class LinearNodeEncoder(nn.Module):
+    """Continuous-feature node encoder for LRGB datasets like PascalVOC-SP.
+
+    Projects per-node feature vectors of size ``in_dim`` into ``hidden_dim``
+    via a learnable Linear + GELU, then optionally adds a Laplacian PE term.
+    Mirrors the interface of ``NodeEncoder`` so it can be swapped in via
+    :func:`build_node_encoder` without touching the downstream encoders.
+    """
+    def __init__(self, in_dim, hidden_dim, lap_pe_dim=0):
+        super().__init__()
+        self.in_dim = in_dim
+        self.hidden_dim = hidden_dim
+        self.proj = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+        )
+        self.lap_pe_dim = lap_pe_dim
+        if lap_pe_dim > 0:
+            self.lap_pe_encoder = nn.Linear(lap_pe_dim, hidden_dim)
+
+    def forward(self, x, edge_index, edge_attr, lap_pe=None):
+        del edge_index, edge_attr
+        x_float = x.float()
+        # Robust to feature-dim mismatch: pad/truncate so the experiment script
+        # can switch datasets without re-instantiating the model when in_dim
+        # was inferred from the registry but the raw feature width differs.
+        if x_float.size(-1) < self.in_dim:
+            x_float = F.pad(x_float, (0, self.in_dim - x_float.size(-1)))
+        elif x_float.size(-1) > self.in_dim:
+            x_float = x_float[..., :self.in_dim]
+        h = self.proj(x_float)
+        if self.lap_pe_dim > 0 and lap_pe is not None:
+            h = h + self.lap_pe_encoder(lap_pe)
+        return h
+
+
+def build_node_encoder(hidden_dim, lap_pe_dim=0, dataset_name="Peptides-func"):
+    """Factory: pick the right node encoder for an LRGB dataset.
+
+    Reads ``data.LRGB_DATASETS[dataset_name]`` to decide between the
+    Peptides-style categorical encoder and a learnable Linear projection
+    for continuous features (e.g. PascalVOC-SP). Other call sites should
+    use this rather than instantiating ``NodeEncoder`` directly so that
+    flipping ``--dataset`` re-routes to the correct encoder automatically.
+    """
+    info = get_dataset_info(dataset_name)
+    kind = info["node_encoder"]
+    if kind == "atom_categorical":
+        return NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim)
+    if kind == "linear":
+        return LinearNodeEncoder(
+            in_dim=info["node_feat_dim"],
+            hidden_dim=hidden_dim,
+            lap_pe_dim=lap_pe_dim,
+        )
+    raise ValueError(f"Unknown node_encoder kind: {kind}")
 
 
 class TransformerLayer(nn.Module):
@@ -147,10 +213,14 @@ class TransformerLayer(nn.Module):
 class GraphTransformer(nn.Module):
     def __init__(self, num_layers=5, num_heads=8, hidden_dim=64,
                  output_dim=10, dropout=0.3, lap_pe_dim=0,
-                 cross_attn_router=None, multi_point_proxy=None):
+                 cross_attn_router=None, multi_point_proxy=None,
+                 dataset_name="Peptides-func", task_level="graph"):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.encoder = NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim)
+        self.dataset_name = dataset_name
+        self.task_level = task_level
+        self.encoder = build_node_encoder(hidden_dim, lap_pe_dim=lap_pe_dim,
+                                          dataset_name=dataset_name)
         self.layers = nn.ModuleList([
             TransformerLayer(hidden_dim, num_heads, dropout)
             for _ in range(num_layers)
@@ -265,7 +335,19 @@ class GraphTransformer(nn.Module):
             for layer in self.layers:
                 dense_x = layer(dense_x, aug_mask_final)
 
-        # Readout: pool and classify
+        # Always extract original-N node embeddings (used by both readouts).
+        orig_x = dense_x[:, :max_N, :]
+        node_emb = orig_x[dense_mask]
+
+        if self.task_level == "node":
+            # Per-node prediction (e.g. PascalVOC-SP): apply head directly to
+            # flat real-node embeddings — no graph pooling. Logits shape is
+            # (total_real_nodes, num_classes), aligned with the flattened
+            # batch.y produced by PyG node-level batching.
+            logits = self.head(node_emb)
+            return logits, node_emb
+
+        # Graph-level readout: pool and classify
         if readout_scope == "all_tokens" and (
             proxy_embeddings is not None or self.multi_point_proxy is not None
         ) and self.cross_attn_router is None:
@@ -273,7 +355,6 @@ class GraphTransformer(nn.Module):
             batch_vec = torch.arange(B, device=dense_x.device).unsqueeze(1).expand_as(aug_mask_final)[aug_mask_final]
             pooled = global_add_pool(valid_emb, batch_vec)
         else:
-            orig_x = dense_x[:, :max_N, :]
             node_emb_masked = orig_x[dense_mask]
             # Build pooling indices from the active dense node mask so this
             # works for both full batches and subsampled precomputed_dense.
@@ -288,10 +369,6 @@ class GraphTransformer(nn.Module):
                 pooled = global_add_pool(node_emb_masked, batch_vec)
 
         logits = self.head(pooled)
-
-        # Always return original node embeddings
-        orig_x = dense_x[:, :max_N, :]
-        node_emb = orig_x[dense_mask]
         return logits, node_emb
 
 
@@ -566,10 +643,14 @@ class GREDEncoder(nn.Module):
     """
     def __init__(self, hidden_dim=88, state_dim=88, num_layers=8, expand=1,
                  r_min=0.0, r_max=1.0, max_phase=6.28, dropout=0.2,
-                 act="full-glu", output_dim=10, lap_pe_dim=0):
+                 act="full-glu", output_dim=10, lap_pe_dim=0,
+                 dataset_name="Peptides-func", task_level="graph"):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.encoder = NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim)
+        self.dataset_name = dataset_name
+        self.task_level = task_level
+        self.encoder = build_node_encoder(hidden_dim, lap_pe_dim=lap_pe_dim,
+                                          dataset_name=dataset_name)
 
         self.layers = nn.ModuleList([
             GREDLayer(hidden_dim, state_dim, expand, r_min, r_max, max_phase, dropout, act)
@@ -633,15 +714,20 @@ class GREDEncoder(nn.Module):
                 "Use GREDHybridTransformer instead."
             )
 
-        # Readout: sum pool over valid nodes
+        # Flat node embeddings used by both readouts.
+        node_emb = h[node_masks]
+
+        if self.task_level == "node":
+            # Per-node prediction: skip pooling entirely.
+            logits = self.head(node_emb)
+            return logits, node_emb
+
+        # Graph-level readout: sum pool over valid nodes.
         valid_emb = h[node_masks]
         batch_vec = torch.arange(B, device=h.device).unsqueeze(1).expand_as(node_masks)[node_masks]
         pooled = global_add_pool(valid_emb, batch_vec)
 
         logits = self.head(pooled)
-
-        # Return flat node embeddings
-        node_emb = h[node_masks]
         return logits, node_emb
 
 
@@ -673,10 +759,14 @@ class GREDHybridTransformer(nn.Module):
                  num_transformer_layers=2, num_heads=8, expand=1,
                  r_min=0.0, r_max=1.0, max_phase=6.28, dropout=0.2,
                  act="full-glu", output_dim=10, lap_pe_dim=0,
-                 cross_attn_router=None, multi_point_proxy=None):
+                 cross_attn_router=None, multi_point_proxy=None,
+                 dataset_name="Peptides-func", task_level="graph"):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.encoder = NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim)
+        self.dataset_name = dataset_name
+        self.task_level = task_level
+        self.encoder = build_node_encoder(hidden_dim, lap_pe_dim=lap_pe_dim,
+                                          dataset_name=dataset_name)
 
         # GRED layers for structure-aware encoding
         self.gred_layers = nn.ModuleList([
@@ -851,7 +941,18 @@ class GREDHybridTransformer(nn.Module):
                 else:
                     h_aug = layer(h_aug, aug_mask)
 
-        # Readout
+        # Flat node embeddings (from the GRED-encoded nodes, post-transformer).
+        orig_h = h_aug[:, :max_N, :]
+        node_emb = orig_h[dense_mask]
+
+        if self.task_level == "node":
+            # Per-node prediction: skip pooling and apply head to flat embeddings.
+            logits = self.head(node_emb)
+            if return_attention:
+                return logits, node_emb, attentions
+            return logits, node_emb
+
+        # Graph-level readout
         if readout_scope == "all_tokens" and (
             proxy_embeddings is not None or self.multi_point_proxy is not None
         ) and self.cross_attn_router is None:
@@ -859,7 +960,6 @@ class GREDHybridTransformer(nn.Module):
             batch_vec = torch.arange(B, device=h_aug.device).unsqueeze(1).expand_as(aug_mask)[aug_mask]
             pooled = global_add_pool(valid_emb, batch_vec)
         else:
-            orig_h = h_aug[:, :max_N, :]
             node_emb_masked = orig_h[dense_mask]
             # Keep pooling indices aligned with dense_mask when nodes are dropped
             # and precomputed_dense is passed from Phase 3.
@@ -874,11 +974,6 @@ class GREDHybridTransformer(nn.Module):
                 pooled = global_add_pool(node_emb_masked, batch_vec)
 
         logits = self.head(pooled)
-
-        # Flat node embeddings (from the GRED-encoded nodes, post-transformer)
-        orig_h = h_aug[:, :max_N, :]
-        node_emb = orig_h[dense_mask]
         if return_attention:
             return logits, node_emb, attentions
         return logits, node_emb
-
