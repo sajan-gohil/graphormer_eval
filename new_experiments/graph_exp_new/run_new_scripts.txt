@@ -1,0 +1,12 @@
+python train_khop_concat.py --dataset Peptides-func   --max_hops 40 --hop_dim 16
+python train_khop_concat.py --dataset Peptides-struct --max_hops 40 --hop_dim 16
+python train_khop_concat.py --dataset PascalVOC-SP    --max_hops 12 --hop_dim 24 --batch_size 16
+
+
+python train_weighted_gred.py --dataset Peptides-func   --num_layers 4
+python train_weighted_gred.py --dataset Peptides-struct --num_layers 4
+python train_weighted_gred.py --dataset PascalVOC-SP    --max_hops 12 --hidden_dim 96 --state_dim 96 --batch_size 16
+
+python train_cross_attn_only.py --dataset Peptides-func   --generator score_based --num_proxies 32 --num_layers 4
+python train_cross_attn_only.py --dataset Peptides-struct --generator score_based --num_proxies 32 --num_layers 4
+python train_cross_attn_only.py --dataset PascalVOC-SP    --generator gnn_pooling --num_proxies 64 --num_layers 4 --batch_size 16
