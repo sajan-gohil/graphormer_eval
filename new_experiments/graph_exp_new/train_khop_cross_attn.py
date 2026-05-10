@@ -1,18 +1,29 @@
 """
-Training script for Idea A — cross-attention router only (no global SA).
+Training script for the k-hop + cross-attention router model.
 
-Stack of cross-attention router blocks (proxy generation + N->M->N routing
-per block) without any global self-attention. End-to-end: no frozen
-transformer, no pretraining.
+This combines:
+    * k-hop attention-weighted aggregation (one shot, parallel over K)
+    * a stack of cross-attention router blocks (proxy generator + N->M->N)
+
+Compared to ``train_cross_attn_only.py``, the proxy generator sees node
+features that already encode the graph's hop-K topology, instead of having
+to recover long-range structure through stacked GNN passes (which oversmooth)
+or the proxy bottleneck alone.
 
 Datasets:
     Peptides-func, Peptides-struct, PascalVOC-SP
 
-Example:
-    python train_cross_attn_only.py --dataset Peptides-func \\
+Examples:
+    python train_khop_cross_attn.py --dataset Peptides-func \\
+        --max_hops 40 --hop_dim 16 \\
         --generator score_based --num_proxies 32 --num_layers 4
 
-    python train_cross_attn_only.py --dataset PascalVOC-SP \\
+    python train_khop_cross_attn.py --dataset Peptides-struct \\
+        --max_hops 40 --hop_dim 16 \\
+        --generator gnn_pooling --num_proxies 32 --num_layers 4
+
+    python train_khop_cross_attn.py --dataset PascalVOC-SP \\
+        --max_hops 12 --hop_dim 24 \\
         --generator gnn_pooling --num_proxies 64 --num_layers 4 \\
         --batch_size 16
 """
@@ -28,21 +39,37 @@ torch.set_float32_matmul_precision("high")
 
 from data import get_loaders
 from metrics import build_task
-from model_cross_attn_only import CrossAttnOnlyModel
+from model_khop_cross_attn import KHopCrossAttnModel
 from optim_utils import build_grouped_optimizer_and_scheduler
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="Train cross-attn-only model (Idea A)")
+    p = argparse.ArgumentParser(description="Train k-hop + cross-attn router model")
 
     # Dataset
     p.add_argument("--dataset", type=str, default="Peptides-func",
                    choices=["Peptides-func", "Peptides-struct", "PascalVOC-SP"])
+    p.add_argument("--max_hops", type=int, default=40,
+                   help="K — number of hop levels. Use ~12-16 for PascalVOC-SP.")
     p.add_argument("--use_lap_pe", action="store_true", default=False)
     p.add_argument("--lap_pe_dim", type=int, default=8)
 
-    # Model
-    p.add_argument("--hidden_dim", type=int, default=96)
+    # Model — top-level
+    p.add_argument("--hidden_dim", type=int, default=96,
+                   help="Node/router/proxy channel dim.")
+    p.add_argument("--hop_dim", type=int, default=16,
+                   help="Per-hop channel count inside the k-hop aggregator.")
+    p.add_argument("--fuse_mode", type=str, default="concat_proj",
+                   choices=["concat_proj", "sum_proj", "mean_proj"],
+                   help="How to collapse the K dim back to hidden_dim.")
+    p.add_argument("--khop_per_block", action="store_true", default=False,
+                   help="If set, re-run k-hop aggregation before every "
+                        "router block (using current node features).")
+    p.add_argument("--khop_num_heads", type=int, default=4)
+    p.add_argument("--no_residual_self", action="store_true",
+                   help="Disable forcing hop-0 to a clean self residual.")
+
+    # Router / blocks
     p.add_argument("--num_layers", type=int, default=4)
     p.add_argument("--num_heads", type=int, default=4)
     p.add_argument("--num_cross_layers", type=int, default=2,
@@ -54,8 +81,7 @@ def build_parser():
                    choices=["sum", "mean"])
     p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--aux_loss_weight", type=float, default=0.0,
-                   help="Multiplier for total generator aux loss "
-                        "(e.g. mincut/orthogonality regularization).")
+                   help="Multiplier for total generator aux loss.")
     p.add_argument("--aux_loss_decay", type=float, default=1.0,
                    help="Geometric decay applied across stacked blocks.")
     p.add_argument("--final_sa_layers", type=int, default=0,
@@ -101,10 +127,11 @@ def build_parser():
     p.add_argument("--warmup_ratio", type=float, default=0.05)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--dist_mask_workers", type=int, default=8)
 
     # Misc
     p.add_argument("--device", type=str, default=None)
-    p.add_argument("--save_dir", type=str, default="checkpoints_cross_attn_only")
+    p.add_argument("--save_dir", type=str, default="checkpoints_khop_cross_attn")
     p.add_argument("--seed", type=int, default=0)
     return p
 
@@ -116,24 +143,35 @@ def parse_args():
     return args
 
 
+# --------------------------------------------------------------------
+# Train / eval helpers
+# --------------------------------------------------------------------
+
+def _move_batch_to_device(batch, device):
+    pyg_batch, dist_masks, node_masks = batch
+    return (
+        pyg_batch.to(device),
+        dist_masks.to(device),
+        node_masks.to(device),
+    )
+
+
 def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
               grad_clip=1.0, aux_loss_weight=0.0):
     is_train = optimizer is not None
     model.train(is_train)
 
     losses, preds_acc, labels_acc = [], [], []
-    aux_losses = []
     for batch in loader:
-        batch = batch.to(device)
+        pyg_batch, dist_masks, node_masks = _move_batch_to_device(batch, device)
         if is_train:
             optimizer.zero_grad()
         with torch.set_grad_enabled(is_train):
-            logits, _ = model(batch)
-            main_loss = task.loss(logits, batch.y)
+            logits, _ = model(pyg_batch, dist_masks, node_masks)
+            main_loss = task.loss(logits, pyg_batch.y)
             aux = model.last_aux_loss
             if isinstance(aux, torch.Tensor) and aux_loss_weight > 0:
                 loss = main_loss + aux_loss_weight * aux
-                aux_losses.append(float(aux.item()))
             else:
                 loss = main_loss
 
@@ -147,7 +185,7 @@ def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
 
         losses.append(main_loss.item())
         preds_acc.append(task.predict(logits))
-        labels_acc.append(task.labels_to_numpy(batch.y))
+        labels_acc.append(task.labels_to_numpy(pyg_batch.y))
 
     y_pred = np.concatenate(preds_acc, axis=0)
     y_true = np.concatenate(labels_acc, axis=0)
@@ -167,18 +205,26 @@ def main():
           f"metric={task.metric_name} (higher_is_better={task.higher_is_better})",
           flush=True)
 
-    # Cross-attn-only does not require dist_masks — use the standard PyG loader.
+    # Need dist_masks because the aggregator runs at every block (or once at top).
     train_loader, val_loader, test_loader, _, _, _ = get_loaders(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        use_dist_masks=False,
+        use_dist_masks=True,
+        max_hops=args.max_hops,
+        dist_mask_workers=args.dist_mask_workers,
         use_lap_pe=args.use_lap_pe,
         lap_pe_dim=args.lap_pe_dim,
         dataset_name=args.dataset,
     )
 
-    model = CrossAttnOnlyModel(
+    model = KHopCrossAttnModel(
         hidden_dim=args.hidden_dim,
+        hop_dim=args.hop_dim,
+        max_hops=args.max_hops,
+        fuse_mode=args.fuse_mode,
+        khop_per_block=args.khop_per_block,
+        khop_residual_self=not args.no_residual_self,
+        khop_num_heads=args.khop_num_heads,
         num_proxies=args.num_proxies,
         num_layers=args.num_layers,
         num_heads=args.num_heads,

@@ -1,21 +1,41 @@
 """
-Idea A — cross-attention router only, no global self-attention.
+k-hop aggregation feeding the cross-attention router stack.
 
-Stack of L cross-attention "router" blocks, each of which:
-    1. Generates fresh M proxies from the current N node embeddings via
-       a configurable generator (score-based / GNN-pooling / PMA / coarsen).
-    2. Runs a single N -> M -> N routing pass (Q=proxy, K=V=node, then
-       proxy self-refine, then Q=node, K=V=proxy).
-    3. Returns refined N node embeddings.
+Motivation
+----------
+``model_cross_attn_only.py`` has no explicit access to long-range topology.
+The only multi-hop signal it carries comes from (a) stacked GNN-based proxy
+generators — which oversmooth with depth — or (b) the proxy bottleneck
+itself, which only sees the current node features and not any hop-distance
+structure.
 
-No global N-by-N self-attention is applied between layers — the only
-global mixing is the M-proxy bottleneck. This is the end-to-end variant
-that drops both the freezing of a pretrained transformer and the SA
-layer that previously came after cross-attention.
+This model wires the ``KHopAttentionAggregator`` (one-shot, parallel over K
+hops) into the front of the cross-attention router pipeline:
 
-Datasets:
+    encoder
+      -> (optional) hidden_dim -> hop_dim projection
+      -> KHopAttentionAggregator                       (B, N, K, hop_dim)
+      -> fuse K dim back to hidden_dim                 (B, N, hidden_dim)
+      -> stack of L cross-attention router blocks
+      -> head
+
+Each node's features going into the proxy generator already encode the
+graph's local-to-distance-K structure, so the generator's job is just to
+choose / refine M proxies — not to propagate information K hops via deep
+message passing.
+
+Two refresh modes:
+    * ``khop_per_block=False`` (default): k-hop aggregation runs once,
+      before the first router block. Cheaper. Subsequent blocks see only
+      router outputs.
+    * ``khop_per_block=True``: every router block re-aggregates over the
+      hop levels using the *current* node features and the *fixed* hop
+      masks. More expensive (L * K attention passes) but lets every block
+      consult hop-distance topology with up-to-date features.
+
+Datasets supported (via the ``data.Task`` abstraction):
     Peptides-func, Peptides-struct (graph-level)
-    PascalVOC-SP                   (node-level)
+    PascalVOC-SP                    (node-level)
 """
 
 from __future__ import annotations
@@ -26,6 +46,7 @@ import torch.nn.functional as F
 from torch_geometric.utils import to_dense_batch
 from torch_geometric.nn import global_add_pool, global_mean_pool
 
+from khop_attention import KHopAttentionAggregator, flatten_per_hop
 from models import build_node_encoder
 from generators import (
     ScoreBasedGenerator,
@@ -36,7 +57,9 @@ from generators import (
 )
 
 
-# Generator factory — kept here so the training script stays slim.
+# ---------------------------------------------------------------------------
+# Generator factory (mirrors model_cross_attn_only._make_generator).
+# ---------------------------------------------------------------------------
 def _make_generator(name: str, hidden_dim: int, num_proxies: int,
                     dropout: float = 0.2,
                     gnn_layers: int = 3,
@@ -82,9 +105,55 @@ def _make_generator(name: str, hidden_dim: int, num_proxies: int,
     raise ValueError(f"Unknown generator: {name}")
 
 
-class CrossAttnOnlyBlock(nn.Module):
-    """One end-to-end cross-attention router block (proxy gen + N->M->N)."""
+# ---------------------------------------------------------------------------
+# K-fusion: collapse (B, N, K, hop_dim) -> (B, N, hidden_dim).
+# ---------------------------------------------------------------------------
+class _KFusion(nn.Module):
+    """Configurable fusion of per-hop features back to a single per-node vector.
 
+    Modes:
+        "concat_proj":  flatten K -> Linear(K*hop_dim, hidden_dim)
+        "sum_proj":     sum over K  -> Linear(hop_dim, hidden_dim)
+        "mean_proj":    mean over K -> Linear(hop_dim, hidden_dim)
+    """
+
+    def __init__(self, hop_dim: int, max_hops: int, hidden_dim: int,
+                 mode: str = "concat_proj", dropout: float = 0.0):
+        super().__init__()
+        self.mode = mode
+        self.max_hops = max_hops
+        self.hop_dim = hop_dim
+        if mode == "concat_proj":
+            in_dim = max_hops * hop_dim
+        elif mode in ("sum_proj", "mean_proj"):
+            in_dim = hop_dim
+        else:
+            raise ValueError(f"Unknown fuse mode: {mode}")
+        self.proj = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, agg: torch.Tensor) -> torch.Tensor:
+        # agg: (B, N, K, hop_dim) — possibly with K < max_hops.
+        if self.mode == "concat_proj":
+            B, N, K, d = agg.shape
+            if K < self.max_hops:
+                pad = agg.new_zeros(B, N, self.max_hops - K, d)
+                agg = torch.cat([agg, pad], dim=2)
+            x = flatten_per_hop(agg)  # (B, N, max_hops * hop_dim)
+        elif self.mode == "sum_proj":
+            x = agg.sum(dim=2)
+        else:  # mean_proj
+            x = agg.mean(dim=2)
+        return self.proj(x)
+
+
+# ---------------------------------------------------------------------------
+# Single block = (optional re-aggregate) -> generator -> router.
+# ---------------------------------------------------------------------------
+class _Block(nn.Module):
     def __init__(
         self,
         hidden_dim: int,
@@ -94,7 +163,7 @@ class CrossAttnOnlyBlock(nn.Module):
         generator_name: str,
         num_cross_layers: int,
         use_proxy_self_attn: bool,
-        # Generator-specific:
+        # generator-specific (forwarded):
         gnn_layers: int = 3,
         gnn_type: str = "GINE",
         pool_types=("mean",),
@@ -130,59 +199,60 @@ class CrossAttnOnlyBlock(nn.Module):
             dropout=dropout,
             use_proxy_self_attn=use_proxy_self_attn,
         )
-
-        # Generators that operate on flat PyG node tensors (need edge_index/batch).
         self._gnn_based = generator_name in ("gnn_pooling", "graph_coarsening")
 
-    def forward(self, dense_x, dense_mask, *, edge_index=None,
-                batch_vec=None, edge_attr=None):
-        """
-        Args:
-            dense_x:    (B, N, d) dense node embeddings.
-            dense_mask: (B, N) bool real-node mask.
-            edge_index/batch_vec/edge_attr: required only for GNN-based
-                generators that consume flat-PyG tensors.
-        Returns:
-            refined_nodes: (B, N, d)
-            aux_loss:      scalar tensor (or None) from the generator.
-        """
+    def forward(self, dense_x, dense_mask, *,
+                edge_index=None, batch_vec=None, edge_attr=None):
         if self._gnn_based:
-            flat = dense_x[dense_mask]  # (total_real_N, d)
+            flat = dense_x[dense_mask]
             proxies, aux = self.generator(
                 flat, mask=None, edge_index=edge_index,
                 batch_vec=batch_vec, edge_attr=edge_attr,
             )
         else:
             proxies, aux = self.generator(dense_x, dense_mask)
-
         refined = self.router(dense_x, proxies, dense_mask)
         return refined, aux
 
 
-class CrossAttnOnlyModel(nn.Module):
-    """End-to-end model = encoder -> stacked cross-attn router blocks -> head.
+# ---------------------------------------------------------------------------
+# Top-level model.
+# ---------------------------------------------------------------------------
+class KHopCrossAttnModel(nn.Module):
+    """Encoder -> k-hop aggregation -> fuse -> stacked cross-attn routers.
 
     Args:
-        hidden_dim:        node/encoder/router/proxy channel dim.
-        num_proxies:       M, the proxy-bottleneck size (set << N).
-        num_layers:        number of router blocks stacked.
-        num_heads:         attention heads inside each router.
+        hidden_dim:        node/router channel dim.
+        hop_dim:           per-hop channel dim inside the k-hop aggregator
+                           (often smaller than hidden_dim to keep K*hop_dim
+                           manageable for the concat fuse).
+        max_hops:          K — number of hop levels.
+        fuse_mode:         "concat_proj" (default) | "sum_proj" | "mean_proj".
+        khop_per_block:    if True, re-aggregate over hops at every block
+                           using the current node features. If False, run
+                           the aggregator once at the top.
+        khop_residual_self: passed to KHopAttentionAggregator.
+        khop_num_heads:    attention heads inside the aggregator.
+        num_proxies:       M proxies per block.
+        num_layers:        number of router blocks.
+        num_heads:         attention heads inside the router.
         num_cross_layers:  internal N->M->N iterations per block.
-        use_proxy_self_attn: include the optional M-by-M self-attn refine
-                             step inside each router (default True).
-        generator_name:    which generator to use at every block.
-        share_blocks:      reuse a single CrossAttnOnlyBlock across depths.
-        output_dim:        task output channels.
-        dropout:           shared dropout rate.
-        graph_pool:        "sum" or "mean" for graph-level pooling.
-        task_level:        "graph" or "node".
-        aux_loss_decay:    geometric decay on per-block aux losses (to be
-                           added to the main task loss by the trainer).
+        use_proxy_self_attn: include the M-by-M self-attn refine step.
+        generator_name:    "score_based" / "gnn_pooling" / "pma" / "graph_coarsening".
+        share_blocks:      reuse one block across depths.
+        graph_pool / task_level: as in other models.
+        aux_loss_decay:    geometric decay on per-block aux losses.
     """
 
     def __init__(
         self,
         hidden_dim: int = 96,
+        hop_dim: int = 16,
+        max_hops: int = 40,
+        fuse_mode: str = "concat_proj",
+        khop_per_block: bool = False,
+        khop_residual_self: bool = True,
+        khop_num_heads: int = 4,
         num_proxies: int = 32,
         num_layers: int = 4,
         num_heads: int = 4,
@@ -198,10 +268,10 @@ class CrossAttnOnlyModel(nn.Module):
         lap_pe_dim: int = 0,
         aux_loss_decay: float = 1.0,
         # Optional global self-attention AFTER the cross-attn block stack
-        # and BEFORE the head. 0 (default) = off → matches Idea A spec.
+        # and BEFORE the head. 0 (default) = off.
         final_sa_layers: int = 0,
         final_sa_heads: int | None = None,
-        # Generator-specific (forwarded to _make_generator):
+        # generator-specific:
         gnn_layers: int = 3,
         gnn_type: str = "GINE",
         pool_types=("mean",),
@@ -218,9 +288,12 @@ class CrossAttnOnlyModel(nn.Module):
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.hop_dim = hop_dim
+        self.max_hops = max_hops
         self.task_level = task_level
         self.graph_pool = graph_pool
         self.aux_loss_decay = aux_loss_decay
+        self.khop_per_block = khop_per_block
 
         self.encoder = build_node_encoder(
             hidden_dim=hidden_dim,
@@ -228,6 +301,35 @@ class CrossAttnOnlyModel(nn.Module):
             dataset_name=dataset_name,
         )
 
+        # Project hidden_dim -> hop_dim before each aggregation pass.
+        if hop_dim != hidden_dim:
+            self.pre_proj = nn.Sequential(
+                nn.Linear(hidden_dim, hop_dim),
+                nn.GELU(),
+            )
+        else:
+            self.pre_proj = nn.Identity()
+
+        # Heads must divide hop_dim — clamp down if needed.
+        eff_heads = khop_num_heads
+        while eff_heads > 1 and hop_dim % eff_heads != 0:
+            eff_heads -= 1
+        self.aggregator = KHopAttentionAggregator(
+            hidden_dim=hop_dim,
+            num_heads=eff_heads,
+            dropout=dropout,
+            add_hop_embedding=True,
+            max_hops=max_hops,
+            residual_self=khop_residual_self,
+        )
+
+        # Fuse (B,N,K,hop_dim) back to (B,N,hidden_dim) for the router pipeline.
+        self.fuse = _KFusion(
+            hop_dim=hop_dim, max_hops=max_hops,
+            hidden_dim=hidden_dim, mode=fuse_mode, dropout=dropout,
+        )
+
+        # Stack of (gen + router) blocks.
         block_kwargs = dict(
             hidden_dim=hidden_dim,
             num_proxies=num_proxies,
@@ -236,29 +338,22 @@ class CrossAttnOnlyModel(nn.Module):
             generator_name=generator_name,
             num_cross_layers=num_cross_layers,
             use_proxy_self_attn=use_proxy_self_attn,
-            gnn_layers=gnn_layers,
-            gnn_type=gnn_type,
-            pool_types=pool_types,
-            decode_hidden=decode_hidden,
-            decode_layers=decode_layers,
-            idx_emb_dim=idx_emb_dim,
-            decode_mode=decode_mode,
+            gnn_layers=gnn_layers, gnn_type=gnn_type, pool_types=pool_types,
+            decode_hidden=decode_hidden, decode_layers=decode_layers,
+            idx_emb_dim=idx_emb_dim, decode_mode=decode_mode,
             pma_query_mode=pma_query_mode,
             coarsen_gnn_type=coarsen_gnn_type,
             coarsen_reg_weight=coarsen_reg_weight,
-            score_hidden=score_hidden,
-            score_layers=score_layers,
+            score_hidden=score_hidden, score_layers=score_layers,
             score_heads=score_heads,
         )
-
         if share_blocks:
-            shared = CrossAttnOnlyBlock(**block_kwargs)
+            shared = _Block(**block_kwargs)
             self.blocks = nn.ModuleList([shared] * num_layers)
         else:
-            self.blocks = nn.ModuleList([
-                CrossAttnOnlyBlock(**block_kwargs) for _ in range(num_layers)
-            ])
-        self._shared = share_blocks
+            self.blocks = nn.ModuleList(
+                [_Block(**block_kwargs) for _ in range(num_layers)]
+            )
 
         # Optional final global self-attention stack.
         if final_sa_layers > 0:
@@ -286,61 +381,67 @@ class CrossAttnOnlyModel(nn.Module):
             nn.Linear(hidden_dim, output_dim),
         )
 
-        # Attribute set on every forward — exposed so the training loop
-        # can add it to the main loss without threading aux through the
-        # return signature of every model variant.
         self.last_aux_loss = 0.0
 
+    # -----------------------------------------------------------------
+    # Helpers
+    # -----------------------------------------------------------------
     def encode_dense(self, batch):
         lap_pe = getattr(batch, "lap_pe", None)
         h = self.encoder(batch.x, batch.edge_index, batch.edge_attr, lap_pe=lap_pe)
         return to_dense_batch(h, batch.batch)
 
-    def forward(self, batch):
-        """
-        Args:
-            batch: PyG Batch.
-        Returns:
-            logits, node_emb_flat
-        Side effect:
-            self.last_aux_loss is set to the (decayed) sum of generator
-            aux losses across blocks.
-        """
+    def _khop_pass(self, dense_x, dist_masks, node_mask):
+        """One k-hop aggregation -> fused (B, N, hidden_dim)."""
+        h_small = self.pre_proj(dense_x)                       # (B,N,hop_dim)
+        K = min(dist_masks.shape[1], self.max_hops)
+        agg = self.aggregator(h_small, dist_masks[:, :K], node_mask)
+        return self.fuse(agg)                                  # (B,N,hidden_dim)
+
+    # -----------------------------------------------------------------
+    # Forward
+    # -----------------------------------------------------------------
+    def forward(self, batch, dist_masks, node_masks):
         dense_x, dense_mask = self.encode_dense(batch)
+        nm = node_masks if node_masks is not None else dense_mask
 
         edge_index = batch.edge_index
         batch_vec = batch.batch
         edge_attr = getattr(batch, "edge_attr", None)
 
+        # Initial k-hop aggregation pass (always run once).
+        h = self._khop_pass(dense_x, dist_masks, nm)
+
         total_aux = 0.0
-        h = dense_x
         for i, block in enumerate(self.blocks):
+            if self.khop_per_block and i > 0:
+                # Re-aggregate using current node features. Same hop masks
+                # because the graph's shortest-path structure is fixed.
+                h = self._khop_pass(h, dist_masks, nm)
             h, aux = block(
-                h, dense_mask,
+                h, nm,
                 edge_index=edge_index, batch_vec=batch_vec, edge_attr=edge_attr,
             )
             if aux is not None:
-                decay = self.aux_loss_decay ** i
-                total_aux = total_aux + aux * decay
+                total_aux = total_aux + aux * (self.aux_loss_decay ** i)
         self.last_aux_loss = total_aux
 
         # Optional final global self-attention before extracting nodes.
         if self.final_sa is not None:
             # nn.TransformerEncoder: src_key_padding_mask True → ignore key.
-            h = self.final_sa(h, src_key_padding_mask=~dense_mask)
+            h = self.final_sa(h, src_key_padding_mask=~nm)
 
-        node_emb = h[dense_mask]
+        node_emb = h[nm]
 
         if self.task_level == "node":
             logits = self.head(node_emb)
             return logits, node_emb
 
-        # Graph-level pool
         B = dense_x.shape[0]
         batch_vec_dense = (
             torch.arange(B, device=dense_x.device)
             .unsqueeze(1)
-            .expand_as(dense_mask)[dense_mask]
+            .expand_as(nm)[nm]
         )
         if self.graph_pool == "mean":
             pooled = global_mean_pool(node_emb, batch_vec_dense)
