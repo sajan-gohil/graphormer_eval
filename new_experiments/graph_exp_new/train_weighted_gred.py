@@ -81,7 +81,9 @@ def build_parser():
 
 
 def parse_args():
-    args = build_parser().parse_args()
+    args, unknown = build_parser().parse_known_args()
+    print(args.__dict__)
+    print("Unknown = ", unknown)
     if args.device is None:
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
     return args
