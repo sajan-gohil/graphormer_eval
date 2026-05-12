@@ -191,7 +191,7 @@ class HopMaskedMHA(nn.Module):
 
         out = torch.matmul(attn, v)                       # (B, H, N, Dh)
         out = out.transpose(1, 2).reshape(B, N, d)        # (B, N, d)
-        return self.out_proj(out)
+        return out + self.out_proj(out)
 
 
 # ---------------------------------------------------------------------------

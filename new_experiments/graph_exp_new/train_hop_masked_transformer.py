@@ -96,6 +96,8 @@ def build_parser():
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--save_dir", type=str, default="checkpoints_hop_masked")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--checkpoint", type=str, default=None,
+                   help="Path to a checkpoint .pt file to resume training from.")
     return p
 
 
@@ -210,7 +212,7 @@ def main():
         factor=0.5,
         patience=args.reduce_lr_patience,
         min_lr=args.lr_min,
-        verbose=True,
+        # verbose=True,
     )
     print(f"ReduceLROnPlateau: mode={plateau_mode}, patience={args.reduce_lr_patience}, "
           f"factor=0.5, min_lr={args.lr_min}", flush=True)
@@ -219,8 +221,57 @@ def main():
     best_test = None
     best_epoch = -1
     epochs_since_improve = 0
+    start_epoch = 0
 
-    for epoch in range(args.max_epochs):
+    # ------------------------------------------------------------------ #
+    # Resume from checkpoint                                               #
+    # ------------------------------------------------------------------ #
+    if args.checkpoint is not None:
+        print(f"Loading checkpoint from: {args.checkpoint}", flush=True)
+        ckpt = torch.load(args.checkpoint, map_location=args.device)
+
+        # Model weights (required)
+        model.load_state_dict(ckpt["model"])
+        print("  ✓ model weights loaded", flush=True)
+
+        # Optimizer state
+        if "optimizer" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer"])
+            print("  ✓ optimizer state loaded", flush=True)
+
+        # Per-step cosine scheduler — fast-forward to the saved epoch
+        if "scheduler" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler"])
+            print("  ✓ step-scheduler state loaded", flush=True)
+        elif "epoch" in ckpt:
+            # Fall back: replay the correct number of steps
+            completed_steps = ckpt["epoch"] * len(train_loader)
+            for _ in range(completed_steps):
+                scheduler.step()
+            print(f"  ✓ step-scheduler fast-forwarded ({completed_steps} steps)",
+                  flush=True)
+
+        # ReduceLROnPlateau scheduler
+        if "plateau_scheduler" in ckpt:
+            plateau_scheduler.load_state_dict(ckpt["plateau_scheduler"])
+            print("  ✓ plateau-scheduler state loaded", flush=True)
+
+        # Training bookkeeping
+        if "best_val" in ckpt:
+            best_val = ckpt["best_val"]
+        if "best_test" in ckpt:
+            best_test = ckpt["best_test"]
+        if "best_epoch" in ckpt:
+            best_epoch = ckpt["best_epoch"]
+        if "epochs_since_improve" in ckpt:
+            epochs_since_improve = ckpt["epochs_since_improve"]
+        if "epoch" in ckpt:
+            start_epoch = ckpt["epoch"] + 1
+
+        print(f"  Resuming from epoch {start_epoch} "
+              f"(best_val={best_val:.4f} at epoch {best_epoch})", flush=True)
+
+    for epoch in range(start_epoch, args.max_epochs):
         t0 = time.time()
         tr_loss, tr_metric = run_epoch(
             model, train_loader, task, args.device,
@@ -241,8 +292,20 @@ def main():
             epochs_since_improve = 0
             ckpt_path = os.path.join(args.save_dir, f"best_{args.dataset}.pt")
             torch.save(
-                {"model": model.state_dict(), "args": vars(args), "epoch": epoch,
-                 "val_metric": va_metric, "test_metric": te_metric},
+                {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "plateau_scheduler": plateau_scheduler.state_dict(),
+                    "args": vars(args),
+                    "epoch": epoch,
+                    "best_val": best_val,
+                    "best_test": best_test,
+                    "best_epoch": best_epoch,
+                    "epochs_since_improve": epochs_since_improve,
+                    "val_metric": va_metric,
+                    "test_metric": te_metric,
+                },
                 ckpt_path,
             )
         else:
