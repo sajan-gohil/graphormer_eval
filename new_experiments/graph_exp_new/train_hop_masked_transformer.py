@@ -85,6 +85,8 @@ def build_parser():
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--max_epochs", type=int, default=200)
     p.add_argument("--patience", type=int, default=40)
+    p.add_argument("--reduce_lr_patience", type=int, default=20,
+                   help="Patience for ReduceLROnPlateau (epochs).")
     p.add_argument("--warmup_ratio", type=float, default=0.05)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--num_workers", type=int, default=4)
@@ -201,6 +203,18 @@ def main():
         warmup_ratio=args.warmup_ratio,
     )
 
+    plateau_mode = "max" if task.higher_is_better else "min"
+    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode=plateau_mode,
+        factor=0.5,
+        patience=args.reduce_lr_patience,
+        min_lr=args.lr_min,
+        verbose=True,
+    )
+    print(f"ReduceLROnPlateau: mode={plateau_mode}, patience={args.reduce_lr_patience}, "
+          f"factor=0.5, min_lr={args.lr_min}", flush=True)
+
     best_val = -float("inf") if task.higher_is_better else float("inf")
     best_test = None
     best_epoch = -1
@@ -213,6 +227,7 @@ def main():
             optimizer=optimizer, scheduler=scheduler, grad_clip=args.grad_clip,
         )
         va_loss, va_metric = run_epoch(model, val_loader, task, args.device)
+        plateau_scheduler.step(va_metric)
         te_loss, te_metric = run_epoch(model, test_loader, task, args.device)
         dt = time.time() - t0
 
