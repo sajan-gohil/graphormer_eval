@@ -77,8 +77,9 @@ def build_head_hop_sets(
     Args:
         max_hops:           K — total number of hop levels available.
         num_heads:          H — total attention heads.
-        mode:               "contiguous" | "window" | "single".
-        window:             half-window for "window" mode.
+        mode:               "contiguous" | "window" | "single" | "interleaved".
+        window:             half-window for "window" mode; stride for
+                            "interleaved" mode.
         include_self:       if True, hop 0 is added to every restricted head
                             so the attention row always has at least one
                             valid key (no empty-softmax NaNs).
@@ -124,11 +125,39 @@ def build_head_hop_sets(
                 f"got {H_restricted} restricted heads vs K-1={K-1}"
             )
         sets = [[i + 1] for i in range(H_restricted)]
+    elif mode == "interleaved":
+        # Each head gets a centre k evenly spaced across [0, K-1].
+        # The head attends to every hop at k ± window*n that stays in [0, K).
+        if H_restricted == 1:
+            centres = [0]
+        else:
+            centres = [
+                int(round(i * (K - 1) / (H_restricted - 1)))
+                for i in range(H_restricted)
+            ]
+        sets = []
+        for c in centres:
+            hops = {c}
+            n = 1
+            while True:
+                added = False
+                lo = c - window * n
+                hi = c + window * n
+                if lo >= 0:
+                    hops.add(lo)
+                    added = True
+                if hi < K:
+                    hops.add(hi)
+                    added = True
+                if not added:
+                    break
+                n += 1
+            sets.append(sorted(hops))
     else:
         raise ValueError(f"Unknown hop assignment mode: {mode}")
 
     if include_self:
-        sets = [[0] + s for s in sets]
+        sets = [sorted(set([0] + s)) for s in sets]
 
     return sets + [None] * num_global_heads
 
