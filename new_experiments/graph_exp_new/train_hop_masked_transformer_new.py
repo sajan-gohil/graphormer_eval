@@ -99,6 +99,9 @@ def build_parser():
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--max_epochs", type=int, default=200)
     p.add_argument("--patience", type=int, default=40)
+    p.add_argument("--reduce_lr_patience", type=int, default=10,
+                   help="Patience (epochs) for ReduceLROnPlateau. "
+                        "Set to 0 to disable.")
     p.add_argument("--warmup_ratio", type=float, default=0.05)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--num_workers", type=int, default=4)
@@ -216,6 +219,17 @@ def main():
         warmup_ratio=args.warmup_ratio,
     )
 
+    # Optional ReduceLROnPlateau on top of the step-level cosine scheduler.
+    plateau_scheduler = None
+    if args.reduce_lr_patience > 0:
+        plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max" if task.higher_is_better else "min",
+            factor=0.5,
+            patience=args.reduce_lr_patience,
+            verbose=True,
+        )
+
     best_val = -float("inf") if task.higher_is_better else float("inf")
     best_test = None
     best_epoch = -1
@@ -229,6 +243,9 @@ def main():
         )
         va_loss, va_metric = run_epoch(model, val_loader, task, args.device)
         te_loss, te_metric = run_epoch(model, test_loader, task, args.device)
+
+        if plateau_scheduler is not None:
+            plateau_scheduler.step(va_metric)
         dt = time.time() - t0
 
         improved = (

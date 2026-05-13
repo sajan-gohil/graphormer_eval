@@ -66,11 +66,13 @@ def build_parser():
 
     # Hop-to-head assignment
     p.add_argument("--hop_mode", type=str, default="contiguous",
-                   choices=["contiguous", "window", "single"],
+                   choices=["contiguous", "window", "single", "interleaved"],
                    help="How to assign hops to heads. contiguous = partition "
                         "[1..K-1] into num_heads chunks; window = evenly-spaced "
                         "centres with hop_window half-width; single = exactly "
-                        "one hop per head (requires num_heads == K-1).")
+                        "one hop per head (requires num_heads == K-1); "
+                        "interleaved = each head covers every hop_window-th hop "
+                        "starting from an evenly-spaced centre k.")
     p.add_argument("--hop_window", type=int, default=1,
                    help="Half-window for 'window' mode (head covers "
                         "[c-w, c+w]).")
@@ -85,7 +87,7 @@ def build_parser():
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--max_epochs", type=int, default=200)
     p.add_argument("--patience", type=int, default=40)
-    p.add_argument("--reduce_lr_patience", type=int, default=20,
+    p.add_argument("--reduce_lr_patience", type=int, default=10,
                    help="Patience for ReduceLROnPlateau (epochs).")
     p.add_argument("--warmup_ratio", type=float, default=0.05)
     p.add_argument("--grad_clip", type=float, default=1.0)
