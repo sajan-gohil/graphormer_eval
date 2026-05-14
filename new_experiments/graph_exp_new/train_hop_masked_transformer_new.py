@@ -227,7 +227,7 @@ def main():
             mode="max" if task.higher_is_better else "min",
             factor=0.5,
             patience=args.reduce_lr_patience,
-            verbose=True,
+            # verbose=True,
         )
 
     best_val = -float("inf") if task.higher_is_better else float("inf")

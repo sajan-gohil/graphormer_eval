@@ -274,19 +274,19 @@ def build_parser():
     # Model — Graphormer architecture
     p.add_argument("--hidden_dim", type=int, default=320,
                    help="Embedding / hidden dimension (embedding_dim in config).")
-    p.add_argument("--num_heads", type=int, default=8,
+    p.add_argument("--num_heads", type=int, default=40,
                    help="Number of attention heads. head_dim = hidden_dim / num_heads. "
                         "Default 320/8 = 40.")
-    p.add_argument("--num_layers", type=int, default=6,
+    p.add_argument("--num_layers", type=int, default=1,
                    help="Number of Graphormer encoder layers.")
     p.add_argument("--ffn_dim", type=int, default=None,
                    help="FFN intermediate dim. Defaults to 4*hidden_dim.")
     p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--attention_dropout", type=float, default=0.2)
     p.add_argument("--activation_dropout", type=float, default=0.1)
-    p.add_argument("--multi_hop_max_dist", type=int, default=5,
+    p.add_argument("--multi_hop_max_dist", type=int, default=40,
                    help="Max shortest-path distance for multi-hop edge encoding.")
-    p.add_argument("--spatial_pos_max", type=int, default=20,
+    p.add_argument("--spatial_pos_max", type=int, default=40,
                    help="Spatial position clamp in collator.")
     p.add_argument("--edge_type", type=str, default="multi_hop",
                    choices=["multi_hop", "single_hop"])
