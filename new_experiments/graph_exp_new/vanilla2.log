@@ -1,0 +1,41 @@
+/home1/sajan_rg/.local/lib/python3.13/site-packages/outdated/__init__.py:36: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import parse_version
+EPOCH ===================: 0
+Train set:   0%|          | 0/170 [00:00<?, ?it/s]Train set:   0%|          | 0/170 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/vanilla_gt.py", line 189, in <module>
+    outputs, node_embeddings = model(batch, generators)
+                               ~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/vanilla_gt.py", line 131, in forward
+    attn_scores, dense_x = layer(dense_x)
+                           ~~~~~^^^^^^^^^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/vanilla_gt.py", line 81, in forward
+    qkv = self.out_proj(self.layer_norm_2(qkv))
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/container.py", line 253, in forward
+    input = module(input)
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/activation.py", line 143, in forward
+    return F.relu(input, inplace=self.inplace)
+           ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/functional.py", line 1723, in relu
+    result = torch.relu(input)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 210.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 194.19 MiB is free. Process 618828 has 66.29 GiB memory in use. Process 827767 has 22.51 GiB memory in use. Including non-PyTorch memory, this process has 5.82 GiB memory in use. Of the allocated memory 5.04 GiB is allocated by PyTorch, and 151.09 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)

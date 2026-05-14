@@ -1,0 +1,75 @@
+Pipeline B — End-to-End Training
+  Backbone: hybrid
+  Generator: graph_coarsening
+  Proxies: 64, Warmup: 0 epochs
+  Readout: all_tokens, MMD lambda: 0.0
+  Cross-attn routing: layers=2, proxy_self_attn=True
+  Multi-point proxy: insertion_layers=0,3,6, separate_gens=True, separate_routers=True, aux_decay=1.0
+  GRED: layers=8, state_dim=88, max_hops=40, act=full-glu
+  Hybrid: transformer_layers=2
+  Device: cuda
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/val.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/test.pkl
+  Total parameters: 22,422,538
+    Model (incl. multi-point gen+router): 22,422,538
+    Generator (inside wrapper):           1,202,496
+Traceback (most recent call last):
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/main_e2e.py", line 794, in <module>
+    run_e2e(args)
+    ~~~~~~~^^^^^^
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/main_e2e.py", line 638, in run_e2e
+    logits_without, _, _, node_emb_without, _ = forward_e2e(
+                                                ~~~~~~~~~~~^
+        model, generator, batch, args, use_proxies=False,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        dist_masks=dist_masks_batch, node_masks=node_masks_batch)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/main_e2e.py", line 376, in forward_e2e
+    logits, node_emb = model(batch, dist_masks, node_masks,
+                       ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                             readout_scope=args.readout_scope)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/models.py", line 724, in forward
+    h = self.encode_gred(dense_x, dist_masks, node_masks)
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/models.py", line 692, in encode_gred
+    h = layer(h, dist_masks, node_masks)
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/models.py", line 498, in forward
+    mlp_out = self.deepsets_mlp(agg_reshaped)
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/container.py", line 253, in forward
+    input = module(input)
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/modules/normalization.py", line 229, in forward
+    return F.layer_norm(
+           ~~~~~~~~~~~~^
+        input, self.normalized_shape, self.weight, self.bias, self.eps
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home1/sajan_rg/.local/lib/python3.13/site-packages/torch/nn/functional.py", line 2935, in layer_norm
+    return torch.layer_norm(
+           ~~~~~~~~~~~~~~~~^
+        input, normalized_shape, weight, bias, eps, torch.backends.cudnn.enabled
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1010.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 211.38 MiB is free. Process 453682 has 19.18 GiB memory in use. Including non-PyTorch memory, this process has 75.43 GiB memory in use. Of the allocated memory 73.99 GiB is allocated by PyTorch, and 817.63 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)

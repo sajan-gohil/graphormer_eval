@@ -1,0 +1,359 @@
++ python main_self_novelty.py --stage all --backbone vanilla_gt --generator flow_matching --num_proxies 32 --hidden_dim 128 --num_heads 8 --num_gred_layers 8 --num_transformer_layers 2 --state_dim 88 --batch_size 128 --num_workers 4 --s1_lr 5e-4 --s1_max_epochs 200 --s1_patience 20 --s2_lr 5e-4 --s2_max_epochs 500 --s2_patience 50 --s3_lr_gen 5e-4 --s3_lr_transformer 5e-4 --s3_max_epochs 500 --s3_patience 50 --novelty_temperature 1.0 --novelty_alpha 1.0 --novelty_alpha_node 1.0 --diversity_weight 1 --readout_scope all_tokens --save_dir checkpoints_self_novelty_vanilla_flow_matching
+{'config': None, 'stage': 'all', 'generator': 'flow_matching', 'backbone': 'vanilla_gt', 'model_path': None, 'generator_path': None, 'hidden_dim': 128, 'num_layers': 5, 'num_heads': 8, 'output_dim': 10, 'dropout': 0.1, 'num_proxies': 32, 'use_lap_pe': True, 'lap_pe_dim': 8, 'state_dim': 88, 'num_gred_layers': 8, 'num_transformer_layers': 2, 'gred_expand': 1, 'r_min': 0.0, 'r_max': 1.0, 'max_phase': 6.28, 'gred_act': 'full-glu', 'max_hops': 40, 'dist_mask_workers': 8, 's1_lr': 0.0005, 's1_weight_decay': 0.0003, 's1_max_epochs': 200, 's1_patience': 20, 's1_grad_clip': 1.0, 's2_lr': 0.0005, 's2_weight_decay': 0.0003, 's2_max_epochs': 500, 's2_patience': 50, 's2_eval_every': 1, 's2_grad_clip': 1.0, 's3_lr_gen': 0.0005, 's3_lr_transformer': 0.0005, 's3_max_epochs': 500, 's3_patience': 50, 's3_grad_clip': 1.0, 's3_weight_decay': 0.0001, 'novelty_temperature': 1.0, 'novelty_alpha': 1.0, 'novelty_alpha_node': 1.0, 'diversity_weight': 1.0, 'gen_hidden_dim': 256, 'gen_num_layers': 4, 'gen_num_heads': 8, 'gen_dropout': 0.2, 'pma_query_mode': 'farthest_point', 'coarsen_gnn_type': 'GIN', 'coarsen_reg_weight': 0.1, 'coarsen_reg_type': 'mincut', 'gnn_layers': 4, 'gnn_type': 'GINE', 'pool_types': ['max'], 'decode_hidden': 128, 'decode_layers': 3, 'idx_emb_dim': 128, 'decode_mode': 'shared', 'denoiser_dim': 256, 'denoiser_layers': 4, 'denoiser_heads': 8, 'euler_steps': 1, 'use_cross_attn_routing': False, 'num_cross_layers': 2, 'cross_attn_proxy_self_attn': True, 'proxy_insertion_layers': '-1', 'separate_proxy_generators': False, 'separate_proxy_routers': False, 'proxy_aux_loss_decay': 1.0, 'readout_scope': 'all_tokens', 'batch_size': 128, 'num_workers': 4, 'lr_min': 1e-07, 'warmup_ratio': 0.05, 'recurrent_lr_factor': 1.0, 'save_dir': 'checkpoints_self_novelty_vanilla_flow_matching', 'device': 'cuda'}
+Saved code snapshot to checkpoints_self_novelty_vanilla_flow_matching/code_snapshot.zip
+
+============================================================
+STAGE 1: Pretrain backbone (vanilla_gt)
+============================================================
+  Parameters: 1,047,178
+Epoch   1/200 [20.7s mem=12408MB] | train_loss=4.1488 train_AP=0.1708 | val_loss=0.5552 val_AP=0.2115
+  -> New best val AP=0.2115, saved
+Epoch   2/200 [18.8s mem=12411MB] | train_loss=0.4748 train_AP=0.2004 | val_loss=0.4163 val_AP=0.2472
+  -> New best val AP=0.2472, saved
+Epoch   3/200 [19.4s mem=12410MB] | train_loss=0.4624 train_AP=0.1920 | val_loss=0.3749 val_AP=0.2617
+  -> New best val AP=0.2617, saved
+Epoch   4/200 [20.5s mem=12406MB] | train_loss=0.5238 train_AP=0.1816 | val_loss=0.4318 val_AP=0.2020
+Epoch   5/200 [20.7s mem=12410MB] | train_loss=0.4706 train_AP=0.1981 | val_loss=0.3800 val_AP=0.2380
+Epoch   6/200 [19.4s mem=12409MB] | train_loss=0.4057 train_AP=0.2059 | val_loss=0.3484 val_AP=0.2404
+Epoch   7/200 [20.2s mem=12408MB] | train_loss=0.3903 train_AP=0.2253 | val_loss=0.3348 val_AP=0.2546
+Epoch   8/200 [19.2s mem=12409MB] | train_loss=0.3656 train_AP=0.2297 | val_loss=0.3283 val_AP=0.2654
+  -> New best val AP=0.2654, saved
+Epoch   9/200 [20.3s mem=12409MB] | train_loss=0.3586 train_AP=0.2397 | val_loss=0.3343 val_AP=0.2753
+  -> New best val AP=0.2753, saved
+Epoch  10/200 [19.3s mem=12408MB] | train_loss=0.3794 train_AP=0.2331 | val_loss=0.5823 val_AP=0.2457
+Epoch  11/200 [18.2s mem=12410MB] | train_loss=0.3602 train_AP=0.2394 | val_loss=0.3243 val_AP=0.2899
+  -> New best val AP=0.2899, saved
+Epoch  12/200 [21.2s mem=12407MB] | train_loss=0.3583 train_AP=0.2447 | val_loss=0.3340 val_AP=0.2842
+Epoch  13/200 [20.1s mem=12411MB] | train_loss=0.3382 train_AP=0.2559 | val_loss=0.3204 val_AP=0.2854
+Epoch  14/200 [20.1s mem=12405MB] | train_loss=0.3368 train_AP=0.2579 | val_loss=0.3216 val_AP=0.2792
+Epoch  15/200 [20.0s mem=11907MB] | train_loss=0.3333 train_AP=0.2616 | val_loss=0.3217 val_AP=0.2932
+  -> New best val AP=0.2932, saved
+Epoch  16/200 [19.9s mem=12410MB] | train_loss=0.3341 train_AP=0.2615 | val_loss=0.3168 val_AP=0.2966
+  -> New best val AP=0.2966, saved
+Epoch  17/200 [20.2s mem=12409MB] | train_loss=0.3303 train_AP=0.2702 | val_loss=0.3202 val_AP=0.3123
+  -> New best val AP=0.3123, saved
+Epoch  18/200 [20.6s mem=12408MB] | train_loss=0.3239 train_AP=0.2842 | val_loss=0.3112 val_AP=0.3250
+  -> New best val AP=0.3250, saved
+Epoch  19/200 [19.2s mem=12409MB] | train_loss=0.3237 train_AP=0.2903 | val_loss=0.3037 val_AP=0.3327
+  -> New best val AP=0.3327, saved
+Epoch  20/200 [19.3s mem=12406MB] | train_loss=0.3197 train_AP=0.3002 | val_loss=0.3151 val_AP=0.3556
+  -> New best val AP=0.3556, saved
+Epoch  21/200 [19.1s mem=12409MB] | train_loss=0.3102 train_AP=0.3193 | val_loss=0.2911 val_AP=0.3538
+Epoch  22/200 [20.8s mem=12407MB] | train_loss=0.3053 train_AP=0.3306 | val_loss=0.2978 val_AP=0.3638
+  -> New best val AP=0.3638, saved
+Epoch  23/200 [20.9s mem=12410MB] | train_loss=0.3021 train_AP=0.3361 | val_loss=0.3043 val_AP=0.3670
+  -> New best val AP=0.3670, saved
+Epoch  24/200 [20.2s mem=12409MB] | train_loss=0.3005 train_AP=0.3413 | val_loss=0.2934 val_AP=0.3712
+  -> New best val AP=0.3712, saved
+Epoch  25/200 [19.4s mem=12408MB] | train_loss=0.2967 train_AP=0.3494 | val_loss=0.2792 val_AP=0.3924
+  -> New best val AP=0.3924, saved
+Epoch  26/200 [19.1s mem=12410MB] | train_loss=0.2946 train_AP=0.3518 | val_loss=0.2803 val_AP=0.3939
+  -> New best val AP=0.3939, saved
+Epoch  27/200 [19.4s mem=12409MB] | train_loss=0.2925 train_AP=0.3579 | val_loss=0.2884 val_AP=0.3885
+Epoch  28/200 [19.3s mem=12407MB] | train_loss=0.2879 train_AP=0.3688 | val_loss=0.2879 val_AP=0.3907
+Epoch  29/200 [19.7s mem=12411MB] | train_loss=0.2861 train_AP=0.3710 | val_loss=0.2732 val_AP=0.4212
+  -> New best val AP=0.4212, saved
+Epoch  30/200 [19.8s mem=12407MB] | train_loss=0.2849 train_AP=0.3726 | val_loss=0.2764 val_AP=0.4147
+Epoch  31/200 [20.5s mem=12407MB] | train_loss=0.2816 train_AP=0.3788 | val_loss=0.2743 val_AP=0.4115
+Epoch  32/200 [21.0s mem=12407MB] | train_loss=0.2792 train_AP=0.3834 | val_loss=0.2636 val_AP=0.4353
+  -> New best val AP=0.4353, saved
+Epoch  33/200 [18.9s mem=12406MB] | train_loss=0.2796 train_AP=0.3858 | val_loss=0.2635 val_AP=0.4314
+Epoch  34/200 [19.4s mem=12406MB] | train_loss=0.2770 train_AP=0.3903 | val_loss=0.2680 val_AP=0.4256
+Epoch  35/200 [20.3s mem=12408MB] | train_loss=0.2747 train_AP=0.3943 | val_loss=0.2657 val_AP=0.4467
+  -> New best val AP=0.4467, saved
+Epoch  36/200 [19.4s mem=12407MB] | train_loss=0.2686 train_AP=0.4083 | val_loss=0.2670 val_AP=0.4321
+Epoch  37/200 [19.5s mem=12410MB] | train_loss=0.2688 train_AP=0.4066 | val_loss=0.2605 val_AP=0.4557
+  -> New best val AP=0.4557, saved
+Epoch  38/200 [19.9s mem=12408MB] | train_loss=0.2649 train_AP=0.4157 | val_loss=0.2571 val_AP=0.4588
+  -> New best val AP=0.4588, saved
+Epoch  39/200 [19.7s mem=12407MB] | train_loss=0.2641 train_AP=0.4179 | val_loss=0.2761 val_AP=0.4427
+Epoch  40/200 [19.4s mem=12409MB] | train_loss=0.2645 train_AP=0.4176 | val_loss=0.2690 val_AP=0.4485
+Epoch  41/200 [20.0s mem=12408MB] | train_loss=0.2624 train_AP=0.4265 | val_loss=0.2718 val_AP=0.4449
+Epoch  42/200 [19.2s mem=12410MB] | train_loss=0.2587 train_AP=0.4302 | val_loss=0.2578 val_AP=0.4574
+Epoch  43/200 [20.4s mem=12407MB] | train_loss=0.2580 train_AP=0.4338 | val_loss=0.2646 val_AP=0.4605
+  -> New best val AP=0.4605, saved
+Epoch  44/200 [19.6s mem=12409MB] | train_loss=0.2547 train_AP=0.4416 | val_loss=0.2660 val_AP=0.4727
+  -> New best val AP=0.4727, saved
+Epoch  45/200 [19.0s mem=12410MB] | train_loss=0.2521 train_AP=0.4486 | val_loss=0.2812 val_AP=0.4614
+Epoch  46/200 [21.0s mem=12407MB] | train_loss=0.2472 train_AP=0.4597 | val_loss=0.2809 val_AP=0.4659
+Epoch  47/200 [20.6s mem=12407MB] | train_loss=0.2454 train_AP=0.4682 | val_loss=0.2704 val_AP=0.4734
+  -> New best val AP=0.4734, saved
+Epoch  48/200 [18.9s mem=12409MB] | train_loss=0.2419 train_AP=0.4707 | val_loss=0.2710 val_AP=0.4685
+Epoch  49/200 [19.2s mem=12406MB] | train_loss=0.2410 train_AP=0.4792 | val_loss=0.2647 val_AP=0.4612
+Epoch  50/200 [19.6s mem=12409MB] | train_loss=0.2362 train_AP=0.4826 | val_loss=0.2684 val_AP=0.4656
+Epoch  51/200 [20.7s mem=12410MB] | train_loss=0.2354 train_AP=0.4832 | val_loss=0.2701 val_AP=0.4845
+  -> New best val AP=0.4845, saved
+Epoch  52/200 [19.4s mem=12408MB] | train_loss=0.2325 train_AP=0.4860 | val_loss=0.2870 val_AP=0.4644
+Epoch  53/200 [18.0s mem=12411MB] | train_loss=0.2289 train_AP=0.4961 | val_loss=0.2714 val_AP=0.4868
+  -> New best val AP=0.4868, saved
+Epoch  54/200 [19.7s mem=12408MB] | train_loss=0.2258 train_AP=0.5036 | val_loss=0.2731 val_AP=0.4791
+Epoch  55/200 [20.0s mem=12406MB] | train_loss=0.2227 train_AP=0.5133 | val_loss=0.2805 val_AP=0.4759
+Epoch  56/200 [19.9s mem=12410MB] | train_loss=0.2207 train_AP=0.5201 | val_loss=0.2645 val_AP=0.4818
+Epoch  57/200 [21.2s mem=12408MB] | train_loss=0.2194 train_AP=0.5213 | val_loss=0.2670 val_AP=0.4764
+Epoch  58/200 [18.5s mem=12411MB] | train_loss=0.2163 train_AP=0.5308 | val_loss=0.2848 val_AP=0.4796
+Epoch  59/200 [21.4s mem=12410MB] | train_loss=0.2124 train_AP=0.5323 | val_loss=0.3032 val_AP=0.4889
+  -> New best val AP=0.4889, saved
+Epoch  60/200 [19.9s mem=12410MB] | train_loss=0.2053 train_AP=0.5547 | val_loss=0.2914 val_AP=0.4917
+  -> New best val AP=0.4917, saved
+Epoch  61/200 [19.1s mem=12410MB] | train_loss=0.2072 train_AP=0.5560 | val_loss=0.2883 val_AP=0.4902
+Epoch  62/200 [18.6s mem=12409MB] | train_loss=0.2035 train_AP=0.5662 | val_loss=0.3058 val_AP=0.4964
+  -> New best val AP=0.4964, saved
+Epoch  63/200 [19.6s mem=12409MB] | train_loss=0.2013 train_AP=0.5781 | val_loss=0.3042 val_AP=0.4903
+Epoch  64/200 [19.8s mem=12410MB] | train_loss=0.1950 train_AP=0.5918 | val_loss=0.3231 val_AP=0.4875
+Epoch  65/200 [21.0s mem=12409MB] | train_loss=0.1890 train_AP=0.6017 | val_loss=0.3307 val_AP=0.4987
+  -> New best val AP=0.4987, saved
+Epoch  66/200 [19.5s mem=12409MB] | train_loss=0.1850 train_AP=0.6170 | val_loss=0.3117 val_AP=0.4877
+Epoch  67/200 [18.1s mem=12409MB] | train_loss=0.1862 train_AP=0.6076 | val_loss=0.2919 val_AP=0.5004
+  -> New best val AP=0.5004, saved
+Epoch  68/200 [20.4s mem=12406MB] | train_loss=0.1850 train_AP=0.6163 | val_loss=0.3345 val_AP=0.4920
+Epoch  69/200 [19.6s mem=12411MB] | train_loss=0.1787 train_AP=0.6311 | val_loss=0.3621 val_AP=0.5057
+  -> New best val AP=0.5057, saved
+Epoch  70/200 [20.4s mem=12407MB] | train_loss=0.1752 train_AP=0.6399 | val_loss=0.3212 val_AP=0.5012
+Epoch  71/200 [20.3s mem=12407MB] | train_loss=0.1728 train_AP=0.6415 | val_loss=0.3200 val_AP=0.5056
+Epoch  72/200 [19.6s mem=12407MB] | train_loss=0.1636 train_AP=0.6628 | val_loss=0.3559 val_AP=0.5166
+  -> New best val AP=0.5166, saved
+Epoch  73/200 [19.2s mem=12408MB] | train_loss=0.1604 train_AP=0.6723 | val_loss=0.3576 val_AP=0.5067
+Epoch  74/200 [19.3s mem=12407MB] | train_loss=0.1596 train_AP=0.6727 | val_loss=0.3614 val_AP=0.5166
+  -> New best val AP=0.5166, saved
+Epoch  75/200 [20.3s mem=12408MB] | train_loss=0.1552 train_AP=0.6906 | val_loss=0.3537 val_AP=0.5038
+Epoch  76/200 [19.6s mem=12407MB] | train_loss=0.1515 train_AP=0.6971 | val_loss=0.3872 val_AP=0.4998
+Epoch  77/200 [19.8s mem=12411MB] | train_loss=0.1487 train_AP=0.7062 | val_loss=0.3404 val_AP=0.5022
+Epoch  78/200 [19.7s mem=12409MB] | train_loss=0.1423 train_AP=0.7259 | val_loss=0.3982 val_AP=0.5057
+Epoch  79/200 [19.5s mem=12399MB] | train_loss=0.1426 train_AP=0.7233 | val_loss=0.3621 val_AP=0.5130
+Epoch  80/200 [20.2s mem=12408MB] | train_loss=0.1363 train_AP=0.7360 | val_loss=0.3882 val_AP=0.5000
+Epoch  81/200 [18.3s mem=12406MB] | train_loss=0.1336 train_AP=0.7452 | val_loss=0.4302 val_AP=0.4921
+Epoch  82/200 [19.8s mem=12409MB] | train_loss=0.1311 train_AP=0.7455 | val_loss=0.4073 val_AP=0.5109
+Epoch  83/200 [19.2s mem=12410MB] | train_loss=0.1296 train_AP=0.7502 | val_loss=0.4076 val_AP=0.5103
+Epoch  84/200 [20.1s mem=12410MB] | train_loss=0.1254 train_AP=0.7691 | val_loss=0.4398 val_AP=0.4953
+Epoch  85/200 [20.0s mem=12409MB] | train_loss=0.1254 train_AP=0.7647 | val_loss=0.4085 val_AP=0.4984
+Epoch  86/200 [18.0s mem=12408MB] | train_loss=0.1184 train_AP=0.7757 | val_loss=0.4489 val_AP=0.5086
+Epoch  87/200 [19.7s mem=12407MB] | train_loss=0.1164 train_AP=0.7790 | val_loss=0.4375 val_AP=0.5095
+Epoch  88/200 [19.3s mem=12409MB] | train_loss=0.1145 train_AP=0.7876 | val_loss=0.4138 val_AP=0.4944
+Epoch  89/200 [20.9s mem=12406MB] | train_loss=0.1112 train_AP=0.7919 | val_loss=0.4534 val_AP=0.5134
+Epoch  90/200 [19.1s mem=12405MB] | train_loss=0.1127 train_AP=0.7882 | val_loss=0.4555 val_AP=0.5122
+Epoch  91/200 [18.3s mem=12407MB] | train_loss=0.1053 train_AP=0.8053 | val_loss=0.5088 val_AP=0.5122
+Epoch  92/200 [19.0s mem=12408MB] | train_loss=0.1037 train_AP=0.8104 | val_loss=0.4951 val_AP=0.5121
+Epoch  93/200 [19.1s mem=12408MB] | train_loss=0.0997 train_AP=0.8178 | val_loss=0.4866 val_AP=0.5054
+Epoch  94/200 [20.3s mem=12405MB] | train_loss=0.0985 train_AP=0.8212 | val_loss=0.4894 val_AP=0.5000
+Early stopping at epoch 94. Best val AP=0.5166 at epoch 74.
+Stage 1 done. Best val AP=0.5166 at epoch 74.
+
+============================================================
+STAGE 2: Train generator (flow_matching) with self-novelty
+  Backbone: vanilla_gt (frozen)
+  alpha=1.0 alpha_node=1.0 T=1.0
+============================================================
+  Generator parameters: 3,389,568
+Epoch   1/500 [28.9s mem=14194MB] | total=3.0430 task=0.2229 | out_nov=0.1065 out_pen=0.8935 | node_nov=0.1137 node_pen=1.8863 | div_loss=0.0402 | ip_mean=0.0402 ip_std=0.0971 | val_AP=0.4347 test_AP=0.4234
+  -> New best val AP=0.4347
+Epoch   2/500 [28.0s mem=14195MB] | total=2.9746 task=0.2527 | out_nov=0.1275 out_pen=0.8725 | node_nov=0.1755 node_pen=1.8245 | div_loss=0.0248 | ip_mean=0.0248 ip_std=0.0994 | val_AP=0.4114 test_AP=0.4116
+Epoch   3/500 [28.6s mem=14194MB] | total=2.9100 task=0.2873 | out_nov=0.1521 out_pen=0.8479 | node_nov=0.2470 node_pen=1.7530 | div_loss=0.0217 | ip_mean=0.0217 ip_std=0.1260 | val_AP=0.3594 test_AP=0.3717
+Epoch   4/500 [28.7s mem=14194MB] | total=2.6682 task=0.3696 | out_nov=0.2229 out_pen=0.7771 | node_nov=0.5018 node_pen=1.4982 | div_loss=0.0233 | ip_mean=0.0233 ip_std=0.4031 | val_AP=0.2462 test_AP=0.2490
+Epoch   5/500 [27.6s mem=14200MB] | total=2.4448 task=0.4017 | out_nov=0.2657 out_pen=0.7343 | node_nov=0.7065 node_pen=1.2935 | div_loss=0.0152 | ip_mean=0.0152 ip_std=0.6006 | val_AP=0.2197 test_AP=0.2195
+Epoch   6/500 [29.2s mem=14196MB] | total=2.3627 task=0.4086 | out_nov=0.2712 out_pen=0.7288 | node_nov=0.7918 node_pen=1.2082 | div_loss=0.0172 | ip_mean=0.0172 ip_std=0.6192 | val_AP=0.2081 test_AP=0.2154
+Epoch   7/500 [29.6s mem=14194MB] | total=2.3112 task=0.4111 | out_nov=0.2732 out_pen=0.7268 | node_nov=0.8493 node_pen=1.1507 | div_loss=0.0226 | ip_mean=0.0226 ip_std=0.6060 | val_AP=0.2070 test_AP=0.2058
+Epoch   8/500 [27.4s mem=14198MB] | total=2.2646 task=0.4115 | out_nov=0.2726 out_pen=0.7274 | node_nov=0.9006 node_pen=1.0994 | div_loss=0.0263 | ip_mean=0.0263 ip_std=0.5972 | val_AP=0.2132 test_AP=0.2102
+Epoch   9/500 [29.0s mem=14194MB] | total=2.2064 task=0.4122 | out_nov=0.2739 out_pen=0.7261 | node_nov=0.9662 node_pen=1.0338 | div_loss=0.0343 | ip_mean=0.0343 ip_std=0.6088 | val_AP=0.1877 test_AP=0.1882
+Epoch  10/500 [29.6s mem=14196MB] | total=2.1132 task=0.4257 | out_nov=0.2794 out_pen=0.7206 | node_nov=1.0783 node_pen=0.9217 | div_loss=0.0453 | ip_mean=0.0453 ip_std=0.6369 | val_AP=0.2001 test_AP=0.1943
+Epoch  11/500 [29.7s mem=14194MB] | total=2.0240 task=0.4427 | out_nov=0.2811 out_pen=0.7189 | node_nov=1.1791 node_pen=0.8209 | div_loss=0.0416 | ip_mean=0.0416 ip_std=0.6103 | val_AP=0.2013 test_AP=0.1991
+Epoch  12/500 [29.1s mem=14194MB] | total=1.9708 task=0.4440 | out_nov=0.2812 out_pen=0.7188 | node_nov=1.2287 node_pen=0.7713 | div_loss=0.0366 | ip_mean=0.0366 ip_std=0.5752 | val_AP=0.1945 test_AP=0.1950
+Epoch  13/500 [28.7s mem=14195MB] | total=1.9343 task=0.4478 | out_nov=0.2818 out_pen=0.7182 | node_nov=1.2618 node_pen=0.7382 | div_loss=0.0301 | ip_mean=0.0301 ip_std=0.5647 | val_AP=0.1857 test_AP=0.1790
+Epoch  14/500 [29.0s mem=14195MB] | total=1.8882 task=0.4512 | out_nov=0.2935 out_pen=0.7065 | node_nov=1.2949 node_pen=0.7051 | div_loss=0.0254 | ip_mean=0.0254 ip_std=0.5377 | val_AP=0.2061 test_AP=0.1996
+Epoch  15/500 [27.8s mem=14195MB] | total=1.8596 task=0.4267 | out_nov=0.2837 out_pen=0.7163 | node_nov=1.3133 node_pen=0.6867 | div_loss=0.0300 | ip_mean=0.0300 ip_std=0.5412 | val_AP=0.1961 test_AP=0.1862
+Epoch  16/500 [29.6s mem=14194MB] | total=1.8377 task=0.4254 | out_nov=0.2826 out_pen=0.7174 | node_nov=1.3344 node_pen=0.6656 | div_loss=0.0294 | ip_mean=0.0294 ip_std=0.5311 | val_AP=0.1929 test_AP=0.1891
+Epoch  17/500 [29.4s mem=14195MB] | total=1.8877 task=0.4954 | out_nov=0.2908 out_pen=0.7092 | node_nov=1.3455 node_pen=0.6545 | div_loss=0.0287 | ip_mean=0.0287 ip_std=0.5060 | val_AP=0.1644 test_AP=0.1635
+Epoch  18/500 [29.6s mem=14199MB] | total=1.8194 task=0.4528 | out_nov=0.3012 out_pen=0.6988 | node_nov=1.3568 node_pen=0.6432 | div_loss=0.0245 | ip_mean=0.0245 ip_std=0.4974 | val_AP=0.2014 test_AP=0.1963
+Epoch  19/500 [28.9s mem=14194MB] | total=1.8098 task=0.4599 | out_nov=0.2988 out_pen=0.7012 | node_nov=1.3744 node_pen=0.6256 | div_loss=0.0231 | ip_mean=0.0231 ip_std=0.4792 | val_AP=0.1787 test_AP=0.1791
+Epoch  20/500 [29.2s mem=14196MB] | total=1.8013 task=0.4494 | out_nov=0.2865 out_pen=0.7135 | node_nov=1.3850 node_pen=0.6150 | div_loss=0.0234 | ip_mean=0.0234 ip_std=0.4825 | val_AP=0.2064 test_AP=0.1991
+Epoch  21/500 [29.4s mem=14197MB] | total=1.8058 task=0.4884 | out_nov=0.3134 out_pen=0.6866 | node_nov=1.3915 node_pen=0.6085 | div_loss=0.0223 | ip_mean=0.0223 ip_std=0.4706 | val_AP=0.1663 test_AP=0.1651
+Epoch  22/500 [28.5s mem=14194MB] | total=1.7912 task=0.4955 | out_nov=0.3216 out_pen=0.6784 | node_nov=1.4031 node_pen=0.5969 | div_loss=0.0204 | ip_mean=0.0204 ip_std=0.4766 | val_AP=0.1653 test_AP=0.1648
+Epoch  23/500 [29.2s mem=14197MB] | total=1.8101 task=0.4882 | out_nov=0.3139 out_pen=0.6861 | node_nov=1.3904 node_pen=0.6096 | div_loss=0.0262 | ip_mean=0.0262 ip_std=0.4768 | val_AP=0.1861 test_AP=0.1856
+Epoch  24/500 [29.1s mem=14195MB] | total=1.7582 task=0.4553 | out_nov=0.2994 out_pen=0.7006 | node_nov=1.4175 node_pen=0.5825 | div_loss=0.0198 | ip_mean=0.0198 ip_std=0.4663 | val_AP=0.2077 test_AP=0.2004
+Epoch  25/500 [28.9s mem=14200MB] | total=1.7556 task=0.4753 | out_nov=0.3135 out_pen=0.6865 | node_nov=1.4249 node_pen=0.5751 | div_loss=0.0186 | ip_mean=0.0186 ip_std=0.4556 | val_AP=0.1672 test_AP=0.1652
+Epoch  26/500 [29.2s mem=14193MB] | total=1.7578 task=0.4767 | out_nov=0.3060 out_pen=0.6940 | node_nov=1.4315 node_pen=0.5685 | div_loss=0.0185 | ip_mean=0.0185 ip_std=0.4590 | val_AP=0.1728 test_AP=0.1729
+Epoch  27/500 [27.8s mem=14193MB] | total=1.7609 task=0.5000 | out_nov=0.3224 out_pen=0.6776 | node_nov=1.4349 node_pen=0.5651 | div_loss=0.0182 | ip_mean=0.0182 ip_std=0.4570 | val_AP=0.1652 test_AP=0.1651
+Epoch  28/500 [29.0s mem=14198MB] | total=1.7396 task=0.4891 | out_nov=0.3221 out_pen=0.6779 | node_nov=1.4433 node_pen=0.5567 | div_loss=0.0159 | ip_mean=0.0159 ip_std=0.4673 | val_AP=0.1653 test_AP=0.1648
+Epoch  29/500 [30.5s mem=14192MB] | total=1.7397 task=0.4892 | out_nov=0.3215 out_pen=0.6785 | node_nov=1.4449 node_pen=0.5551 | div_loss=0.0169 | ip_mean=0.0169 ip_std=0.4694 | val_AP=0.1654 test_AP=0.1650
+Epoch  30/500 [29.3s mem=14196MB] | total=1.7466 task=0.4910 | out_nov=0.3195 out_pen=0.6805 | node_nov=1.4438 node_pen=0.5562 | div_loss=0.0189 | ip_mean=0.0189 ip_std=0.4427 | val_AP=0.1648 test_AP=0.1651
+Epoch  31/500 [29.9s mem=14196MB] | total=1.7324 task=0.4951 | out_nov=0.3233 out_pen=0.6767 | node_nov=1.4526 node_pen=0.5474 | div_loss=0.0132 | ip_mean=0.0132 ip_std=0.4480 | val_AP=0.1740 test_AP=0.1741
+Epoch  32/500 [22.3s mem=14196MB] | total=1.7402 task=0.4962 | out_nov=0.3214 out_pen=0.6786 | node_nov=1.4513 node_pen=0.5487 | div_loss=0.0166 | ip_mean=0.0166 ip_std=0.4555 | val_AP=0.1648 test_AP=0.1647
+Epoch  33/500 [22.4s mem=14194MB] | total=1.7192 task=0.4815 | out_nov=0.3190 out_pen=0.6810 | node_nov=1.4605 node_pen=0.5395 | div_loss=0.0172 | ip_mean=0.0172 ip_std=0.4630 | val_AP=0.1648 test_AP=0.1646
+Epoch  34/500 [23.1s mem=14196MB] | total=1.7198 task=0.4904 | out_nov=0.3230 out_pen=0.6770 | node_nov=1.4628 node_pen=0.5372 | div_loss=0.0152 | ip_mean=0.0152 ip_std=0.4594 | val_AP=0.1773 test_AP=0.1739
+Epoch  35/500 [23.0s mem=14197MB] | total=1.7367 task=0.4886 | out_nov=0.3177 out_pen=0.6823 | node_nov=1.4549 node_pen=0.5451 | div_loss=0.0206 | ip_mean=0.0206 ip_std=0.4371 | val_AP=0.1634 test_AP=0.1634
+Epoch  36/500 [23.8s mem=14195MB] | total=1.7173 task=0.4893 | out_nov=0.3227 out_pen=0.6773 | node_nov=1.4678 node_pen=0.5322 | div_loss=0.0185 | ip_mean=0.0185 ip_std=0.4635 | val_AP=0.1650 test_AP=0.1655
+Epoch  37/500 [22.9s mem=14193MB] | total=1.7838 task=0.5412 | out_nov=0.3213 out_pen=0.6787 | node_nov=1.4583 node_pen=0.5417 | div_loss=0.0221 | ip_mean=0.0221 ip_std=0.4461 | val_AP=0.1648 test_AP=0.1649
+Epoch  38/500 [23.2s mem=14197MB] | total=1.7271 task=0.4931 | out_nov=0.3228 out_pen=0.6772 | node_nov=1.4653 node_pen=0.5347 | div_loss=0.0221 | ip_mean=0.0221 ip_std=0.4555 | val_AP=0.1656 test_AP=0.1650
+Epoch  39/500 [23.2s mem=14195MB] | total=1.7338 task=0.5129 | out_nov=0.3258 out_pen=0.6742 | node_nov=1.4725 node_pen=0.5275 | div_loss=0.0191 | ip_mean=0.0191 ip_std=0.4497 | val_AP=0.1648 test_AP=0.1647
+Epoch  40/500 [22.8s mem=14195MB] | total=1.7175 task=0.4843 | out_nov=0.3224 out_pen=0.6776 | node_nov=1.4670 node_pen=0.5330 | div_loss=0.0227 | ip_mean=0.0227 ip_std=0.4925 | val_AP=0.1641 test_AP=0.1643
+Epoch  41/500 [22.9s mem=14195MB] | total=1.7744 task=0.5177 | out_nov=0.3233 out_pen=0.6767 | node_nov=1.4511 node_pen=0.5489 | div_loss=0.0311 | ip_mean=0.0311 ip_std=0.4601 | val_AP=0.1637 test_AP=0.1640
+Epoch  42/500 [23.3s mem=14195MB] | total=1.7169 task=0.4969 | out_nov=0.3221 out_pen=0.6779 | node_nov=1.4767 node_pen=0.5233 | div_loss=0.0188 | ip_mean=0.0188 ip_std=0.4391 | val_AP=0.1662 test_AP=0.1652
+Epoch  43/500 [22.6s mem=14194MB] | total=1.7270 task=0.4974 | out_nov=0.3220 out_pen=0.6780 | node_nov=1.4721 node_pen=0.5279 | div_loss=0.0236 | ip_mean=0.0236 ip_std=0.4408 | val_AP=0.1642 test_AP=0.1654
+Epoch  44/500 [21.5s mem=14198MB] | total=1.7318 task=0.4935 | out_nov=0.3226 out_pen=0.6774 | node_nov=1.4659 node_pen=0.5341 | div_loss=0.0269 | ip_mean=0.0269 ip_std=0.4577 | val_AP=0.1656 test_AP=0.1651
+Epoch  45/500 [21.6s mem=14195MB] | total=1.7266 task=0.5010 | out_nov=0.3222 out_pen=0.6778 | node_nov=1.4740 node_pen=0.5260 | div_loss=0.0219 | ip_mean=0.0219 ip_std=0.4561 | val_AP=0.1669 test_AP=0.1657
+Epoch  46/500 [23.2s mem=14194MB] | total=1.7708 task=0.5051 | out_nov=0.3230 out_pen=0.6770 | node_nov=1.4537 node_pen=0.5463 | div_loss=0.0425 | ip_mean=0.0425 ip_std=0.4688 | val_AP=0.1648 test_AP=0.1647
+Epoch  47/500 [23.5s mem=14193MB] | total=1.7362 task=0.4855 | out_nov=0.3226 out_pen=0.6774 | node_nov=1.4591 node_pen=0.5409 | div_loss=0.0325 | ip_mean=0.0325 ip_std=0.5242 | val_AP=0.1648 test_AP=0.1646
+Epoch  48/500 [23.5s mem=14197MB] | total=1.7337 task=0.4987 | out_nov=0.3231 out_pen=0.6769 | node_nov=1.4708 node_pen=0.5292 | div_loss=0.0289 | ip_mean=0.0289 ip_std=0.4637 | val_AP=0.1648 test_AP=0.1647
+Epoch  49/500 [24.3s mem=14196MB] | total=1.7132 task=0.4876 | out_nov=0.3226 out_pen=0.6774 | node_nov=1.4764 node_pen=0.5236 | div_loss=0.0246 | ip_mean=0.0246 ip_std=0.4965 | val_AP=0.1612 test_AP=0.1614
+Epoch  50/500 [22.3s mem=14195MB] | total=1.7916 task=0.5228 | out_nov=0.3227 out_pen=0.6773 | node_nov=1.4578 node_pen=0.5422 | div_loss=0.0493 | ip_mean=0.0493 ip_std=0.5102 | val_AP=0.1657 test_AP=0.1651
+Epoch  51/500 [21.9s mem=14193MB] | total=1.7184 task=0.4887 | out_nov=0.3219 out_pen=0.6781 | node_nov=1.4731 node_pen=0.5269 | div_loss=0.0248 | ip_mean=0.0248 ip_std=0.4667 | val_AP=0.1634 test_AP=0.1621
+Early stopping at epoch 51. Best val AP=0.4347 at epoch 1.
+Stage 2 done. Best val AP=0.4347 at epoch 1. Diagnostics saved to checkpoints_self_novelty_vanilla_flow_matching/stage2_diagnostics.pkl
+
+============================================================
+STAGE 3: Joint finetune (backbone + generator)
+  Backbone: vanilla_gt
+  lr_gen=0.0005 lr_backbone=0.0005
+  alpha=1.0 alpha_node=1.0 T=1.0
+============================================================
+Epoch   1/500 [25.9s mem=16802MB] | total=2.8302 task=0.2434 train_AP=0.5544 | out_nov=0.1370 out_pen=0.8630 | node_nov=0.2898 node_pen=1.7102 | div_loss=0.0136 | ip_mean=0.0136 ip_std=0.0982 | val_AP=0.3740 test_AP=0.3790
+  -> New best val AP=0.3740 (test=0.3790)
+Epoch   2/500 [24.3s mem=16801MB] | total=2.6243 task=0.3230 train_AP=0.3753 | out_nov=0.1851 out_pen=0.8149 | node_nov=0.5328 node_pen=1.4672 | div_loss=0.0191 | ip_mean=0.0191 ip_std=0.0999 | val_AP=0.2801 test_AP=0.2777
+Epoch   3/500 [25.3s mem=16802MB] | total=2.3193 task=0.3579 train_AP=0.2963 | out_nov=0.2061 out_pen=0.7939 | node_nov=0.8422 node_pen=1.1578 | div_loss=0.0097 | ip_mean=0.0097 ip_std=0.1067 | val_AP=0.3059 test_AP=0.3091
+Epoch   4/500 [24.4s mem=16800MB] | total=2.1433 task=0.3386 train_AP=0.3289 | out_nov=0.1961 out_pen=0.8039 | node_nov=1.0044 node_pen=0.9956 | div_loss=0.0051 | ip_mean=0.0051 ip_std=0.1222 | val_AP=0.3551 test_AP=0.3485
+Epoch   5/500 [24.5s mem=16801MB] | total=1.9403 task=0.3377 train_AP=0.3445 | out_nov=0.2049 out_pen=0.7951 | node_nov=1.1967 node_pen=0.8033 | div_loss=0.0042 | ip_mean=0.0042 ip_std=0.1545 | val_AP=0.3245 test_AP=0.3237
+Epoch   6/500 [24.8s mem=16805MB] | total=1.6880 task=0.3558 train_AP=0.3381 | out_nov=0.2237 out_pen=0.7763 | node_nov=1.4477 node_pen=0.5523 | div_loss=0.0036 | ip_mean=0.0036 ip_std=0.2015 | val_AP=0.3653 test_AP=0.3544
+Epoch   7/500 [23.8s mem=16804MB] | total=1.4060 task=0.3657 train_AP=0.3434 | out_nov=0.2648 out_pen=0.7352 | node_nov=1.6978 node_pen=0.3022 | div_loss=0.0029 | ip_mean=0.0029 ip_std=0.2713 | val_AP=0.3752 test_AP=0.3657
+  -> New best val AP=0.3752 (test=0.3657)
+Epoch   8/500 [24.8s mem=16801MB] | total=1.2945 task=0.3527 train_AP=0.3709 | out_nov=0.2863 out_pen=0.7137 | node_nov=1.7749 node_pen=0.2251 | div_loss=0.0030 | ip_mean=0.0030 ip_std=0.3604 | val_AP=0.4046 test_AP=0.3988
+  -> New best val AP=0.4046 (test=0.3988)
+Epoch   9/500 [26.1s mem=16801MB] | total=1.2880 task=0.3344 train_AP=0.3935 | out_nov=0.2938 out_pen=0.7062 | node_nov=1.7546 node_pen=0.2454 | div_loss=0.0020 | ip_mean=0.0020 ip_std=0.4085 | val_AP=0.4113 test_AP=0.4119
+  -> New best val AP=0.4113 (test=0.4119)
+Epoch  10/500 [25.8s mem=16803MB] | total=1.3426 task=0.3171 train_AP=0.4236 | out_nov=0.2930 out_pen=0.7070 | node_nov=1.6831 node_pen=0.3169 | div_loss=0.0015 | ip_mean=0.0015 ip_std=0.4427 | val_AP=0.4364 test_AP=0.4276
+  -> New best val AP=0.4364 (test=0.4276)
+Epoch  11/500 [24.5s mem=16804MB] | total=1.4140 task=0.3221 train_AP=0.4199 | out_nov=0.2996 out_pen=0.7004 | node_nov=1.6099 node_pen=0.3901 | div_loss=0.0014 | ip_mean=0.0014 ip_std=0.4738 | val_AP=0.4360 test_AP=0.4199
+Epoch  12/500 [24.9s mem=16803MB] | total=1.5144 task=0.2909 train_AP=0.4468 | out_nov=0.2970 out_pen=0.7030 | node_nov=1.4819 node_pen=0.5181 | div_loss=0.0023 | ip_mean=0.0023 ip_std=0.4823 | val_AP=0.4477 test_AP=0.4318
+  -> New best val AP=0.4477 (test=0.4318)
+Epoch  13/500 [24.5s mem=16803MB] | total=1.5835 task=0.2845 train_AP=0.4506 | out_nov=0.2842 out_pen=0.7158 | node_nov=1.4181 node_pen=0.5819 | div_loss=0.0013 | ip_mean=0.0013 ip_std=0.4985 | val_AP=0.4403 test_AP=0.4290
+Epoch  14/500 [26.5s mem=16797MB] | total=1.6530 task=0.2814 train_AP=0.4555 | out_nov=0.2806 out_pen=0.7194 | node_nov=1.3489 node_pen=0.6511 | div_loss=0.0011 | ip_mean=0.0011 ip_std=0.5292 | val_AP=0.4111 test_AP=0.4226
+Epoch  15/500 [25.1s mem=16801MB] | total=1.6707 task=0.2824 train_AP=0.4480 | out_nov=0.2864 out_pen=0.7136 | node_nov=1.3262 node_pen=0.6738 | div_loss=0.0010 | ip_mean=0.0010 ip_std=0.5397 | val_AP=0.4421 test_AP=0.4372
+Epoch  16/500 [25.1s mem=16803MB] | total=1.6565 task=0.2769 train_AP=0.4559 | out_nov=0.2753 out_pen=0.7247 | node_nov=1.3470 node_pen=0.6530 | div_loss=0.0020 | ip_mean=0.0020 ip_std=0.5412 | val_AP=0.4284 test_AP=0.4182
+Epoch  17/500 [25.1s mem=16802MB] | total=1.7270 task=0.2869 train_AP=0.4444 | out_nov=0.2694 out_pen=0.7306 | node_nov=1.2920 node_pen=0.7080 | div_loss=0.0015 | ip_mean=0.0015 ip_std=0.5444 | val_AP=0.4489 test_AP=0.4315
+  -> New best val AP=0.4489 (test=0.4315)
+Epoch  18/500 [23.7s mem=16804MB] | total=1.7869 task=0.2843 train_AP=0.4343 | out_nov=0.2615 out_pen=0.7385 | node_nov=1.2369 node_pen=0.7631 | div_loss=0.0010 | ip_mean=0.0010 ip_std=0.5538 | val_AP=0.3616 test_AP=0.3683
+Epoch  19/500 [24.1s mem=16801MB] | total=1.6153 task=0.2929 train_AP=0.4004 | out_nov=0.2205 out_pen=0.7795 | node_nov=1.4583 node_pen=0.5417 | div_loss=0.0012 | ip_mean=0.0012 ip_std=0.6033 | val_AP=0.4561 test_AP=0.4321
+  -> New best val AP=0.4561 (test=0.4321)
+Epoch  20/500 [25.2s mem=16804MB] | total=1.6444 task=0.2716 train_AP=0.4510 | out_nov=0.2821 out_pen=0.7179 | node_nov=1.3463 node_pen=0.6537 | div_loss=0.0012 | ip_mean=0.0012 ip_std=0.6150 | val_AP=0.4114 test_AP=0.3982
+Epoch  21/500 [23.7s mem=16806MB] | total=1.6627 task=0.2768 train_AP=0.4644 | out_nov=0.3017 out_pen=0.6983 | node_nov=1.3135 node_pen=0.6865 | div_loss=0.0011 | ip_mean=0.0011 ip_std=0.6919 | val_AP=0.4519 test_AP=0.4289
+Epoch  22/500 [24.2s mem=16805MB] | total=1.6917 task=0.3020 train_AP=0.4085 | out_nov=0.2619 out_pen=0.7381 | node_nov=1.3499 node_pen=0.6501 | div_loss=0.0016 | ip_mean=0.0016 ip_std=0.6886 | val_AP=0.4439 test_AP=0.4270
+Epoch  23/500 [24.7s mem=16801MB] | total=1.5877 task=0.2620 train_AP=0.4584 | out_nov=0.2398 out_pen=0.7602 | node_nov=1.4358 node_pen=0.5642 | div_loss=0.0014 | ip_mean=0.0014 ip_std=0.7041 | val_AP=0.4059 test_AP=0.4204
+Epoch  24/500 [25.1s mem=16804MB] | total=1.5563 task=0.2864 train_AP=0.4281 | out_nov=0.2550 out_pen=0.7450 | node_nov=1.4761 node_pen=0.5239 | div_loss=0.0011 | ip_mean=0.0011 ip_std=0.6881 | val_AP=0.4097 test_AP=0.4054
+Epoch  25/500 [23.8s mem=16800MB] | total=1.6347 task=0.2617 train_AP=0.4730 | out_nov=0.2575 out_pen=0.7425 | node_nov=1.3710 node_pen=0.6290 | div_loss=0.0016 | ip_mean=0.0016 ip_std=0.7027 | val_AP=0.4357 test_AP=0.4287
+Epoch  26/500 [25.1s mem=16799MB] | total=1.5705 task=0.2796 train_AP=0.4477 | out_nov=0.2606 out_pen=0.7394 | node_nov=1.4504 node_pen=0.5496 | div_loss=0.0018 | ip_mean=0.0018 ip_std=0.6805 | val_AP=0.4187 test_AP=0.4232
+Epoch  27/500 [24.3s mem=16804MB] | total=1.6828 task=0.2768 train_AP=0.4539 | out_nov=0.2400 out_pen=0.7600 | node_nov=1.3550 node_pen=0.6450 | div_loss=0.0010 | ip_mean=0.0010 ip_std=0.7813 | val_AP=0.4288 test_AP=0.4151
+Epoch  28/500 [25.9s mem=16797MB] | total=1.6381 task=0.2721 train_AP=0.4534 | out_nov=0.2406 out_pen=0.7594 | node_nov=1.3943 node_pen=0.6057 | div_loss=0.0009 | ip_mean=0.0009 ip_std=0.8221 | val_AP=0.4178 test_AP=0.4097
+Epoch  29/500 [24.1s mem=16803MB] | total=1.5793 task=0.2686 train_AP=0.4876 | out_nov=0.2628 out_pen=0.7372 | node_nov=1.4279 node_pen=0.5721 | div_loss=0.0013 | ip_mean=0.0013 ip_std=0.7797 | val_AP=0.4347 test_AP=0.4382
+Epoch  30/500 [24.7s mem=16803MB] | total=1.6401 task=0.2710 train_AP=0.4689 | out_nov=0.2568 out_pen=0.7432 | node_nov=1.3749 node_pen=0.6251 | div_loss=0.0008 | ip_mean=0.0008 ip_std=0.7695 | val_AP=0.3943 test_AP=0.3822
+Epoch  31/500 [24.4s mem=16803MB] | total=1.6599 task=0.3086 train_AP=0.4105 | out_nov=0.2737 out_pen=0.7263 | node_nov=1.3771 node_pen=0.6229 | div_loss=0.0020 | ip_mean=0.0020 ip_std=0.7804 | val_AP=0.4045 test_AP=0.4032
+Epoch  32/500 [24.8s mem=16799MB] | total=1.6897 task=0.2895 train_AP=0.4630 | out_nov=0.2714 out_pen=0.7286 | node_nov=1.3301 node_pen=0.6699 | div_loss=0.0017 | ip_mean=0.0017 ip_std=0.8318 | val_AP=0.3744 test_AP=0.3732
+Epoch  33/500 [24.7s mem=16803MB] | total=1.8345 task=0.3624 train_AP=0.3243 | out_nov=0.2334 out_pen=0.7666 | node_nov=1.4044 node_pen=0.5956 | div_loss=0.1101 | ip_mean=0.1101 ip_std=0.8453 | val_AP=0.3755 test_AP=0.3598
+Epoch  34/500 [24.8s mem=16802MB] | total=1.6570 task=0.3222 train_AP=0.3823 | out_nov=0.2142 out_pen=0.7858 | node_nov=1.4572 node_pen=0.5428 | div_loss=0.0062 | ip_mean=0.0062 ip_std=0.9414 | val_AP=0.2907 test_AP=0.2839
+Epoch  35/500 [24.7s mem=16804MB] | total=1.4156 task=0.3499 train_AP=0.3290 | out_nov=0.2453 out_pen=0.7547 | node_nov=1.6949 node_pen=0.3051 | div_loss=0.0060 | ip_mean=0.0060 ip_std=0.9399 | val_AP=0.3942 test_AP=0.3937
+Epoch  36/500 [24.9s mem=16802MB] | total=1.3980 task=0.2893 train_AP=0.4284 | out_nov=0.2796 out_pen=0.7204 | node_nov=1.6173 node_pen=0.3827 | div_loss=0.0055 | ip_mean=0.0055 ip_std=0.9486 | val_AP=0.4059 test_AP=0.3971
+Epoch  37/500 [24.5s mem=16801MB] | total=1.5221 task=0.2888 train_AP=0.4294 | out_nov=0.2266 out_pen=0.7734 | node_nov=1.5419 node_pen=0.4581 | div_loss=0.0019 | ip_mean=0.0019 ip_std=0.9447 | val_AP=0.3759 test_AP=0.3659
+Epoch  38/500 [24.5s mem=16805MB] | total=1.3198 task=0.3112 train_AP=0.3943 | out_nov=0.2542 out_pen=0.7458 | node_nov=1.7384 node_pen=0.2616 | div_loss=0.0012 | ip_mean=0.0012 ip_std=0.9377 | val_AP=0.3996 test_AP=0.4110
+Epoch  39/500 [23.8s mem=16800MB] | total=1.2351 task=0.2752 train_AP=0.4418 | out_nov=0.2225 out_pen=0.7775 | node_nov=1.8190 node_pen=0.1810 | div_loss=0.0015 | ip_mean=0.0015 ip_std=0.9238 | val_AP=0.3920 test_AP=0.4024
+Epoch  40/500 [24.3s mem=16804MB] | total=1.2504 task=0.2680 train_AP=0.4697 | out_nov=0.2288 out_pen=0.7712 | node_nov=1.7918 node_pen=0.2082 | div_loss=0.0031 | ip_mean=0.0031 ip_std=0.9395 | val_AP=0.4212 test_AP=0.4200
+Epoch  41/500 [24.2s mem=16800MB] | total=1.2661 task=0.2650 train_AP=0.4692 | out_nov=0.2129 out_pen=0.7871 | node_nov=1.7878 node_pen=0.2122 | div_loss=0.0018 | ip_mean=0.0018 ip_std=0.9481 | val_AP=0.4353 test_AP=0.4322
+Epoch  42/500 [25.4s mem=16803MB] | total=1.4746 task=0.2993 train_AP=0.4187 | out_nov=0.2359 out_pen=0.7641 | node_nov=1.5917 node_pen=0.4083 | div_loss=0.0028 | ip_mean=0.0028 ip_std=0.9174 | val_AP=0.4080 test_AP=0.4139
+Epoch  43/500 [23.9s mem=16802MB] | total=1.3357 task=0.2725 train_AP=0.4504 | out_nov=0.2086 out_pen=0.7914 | node_nov=1.7355 node_pen=0.2645 | div_loss=0.0073 | ip_mean=0.0073 ip_std=0.9572 | val_AP=0.3922 test_AP=0.3950
+Epoch  44/500 [24.4s mem=16803MB] | total=1.3902 task=0.2666 train_AP=0.4685 | out_nov=0.2107 out_pen=0.7893 | node_nov=1.6715 node_pen=0.3285 | div_loss=0.0059 | ip_mean=0.0059 ip_std=0.9577 | val_AP=0.4088 test_AP=0.3979
+Epoch  45/500 [23.9s mem=16802MB] | total=1.2294 task=0.2724 train_AP=0.4727 | out_nov=0.2182 out_pen=0.7818 | node_nov=1.8285 node_pen=0.1715 | div_loss=0.0037 | ip_mean=0.0037 ip_std=0.9350 | val_AP=0.4205 test_AP=0.4139
+Epoch  46/500 [25.1s mem=16801MB] | total=1.2502 task=0.2532 train_AP=0.4907 | out_nov=0.2150 out_pen=0.7850 | node_nov=1.7906 node_pen=0.2094 | div_loss=0.0024 | ip_mean=0.0024 ip_std=0.9546 | val_AP=0.4289 test_AP=0.4253
+Epoch  47/500 [25.1s mem=16799MB] | total=1.2272 task=0.2423 train_AP=0.5155 | out_nov=0.2188 out_pen=0.7812 | node_nov=1.7989 node_pen=0.2011 | div_loss=0.0026 | ip_mean=0.0026 ip_std=0.9670 | val_AP=0.4379 test_AP=0.4409
+Epoch  48/500 [25.2s mem=16802MB] | total=1.3900 task=0.2667 train_AP=0.4808 | out_nov=0.2180 out_pen=0.7820 | node_nov=1.6623 node_pen=0.3377 | div_loss=0.0037 | ip_mean=0.0037 ip_std=0.9405 | val_AP=0.3928 test_AP=0.3942
+Epoch  49/500 [24.1s mem=16799MB] | total=1.2559 task=0.2606 train_AP=0.4907 | out_nov=0.2244 out_pen=0.7756 | node_nov=1.7837 node_pen=0.2163 | div_loss=0.0033 | ip_mean=0.0033 ip_std=0.9345 | val_AP=0.4157 test_AP=0.4135
+Epoch  50/500 [23.7s mem=16804MB] | total=1.2430 task=0.2501 train_AP=0.4966 | out_nov=0.2208 out_pen=0.7792 | node_nov=1.7957 node_pen=0.2043 | div_loss=0.0094 | ip_mean=0.0094 ip_std=0.9450 | val_AP=0.4222 test_AP=0.4235
+Epoch  51/500 [25.7s mem=16801MB] | total=1.2163 task=0.2478 train_AP=0.5091 | out_nov=0.2363 out_pen=0.7637 | node_nov=1.8098 node_pen=0.1902 | div_loss=0.0145 | ip_mean=0.0145 ip_std=0.9431 | val_AP=0.4466 test_AP=0.4398
+Epoch  52/500 [24.0s mem=16801MB] | total=1.2080 task=0.2479 train_AP=0.5079 | out_nov=0.2254 out_pen=0.7746 | node_nov=1.8204 node_pen=0.1796 | div_loss=0.0059 | ip_mean=0.0059 ip_std=0.9603 | val_AP=0.4266 test_AP=0.4300
+Epoch  53/500 [23.7s mem=16801MB] | total=1.2180 task=0.2610 train_AP=0.4819 | out_nov=0.2441 out_pen=0.7559 | node_nov=1.8045 node_pen=0.1955 | div_loss=0.0056 | ip_mean=0.0056 ip_std=0.9477 | val_AP=0.4346 test_AP=0.4197
+Epoch  54/500 [24.3s mem=16802MB] | total=1.1840 task=0.2456 train_AP=0.5142 | out_nov=0.2378 out_pen=0.7622 | node_nov=1.8302 node_pen=0.1698 | div_loss=0.0064 | ip_mean=0.0064 ip_std=0.9631 | val_AP=0.4267 test_AP=0.4375
+Epoch  55/500 [25.5s mem=16803MB] | total=1.4451 task=0.2900 train_AP=0.4433 | out_nov=0.2681 out_pen=0.7319 | node_nov=1.5871 node_pen=0.4129 | div_loss=0.0102 | ip_mean=0.0102 ip_std=0.9615 | val_AP=0.3345 test_AP=0.3322
+Epoch  56/500 [24.8s mem=16799MB] | total=1.2002 task=0.2888 train_AP=0.4266 | out_nov=0.2400 out_pen=0.7600 | node_nov=1.8579 node_pen=0.1421 | div_loss=0.0093 | ip_mean=0.0093 ip_std=0.9469 | val_AP=0.4305 test_AP=0.4139
+Epoch  57/500 [25.5s mem=16804MB] | total=1.1660 task=0.2683 train_AP=0.4707 | out_nov=0.2301 out_pen=0.7699 | node_nov=1.8758 node_pen=0.1242 | div_loss=0.0036 | ip_mean=0.0036 ip_std=0.9685 | val_AP=0.4097 test_AP=0.4041
+Epoch  58/500 [24.5s mem=16803MB] | total=1.1124 task=0.2427 train_AP=0.5086 | out_nov=0.2531 out_pen=0.7469 | node_nov=1.8837 node_pen=0.1163 | div_loss=0.0064 | ip_mean=0.0064 ip_std=0.9633 | val_AP=0.4181 test_AP=0.4180
+Epoch  59/500 [24.7s mem=16804MB] | total=1.1329 task=0.2491 train_AP=0.4943 | out_nov=0.2489 out_pen=0.7511 | node_nov=1.8704 node_pen=0.1296 | div_loss=0.0032 | ip_mean=0.0032 ip_std=0.9667 | val_AP=0.4306 test_AP=0.4381
+Epoch  60/500 [24.8s mem=16802MB] | total=1.1146 task=0.2492 train_AP=0.5015 | out_nov=0.2646 out_pen=0.7354 | node_nov=1.8778 node_pen=0.1222 | div_loss=0.0077 | ip_mean=0.0077 ip_std=0.8906 | val_AP=0.4536 test_AP=0.4324
+Epoch  61/500 [24.2s mem=16803MB] | total=1.1154 task=0.2281 train_AP=0.5489 | out_nov=0.2428 out_pen=0.7572 | node_nov=1.8718 node_pen=0.1282 | div_loss=0.0018 | ip_mean=0.0018 ip_std=0.9240 | val_AP=0.4543 test_AP=0.4468
+Epoch  62/500 [24.0s mem=16802MB] | total=1.2022 task=0.2583 train_AP=0.4934 | out_nov=0.2357 out_pen=0.7643 | node_nov=1.8216 node_pen=0.1784 | div_loss=0.0012 | ip_mean=0.0012 ip_std=0.9589 | val_AP=0.4410 test_AP=0.4374
+Epoch  63/500 [23.9s mem=16804MB] | total=1.1640 task=0.2355 train_AP=0.5365 | out_nov=0.2503 out_pen=0.7497 | node_nov=1.8254 node_pen=0.1746 | div_loss=0.0042 | ip_mean=0.0042 ip_std=0.9141 | val_AP=0.4436 test_AP=0.4363
+Epoch  64/500 [23.8s mem=16801MB] | total=1.1429 task=0.2269 train_AP=0.5600 | out_nov=0.2520 out_pen=0.7480 | node_nov=1.8346 node_pen=0.1654 | div_loss=0.0027 | ip_mean=0.0027 ip_std=0.9202 | val_AP=0.4367 test_AP=0.4298
+Epoch  65/500 [25.4s mem=16805MB] | total=1.1309 task=0.2370 train_AP=0.5297 | out_nov=0.2390 out_pen=0.7610 | node_nov=1.8689 node_pen=0.1311 | div_loss=0.0018 | ip_mean=0.0018 ip_std=0.9082 | val_AP=0.4568 test_AP=0.4464
+  -> New best val AP=0.4568 (test=0.4464)
+Epoch  66/500 [24.2s mem=16802MB] | total=1.1996 task=0.2590 train_AP=0.4995 | out_nov=0.2405 out_pen=0.7595 | node_nov=1.8216 node_pen=0.1784 | div_loss=0.0027 | ip_mean=0.0027 ip_std=0.9410 | val_AP=0.4084 test_AP=0.3994
+Epoch  67/500 [25.7s mem=16797MB] | total=1.1646 task=0.2458 train_AP=0.5071 | out_nov=0.2329 out_pen=0.7671 | node_nov=1.8495 node_pen=0.1505 | div_loss=0.0011 | ip_mean=0.0011 ip_std=0.9543 | val_AP=0.4242 test_AP=0.4387
+Epoch  68/500 [24.8s mem=16804MB] | total=1.1645 task=0.2239 train_AP=0.5533 | out_nov=0.2320 out_pen=0.7680 | node_nov=1.8306 node_pen=0.1694 | div_loss=0.0031 | ip_mean=0.0031 ip_std=0.9617 | val_AP=0.4358 test_AP=0.4219
+Epoch  69/500 [24.8s mem=16802MB] | total=1.2003 task=0.2420 train_AP=0.5335 | out_nov=0.2290 out_pen=0.7710 | node_nov=1.8145 node_pen=0.1855 | div_loss=0.0018 | ip_mean=0.0018 ip_std=0.9311 | val_AP=0.4540 test_AP=0.4470
+Epoch  70/500 [24.4s mem=16804MB] | total=1.2659 task=0.2669 train_AP=0.4890 | out_nov=0.2473 out_pen=0.7527 | node_nov=1.7560 node_pen=0.2440 | div_loss=0.0022 | ip_mean=0.0022 ip_std=0.9408 | val_AP=0.3216 test_AP=0.3226
+Epoch  71/500 [23.9s mem=16800MB] | total=1.2891 task=0.3328 train_AP=0.3678 | out_nov=0.3144 out_pen=0.6856 | node_nov=1.7318 node_pen=0.2682 | div_loss=0.0026 | ip_mean=0.0026 ip_std=0.9623 | val_AP=0.3959 test_AP=0.3761
+Epoch  72/500 [25.0s mem=16804MB] | total=1.1442 task=0.2682 train_AP=0.4694 | out_nov=0.2769 out_pen=0.7231 | node_nov=1.8486 node_pen=0.1514 | div_loss=0.0016 | ip_mean=0.0016 ip_std=0.9750 | val_AP=0.4337 test_AP=0.4223
+Epoch  73/500 [24.6s mem=16799MB] | total=1.1739 task=0.2532 train_AP=0.5109 | out_nov=0.2492 out_pen=0.7508 | node_nov=1.8324 node_pen=0.1676 | div_loss=0.0023 | ip_mean=0.0023 ip_std=0.9747 | val_AP=0.4371 test_AP=0.4312
+Epoch  74/500 [25.6s mem=16801MB] | total=1.2103 task=0.2453 train_AP=0.5168 | out_nov=0.2552 out_pen=0.7448 | node_nov=1.7819 node_pen=0.2181 | div_loss=0.0021 | ip_mean=0.0021 ip_std=0.9721 | val_AP=0.4066 test_AP=0.3915
+Epoch  75/500 [24.6s mem=16802MB] | total=1.1586 task=0.2386 train_AP=0.5237 | out_nov=0.2544 out_pen=0.7456 | node_nov=1.8296 node_pen=0.1704 | div_loss=0.0039 | ip_mean=0.0039 ip_std=0.9777 | val_AP=0.4519 test_AP=0.4488
+Epoch  76/500 [25.0s mem=16804MB] | total=1.0869 task=0.2244 train_AP=0.5706 | out_nov=0.2460 out_pen=0.7540 | node_nov=1.8935 node_pen=0.1065 | div_loss=0.0020 | ip_mean=0.0020 ip_std=0.9788 | val_AP=0.4433 test_AP=0.4511
+Epoch  77/500 [24.0s mem=16800MB] | total=1.1133 task=0.2223 train_AP=0.5596 | out_nov=0.2662 out_pen=0.7338 | node_nov=1.8465 node_pen=0.1535 | div_loss=0.0037 | ip_mean=0.0037 ip_std=0.9784 | val_AP=0.4438 test_AP=0.4457
+Epoch  78/500 [24.0s mem=16808MB] | total=1.1232 task=0.2301 train_AP=0.5452 | out_nov=0.2588 out_pen=0.7412 | node_nov=1.8534 node_pen=0.1466 | div_loss=0.0054 | ip_mean=0.0054 ip_std=0.9666 | val_AP=0.4348 test_AP=0.4300
+Epoch  79/500 [24.5s mem=16802MB] | total=1.0719 task=0.2279 train_AP=0.5563 | out_nov=0.2862 out_pen=0.7138 | node_nov=1.8736 node_pen=0.1264 | div_loss=0.0038 | ip_mean=0.0038 ip_std=0.9446 | val_AP=0.4527 test_AP=0.4576
+Epoch  80/500 [24.2s mem=16803MB] | total=1.2088 task=0.2375 train_AP=0.5391 | out_nov=0.2990 out_pen=0.7010 | node_nov=1.7362 node_pen=0.2638 | div_loss=0.0064 | ip_mean=0.0064 ip_std=0.9583 | val_AP=0.4280 test_AP=0.4331
+Epoch  81/500 [24.1s mem=16803MB] | total=1.1544 task=0.2401 train_AP=0.5320 | out_nov=0.2877 out_pen=0.7123 | node_nov=1.7995 node_pen=0.2005 | div_loss=0.0015 | ip_mean=0.0015 ip_std=0.9676 | val_AP=0.4632 test_AP=0.4511
+  -> New best val AP=0.4632 (test=0.4511)
+Epoch  82/500 [24.9s mem=16803MB] | total=1.1326 task=0.2238 train_AP=0.5639 | out_nov=0.2570 out_pen=0.7430 | node_nov=1.8461 node_pen=0.1539 | div_loss=0.0119 | ip_mean=0.0119 ip_std=0.9613 | val_AP=0.4404 test_AP=0.4280
+Epoch  83/500 [25.9s mem=16797MB] | total=1.1436 task=0.2339 train_AP=0.5503 | out_nov=0.2702 out_pen=0.7298 | node_nov=1.8252 node_pen=0.1748 | div_loss=0.0050 | ip_mean=0.0050 ip_std=0.9665 | val_AP=0.4698 test_AP=0.4530
+  -> New best val AP=0.4698 (test=0.4530)
+Epoch  84/500 [25.7s mem=16803MB] | total=1.0766 task=0.2193 train_AP=0.5735 | out_nov=0.2456 out_pen=0.7544 | node_nov=1.8996 node_pen=0.1004 | div_loss=0.0024 | ip_mean=0.0024 ip_std=0.9681 | val_AP=0.4537 test_AP=0.4412
+Epoch  85/500 [25.7s mem=16805MB] | total=1.0913 task=0.2128 train_AP=0.5811 | out_nov=0.2389 out_pen=0.7611 | node_nov=1.8867 node_pen=0.1133 | div_loss=0.0041 | ip_mean=0.0041 ip_std=0.9521 | val_AP=0.4542 test_AP=0.4538
+Epoch  86/500 [25.6s mem=16802MB] | total=1.0611 task=0.2031 train_AP=0.5983 | out_nov=0.2539 out_pen=0.7461 | node_nov=1.8921 node_pen=0.1079 | div_loss=0.0039 | ip_mean=0.0039 ip_std=0.9644 | val_AP=0.4371 test_AP=0.4462
+Epoch  87/500 [27.0s mem=16801MB] | total=1.0740 task=0.2040 train_AP=0.6025 | out_nov=0.2528 out_pen=0.7472 | node_nov=1.8824 node_pen=0.1176 | div_loss=0.0053 | ip_mean=0.0053 ip_std=0.9642 | val_AP=0.4666 test_AP=0.4505
+Epoch  88/500 [26.9s mem=16799MB] | total=1.0732 task=0.2145 train_AP=0.5827 | out_nov=0.2464 out_pen=0.7536 | node_nov=1.8997 node_pen=0.1003 | div_loss=0.0048 | ip_mean=0.0048 ip_std=0.9746 | val_AP=0.4798 test_AP=0.4597
+  -> New best val AP=0.4798 (test=0.4597)
+Epoch  89/500 [26.3s mem=16806MB] | total=1.0530 task=0.1972 train_AP=0.6161 | out_nov=0.2594 out_pen=0.7406 | node_nov=1.8881 node_pen=0.1119 | div_loss=0.0033 | ip_mean=0.0033 ip_std=0.9778 | val_AP=0.4569 test_AP=0.4491
+Epoch  90/500 [24.7s mem=16798MB] | total=1.0659 task=0.2096 train_AP=0.5987 | out_nov=0.2705 out_pen=0.7295 | node_nov=1.8764 node_pen=0.1236 | div_loss=0.0033 | ip_mean=0.0033 ip_std=0.9704 | val_AP=0.4770 test_AP=0.4652
+Epoch  91/500 [26.0s mem=16799MB] | total=1.0705 task=0.2088 train_AP=0.5983 | out_nov=0.2640 out_pen=0.7360 | node_nov=1.8764 node_pen=0.1236 | div_loss=0.0022 | ip_mean=0.0022 ip_std=0.8824 | val_AP=0.4666 test_AP=0.4598
+Epoch  92/500 [25.5s mem=16801MB] | total=1.0520 task=0.2023 train_AP=0.6011 | out_nov=0.2767 out_pen=0.7233 | node_nov=1.8760 node_pen=0.1240 | div_loss=0.0024 | ip_mean=0.0024 ip_std=0.8745 | val_AP=0.4664 test_AP=0.4458
+Epoch  93/500 [26.6s mem=16799MB] | total=1.0648 task=0.2046 train_AP=0.6047 | out_nov=0.2645 out_pen=0.7355 | node_nov=1.8768 node_pen=0.1232 | div_loss=0.0014 | ip_mean=0.0014 ip_std=0.8667 | val_AP=0.4583 test_AP=0.4524
+Epoch  94/500 [25.4s mem=16804MB] | total=1.1129 task=0.2280 train_AP=0.5599 | out_nov=0.2853 out_pen=0.7147 | node_nov=1.8314 node_pen=0.1686 | div_loss=0.0015 | ip_mean=0.0015 ip_std=0.8812 | val_AP=0.4612 test_AP=0.4548
+Epoch  95/500 [26.0s mem=16800MB] | total=1.0487 task=0.2049 train_AP=0.5958 | out_nov=0.2694 out_pen=0.7306 | node_nov=1.8900 node_pen=0.1100 | div_loss=0.0032 | ip_mean=0.0032 ip_std=0.9098 | val_AP=0.4718 test_AP=0.4739
+Epoch  96/500 [26.8s mem=16800MB] | total=1.0426 task=0.1976 train_AP=0.6160 | out_nov=0.2644 out_pen=0.7356 | node_nov=1.8922 node_pen=0.1078 | div_loss=0.0016 | ip_mean=0.0016 ip_std=0.9211 | val_AP=0.4700 test_AP=0.4655
+Epoch  97/500 [25.5s mem=16802MB] | total=1.1233 task=0.2180 train_AP=0.5723 | out_nov=0.2933 out_pen=0.7067 | node_nov=1.8033 node_pen=0.1967 | div_loss=0.0019 | ip_mean=0.0019 ip_std=0.9366 | val_AP=0.4532 test_AP=0.4497
+Epoch  98/500 [25.7s mem=16800MB] | total=1.1063 task=0.2081 train_AP=0.5888 | out_nov=0.2807 out_pen=0.7193 | node_nov=1.8224 node_pen=0.1776 | div_loss=0.0013 | ip_mean=0.0013 ip_std=0.9526 | val_AP=0.4373 test_AP=0.4529
+Epoch  99/500 [25.8s mem=16804MB] | total=1.1763 task=0.2401 train_AP=0.5274 | out_nov=0.2748 out_pen=0.7252 | node_nov=1.7913 node_pen=0.2087 | div_loss=0.0023 | ip_mean=0.0023 ip_std=0.9611 | val_AP=0.4599 test_AP=0.4533
+Epoch 100/500 [25.5s mem=16806MB] | total=1.1729 task=0.2233 train_AP=0.5663 | out_nov=0.2809 out_pen=0.7191 | node_nov=1.7724 node_pen=0.2276 | div_loss=0.0029 | ip_mean=0.0029 ip_std=0.9579 | val_AP=0.4035 test_AP=0.3818
+Epoch 101/500 [25.6s mem=16803MB] | total=1.2244 task=0.2282 train_AP=0.5488 | out_nov=0.3173 out_pen=0.6827 | node_nov=1.6882 node_pen=0.3118 | div_loss=0.0018 | ip_mean=0.0018 ip_std=0.9627 | val_AP=0.4527 test_AP=0.4424
+Epoch 102/500 [25.5s mem=16803MB] | total=1.1581 task=0.2127 train_AP=0.5752 | out_nov=0.2912 out_pen=0.7088 | node_nov=1.7660 node_pen=0.2340 | div_loss=0.0026 | ip_mean=0.0026 ip_std=0.9563 | val_AP=0.4400 test_AP=0.4268
+Epoch 103/500 [25.3s mem=16802MB] | total=1.1972 task=0.2435 train_AP=0.5174 | out_nov=0.2911 out_pen=0.7089 | node_nov=1.7561 node_pen=0.2439 | div_loss=0.0010 | ip_mean=0.0010 ip_std=0.9504 | val_AP=0.4621 test_AP=0.4476
+Epoch 104/500 [26.0s mem=16798MB] | total=1.1918 task=0.2584 train_AP=0.4906 | out_nov=0.2948 out_pen=0.7052 | node_nov=1.7731 node_pen=0.2269 | div_loss=0.0014 | ip_mean=0.0014 ip_std=0.9671 | val_AP=0.4513 test_AP=0.4436
+Epoch 105/500 [23.9s mem=16797MB] | total=1.1130 task=0.2147 train_AP=0.5709 | out_nov=0.2728 out_pen=0.7272 | node_nov=1.8329 node_pen=0.1671 | div_loss=0.0040 | ip_mean=0.0040 ip_std=0.9580 | val_AP=0.4317 test_AP=0.4333
+Epoch 106/500 [25.9s mem=16807MB] | total=1.0664 task=0.2008 train_AP=0.5922 | out_nov=0.2696 out_pen=0.7304 | node_nov=1.8676 node_pen=0.1324 | div_loss=0.0028 | ip_mean=0.0028 ip_std=0.9553 | val_AP=0.4310 test_AP=0.4376
+Epoch 107/500 [25.2s mem=16798MB] | total=1.1334 task=0.2386 train_AP=0.5426 | out_nov=0.3409 out_pen=0.6591 | node_nov=1.7665 node_pen=0.2335 | div_loss=0.0022 | ip_mean=0.0022 ip_std=0.9604 | val_AP=0.4164 test_AP=0.4113
+Epoch 108/500 [36.9s mem=16802MB] | total=1.1948 task=0.2276 train_AP=0.5562 | out_nov=0.3147 out_pen=0.6853 | node_nov=1.7206 node_pen=0.2794 | div_loss=0.0025 | ip_mean=0.0025 ip_std=0.9666 | val_AP=0.4242 test_AP=0.4391
+Epoch 109/500 [38.5s mem=16800MB] | total=1.1229 task=0.2240 train_AP=0.5634 | out_nov=0.3136 out_pen=0.6864 | node_nov=1.7891 node_pen=0.2109 | div_loss=0.0016 | ip_mean=0.0016 ip_std=0.9462 | val_AP=0.4479 test_AP=0.4458
+Epoch 110/500 [38.9s mem=16804MB] | total=1.1236 task=0.2039 train_AP=0.5993 | out_nov=0.3178 out_pen=0.6822 | node_nov=1.7648 node_pen=0.2352 | div_loss=0.0023 | ip_mean=0.0023 ip_std=0.9464 | val_AP=0.4467 test_AP=0.4553
+Epoch 111/500 [38.3s mem=16801MB] | total=1.1693 task=0.2152 train_AP=0.5830 | out_nov=0.3274 out_pen=0.6726 | node_nov=1.7211 node_pen=0.2789 | div_loss=0.0026 | ip_mean=0.0026 ip_std=0.9493 | val_AP=0.4389 test_AP=0.4488
+Epoch 112/500 [38.3s mem=16799MB] | total=1.0764 task=0.1947 train_AP=0.6038 | out_nov=0.3223 out_pen=0.6777 | node_nov=1.7989 node_pen=0.2011 | div_loss=0.0028 | ip_mean=0.0028 ip_std=0.9467 | val_AP=0.4507 test_AP=0.4687
+Epoch 113/500 [38.0s mem=16801MB] | total=0.9957 task=0.1846 train_AP=0.6320 | out_nov=0.3174 out_pen=0.6826 | node_nov=1.8738 node_pen=0.1262 | div_loss=0.0022 | ip_mean=0.0022 ip_std=0.9402 | val_AP=0.4470 test_AP=0.4554
+Epoch 114/500 [39.1s mem=16802MB] | total=1.0325 task=0.1824 train_AP=0.6352 | out_nov=0.3107 out_pen=0.6893 | node_nov=1.8394 node_pen=0.1606 | div_loss=0.0002 | ip_mean=0.0002 ip_std=0.9303 | val_AP=0.4589 test_AP=0.4784
+Epoch 115/500 [38.2s mem=16806MB] | total=1.0485 task=0.1810 train_AP=0.6369 | out_nov=0.2958 out_pen=0.7042 | node_nov=1.8376 node_pen=0.1624 | div_loss=0.0008 | ip_mean=0.0008 ip_std=0.9219 | val_AP=0.4616 test_AP=0.4683
+Epoch 116/500 [38.8s mem=16800MB] | total=1.0122 task=0.1826 train_AP=0.6442 | out_nov=0.3037 out_pen=0.6963 | node_nov=1.8674 node_pen=0.1326 | div_loss=0.0007 | ip_mean=0.0007 ip_std=0.9114 | val_AP=0.4638 test_AP=0.4767
+Epoch 117/500 [38.6s mem=16800MB] | total=1.0779 task=0.1800 train_AP=0.6428 | out_nov=0.2954 out_pen=0.7046 | node_nov=1.8073 node_pen=0.1927 | div_loss=0.0006 | ip_mean=0.0006 ip_std=0.9087 | val_AP=0.4430 test_AP=0.4439
+Epoch 118/500 [39.4s mem=16798MB] | total=1.0938 task=0.1759 train_AP=0.6466 | out_nov=0.2911 out_pen=0.7089 | node_nov=1.7923 node_pen=0.2077 | div_loss=0.0013 | ip_mean=0.0013 ip_std=0.9222 | val_AP=0.4546 test_AP=0.4636
+Epoch 119/500 [37.4s mem=16801MB] | total=1.0667 task=0.1737 train_AP=0.6527 | out_nov=0.3049 out_pen=0.6951 | node_nov=1.8028 node_pen=0.1972 | div_loss=0.0007 | ip_mean=0.0007 ip_std=0.9119 | val_AP=0.4475 test_AP=0.4603
+Epoch 120/500 [37.7s mem=16802MB] | total=1.0877 task=0.1735 train_AP=0.6543 | out_nov=0.3103 out_pen=0.6897 | node_nov=1.7760 node_pen=0.2240 | div_loss=0.0006 | ip_mean=0.0006 ip_std=0.9136 | val_AP=0.4682 test_AP=0.4714
+Epoch 121/500 [36.3s mem=16803MB] | total=1.1440 task=0.1751 train_AP=0.6558 | out_nov=0.3040 out_pen=0.6960 | node_nov=1.7287 node_pen=0.2713 | div_loss=0.0016 | ip_mean=0.0016 ip_std=0.9242 | val_AP=0.4385 test_AP=0.4506
+Epoch 122/500 [31.8s mem=16803MB] | total=1.0134 task=0.1708 train_AP=0.6642 | out_nov=0.3099 out_pen=0.6901 | node_nov=1.8483 node_pen=0.1517 | div_loss=0.0008 | ip_mean=0.0008 ip_std=0.9479 | val_AP=0.4601 test_AP=0.4678
+Epoch 123/500 [34.5s mem=16804MB] | total=1.0107 task=0.1637 train_AP=0.6787 | out_nov=0.2958 out_pen=0.7042 | node_nov=1.8581 node_pen=0.1419 | div_loss=0.0008 | ip_mean=0.0008 ip_std=0.9445 | val_AP=0.4640 test_AP=0.4671
+Epoch 124/500 [38.4s mem=16802MB] | total=1.0173 task=0.1622 train_AP=0.6790 | out_nov=0.3118 out_pen=0.6882 | node_nov=1.8332 node_pen=0.1668 | div_loss=0.0001 | ip_mean=0.0001 ip_std=0.9437 | val_AP=0.4565 test_AP=0.4675
+Epoch 125/500 [37.5s mem=16800MB] | total=1.0499 task=0.1679 train_AP=0.6676 | out_nov=0.3068 out_pen=0.6932 | node_nov=1.8123 node_pen=0.1877 | div_loss=0.0010 | ip_mean=0.0010 ip_std=0.9563 | val_AP=0.4281 test_AP=0.4327
+Epoch 126/500 [38.9s mem=16805MB] | total=1.0801 task=0.1784 train_AP=0.6506 | out_nov=0.3201 out_pen=0.6799 | node_nov=1.7781 node_pen=0.2219 | div_loss=-0.0001 | ip_mean=-0.0001 ip_std=0.9398 | val_AP=0.4423 test_AP=0.4488
+Epoch 127/500 [37.8s mem=16800MB] | total=1.0063 task=0.1601 train_AP=0.6841 | out_nov=0.2965 out_pen=0.7035 | node_nov=1.8586 node_pen=0.1414 | div_loss=0.0013 | ip_mean=0.0013 ip_std=0.9358 | val_AP=0.4578 test_AP=0.4656
+Epoch 128/500 [38.0s mem=16807MB] | total=0.9991 task=0.1549 train_AP=0.7001 | out_nov=0.3146 out_pen=0.6854 | node_nov=1.8446 node_pen=0.1554 | div_loss=0.0035 | ip_mean=0.0035 ip_std=0.9629 | val_AP=0.4622 test_AP=0.4711
+Epoch 129/500 [37.5s mem=16800MB] | total=0.9681 task=0.1565 train_AP=0.6924 | out_nov=0.3246 out_pen=0.6754 | node_nov=1.8673 node_pen=0.1327 | div_loss=0.0035 | ip_mean=0.0035 ip_std=0.9384 | val_AP=0.4578 test_AP=0.4600
+Epoch 130/500 [38.6s mem=16804MB] | total=1.0246 task=0.1688 train_AP=0.6696 | out_nov=0.3236 out_pen=0.6764 | node_nov=1.8239 node_pen=0.1761 | div_loss=0.0033 | ip_mean=0.0033 ip_std=0.9295 | val_AP=0.4502 test_AP=0.4593
+Epoch 131/500 [38.0s mem=16803MB] | total=0.9646 task=0.1545 train_AP=0.7020 | out_nov=0.3120 out_pen=0.6880 | node_nov=1.8797 node_pen=0.1203 | div_loss=0.0018 | ip_mean=0.0018 ip_std=0.9431 | val_AP=0.4546 test_AP=0.4640
+Epoch 132/500 [38.8s mem=16799MB] | total=0.9696 task=0.1466 train_AP=0.7094 | out_nov=0.3193 out_pen=0.6807 | node_nov=1.8589 node_pen=0.1411 | div_loss=0.0012 | ip_mean=0.0012 ip_std=0.9379 | val_AP=0.4711 test_AP=0.4690
+Epoch 133/500 [37.6s mem=16803MB] | total=1.0055 task=0.1583 train_AP=0.6920 | out_nov=0.3317 out_pen=0.6683 | node_nov=1.8219 node_pen=0.1781 | div_loss=0.0008 | ip_mean=0.0008 ip_std=0.9167 | val_AP=0.4726 test_AP=0.4620
+Epoch 134/500 [37.8s mem=16803MB] | total=1.0280 task=0.1645 train_AP=0.6798 | out_nov=0.3303 out_pen=0.6697 | node_nov=1.8063 node_pen=0.1937 | div_loss=-0.0000 | ip_mean=-0.0000 ip_std=0.9319 | val_AP=0.4551 test_AP=0.4636
+Epoch 135/500 [37.6s mem=16803MB] | total=1.0190 task=0.1709 train_AP=0.6744 | out_nov=0.3428 out_pen=0.6572 | node_nov=1.8108 node_pen=0.1892 | div_loss=0.0017 | ip_mean=0.0017 ip_std=0.9216 | val_AP=0.4684 test_AP=0.4570
+Epoch 136/500 [38.4s mem=16806MB] | total=0.9299 task=0.1469 train_AP=0.7145 | out_nov=0.3637 out_pen=0.6363 | node_nov=1.8540 node_pen=0.1460 | div_loss=0.0007 | ip_mean=0.0007 ip_std=0.9222 | val_AP=0.4714 test_AP=0.4659
+Epoch 137/500 [32.7s mem=16800MB] | total=0.8567 task=0.1394 train_AP=0.7290 | out_nov=0.3763 out_pen=0.6237 | node_nov=1.9073 node_pen=0.0927 | div_loss=0.0010 | ip_mean=0.0010 ip_std=0.9469 | val_AP=0.4768 test_AP=0.4710
+Epoch 138/500 [31.1s mem=16798MB] | total=0.9246 task=0.1391 train_AP=0.7300 | out_nov=0.3470 out_pen=0.6530 | node_nov=1.8704 node_pen=0.1296 | div_loss=0.0029 | ip_mean=0.0029 ip_std=0.9436 | val_AP=0.4516 test_AP=0.4629
+Early stopping at epoch 138. Best val AP=0.4798 at epoch 88.
+Stage 3 done. Best val AP=0.4798 at epoch 88. Diagnostics saved to checkpoints_self_novelty_vanilla_flow_matching/stage3_diagnostics.pkl
