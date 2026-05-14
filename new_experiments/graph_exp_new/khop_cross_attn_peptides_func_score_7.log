@@ -1,0 +1,128 @@
+{'dataset': 'Peptides-func', 'max_hops': 40, 'use_lap_pe': True, 'lap_pe_dim': 8, 'hidden_dim': 128, 'hop_dim': 16, 'fuse_mode': 'concat_proj', 'khop_per_block': True, 'khop_num_heads': 4, 'no_residual_self': False, 'num_layers': 2, 'num_heads': 8, 'num_cross_layers': 1, 'no_proxy_self_attn': True, 'share_blocks': True, 'graph_pool': 'sum', 'dropout': 0.2, 'aux_loss_weight': 1.0, 'aux_loss_decay': 1.0, 'final_sa_layers': 0, 'final_sa_heads': 0, 'generator': 'pma', 'num_proxies': 128, 'score_hidden': 128, 'score_layers': 2, 'score_heads': 8, 'gnn_layers': 15, 'gnn_type': 'GINE', 'pool_types': ['mean'], 'decode_hidden': 128, 'decode_layers': 2, 'idx_emb_dim': 64, 'decode_mode': 'shared', 'pma_query_mode': 'farthest_point', 'coarsen_gnn_type': 'GIN', 'coarsen_reg_weight': 0.1, 'lr': 0.001, 'lr_min': 1e-06, 'weight_decay': 0.0003, 'batch_size': 64, 'max_epochs': 200, 'patience': 40, 'warmup_ratio': 0.05, 'grad_clip': 1.0, 'num_workers': 4, 'dist_mask_workers': 8, 'device': None, 'save_dir': 'checkpoints_khop_cross_attn_func_score_7', 'seed': 0}
+Unknown =  []
+[Peptides-func] task=multi_label level=graph metric=macro_ap (higher_is_better=True)
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/val.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/test.pkl
+trainable params: 0.938M
+epoch 000 | 604.6s | train loss 0.4490 AP 0.1959 | val loss 0.3469 AP 0.2619 | test loss 0.3471 AP 0.2601 | best val 0.2619 (epoch 0, test 0.2601341804005309)
+{'dataset': 'Peptides-func', 'max_hops': 40, 'use_lap_pe': True, 'lap_pe_dim': 8, 'hidden_dim': 128, 'hop_dim': 16, 'fuse_mode': 'concat_proj', 'khop_per_block': True, 'khop_num_heads': 4, 'no_residual_self': False, 'num_layers': 2, 'num_heads': 8, 'num_cross_layers': 1, 'no_proxy_self_attn': True, 'share_blocks': True, 'graph_pool': 'sum', 'dropout': 0.2, 'aux_loss_weight': 1.0, 'aux_loss_decay': 1.0, 'final_sa_layers': 0, 'final_sa_heads': 0, 'generator': 'pma', 'num_proxies': 128, 'score_hidden': 128, 'score_layers': 2, 'score_heads': 8, 'gnn_layers': 15, 'gnn_type': 'GINE', 'pool_types': ['mean'], 'decode_hidden': 128, 'decode_layers': 2, 'idx_emb_dim': 64, 'decode_mode': 'shared', 'pma_query_mode': 'farthest_point', 'coarsen_gnn_type': 'GIN', 'coarsen_reg_weight': 0.1, 'lr': 0.001, 'lr_min': 1e-06, 'weight_decay': 0.0003, 'batch_size': 64, 'max_epochs': 200, 'patience': 40, 'warmup_ratio': 0.05, 'grad_clip': 1.0, 'num_workers': 1, 'dist_mask_workers': 8, 'device': None, 'save_dir': 'checkpoints_khop_cross_attn_func_score_7', 'seed': 0}
+Unknown =  []
+[Peptides-func] task=multi_label level=graph metric=macro_ap (higher_is_better=True)
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/val.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/test.pkl
+trainable params: 0.938M
+{'dataset': 'Peptides-func', 'max_hops': 40, 'use_lap_pe': True, 'lap_pe_dim': 8, 'hidden_dim': 128, 'hop_dim': 16, 'fuse_mode': 'concat_proj', 'khop_per_block': True, 'khop_num_heads': 4, 'no_residual_self': False, 'num_layers': 2, 'num_heads': 8, 'num_cross_layers': 1, 'no_proxy_self_attn': True, 'share_blocks': True, 'graph_pool': 'sum', 'dropout': 0.2, 'aux_loss_weight': 1.0, 'aux_loss_decay': 1.0, 'final_sa_layers': 0, 'final_sa_heads': 0, 'generator': 'pma', 'num_proxies': 128, 'score_hidden': 128, 'score_layers': 2, 'score_heads': 8, 'gnn_layers': 15, 'gnn_type': 'GINE', 'pool_types': ['mean'], 'decode_hidden': 128, 'decode_layers': 2, 'idx_emb_dim': 64, 'decode_mode': 'shared', 'pma_query_mode': 'farthest_point', 'coarsen_gnn_type': 'GIN', 'coarsen_reg_weight': 0.1, 'lr': 0.001, 'lr_min': 1e-06, 'weight_decay': 0.0003, 'batch_size': 128, 'max_epochs': 200, 'patience': 40, 'warmup_ratio': 0.05, 'grad_clip': 1.0, 'num_workers': 1, 'dist_mask_workers': 8, 'device': None, 'save_dir': 'checkpoints_khop_cross_attn_func_score_7', 'seed': 0}
+Unknown =  []
+[Peptides-func] task=multi_label level=graph metric=macro_ap (higher_is_better=True)
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/val.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/test.pkl
+trainable params: 0.938M
+{'dataset': 'Peptides-func', 'max_hops': 40, 'use_lap_pe': True, 'lap_pe_dim': 8, 'hidden_dim': 128, 'hop_dim': 16, 'fuse_mode': 'concat_proj', 'khop_per_block': True, 'khop_num_heads': 4, 'no_residual_self': False, 'num_layers': 2, 'num_heads': 8, 'num_cross_layers': 1, 'no_proxy_self_attn': True, 'share_blocks': True, 'graph_pool': 'sum', 'dropout': 0.2, 'aux_loss_weight': 1.0, 'aux_loss_decay': 1.0, 'final_sa_layers': 0, 'final_sa_heads': 0, 'generator': 'pma', 'num_proxies': 128, 'score_hidden': 128, 'score_layers': 2, 'score_heads': 8, 'gnn_layers': 15, 'gnn_type': 'GINE', 'pool_types': ['mean'], 'decode_hidden': 128, 'decode_layers': 2, 'idx_emb_dim': 64, 'decode_mode': 'shared', 'pma_query_mode': 'farthest_point', 'coarsen_gnn_type': 'GIN', 'coarsen_reg_weight': 0.1, 'lr': 0.001, 'lr_min': 1e-06, 'weight_decay': 0.0003, 'batch_size': 64, 'max_epochs': 200, 'patience': 40, 'warmup_ratio': 0.05, 'grad_clip': 1.0, 'num_workers': 1, 'dist_mask_workers': 8, 'device': None, 'save_dir': 'checkpoints_khop_cross_attn_func_score_7', 'seed': 0}
+Unknown =  []
+[Peptides-func] task=multi_label level=graph metric=macro_ap (higher_is_better=True)
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/val.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/test.pkl
+trainable params: 0.938M
+epoch 000 | 606.0s | train loss 0.4490 AP 0.1959 | val loss 0.3469 AP 0.2612 | test loss 0.3471 AP 0.2602 | best val 0.2612 (epoch 0, test 0.26021377868429596)
+epoch 001 | 603.8s | train loss 0.3378 AP 0.2498 | val loss 0.3228 AP 0.2876 | test loss 0.3236 AP 0.2831 | best val 0.2876 (epoch 1, test 0.28306957366585467)
+epoch 002 | 602.3s | train loss 0.3289 AP 0.2619 | val loss 0.3204 AP 0.2952 | test loss 0.3204 AP 0.2931 | best val 0.2952 (epoch 2, test 0.29314819009048587)
+epoch 003 | 612.3s | train loss 0.3268 AP 0.2626 | val loss 0.3228 AP 0.2966 | test loss 0.3250 AP 0.2905 | best val 0.2966 (epoch 3, test 0.29053316397167045)
+epoch 004 | 637.2s | train loss 0.3234 AP 0.2738 | val loss 0.3144 AP 0.3111 | test loss 0.3152 AP 0.3107 | best val 0.3111 (epoch 4, test 0.31071480241500427)
+epoch 005 | 652.9s | train loss 0.3178 AP 0.2885 | val loss 0.3054 AP 0.3320 | test loss 0.3041 AP 0.3310 | best val 0.3320 (epoch 5, test 0.33103232988645254)
+epoch 006 | 635.5s | train loss 0.3093 AP 0.3121 | val loss 0.3045 AP 0.3475 | test loss 0.3037 AP 0.3400 | best val 0.3475 (epoch 6, test 0.33995915072129634)
+epoch 007 | 643.5s | train loss 0.3060 AP 0.3226 | val loss 0.2967 AP 0.3722 | test loss 0.2983 AP 0.3606 | best val 0.3722 (epoch 7, test 0.3605668949170197)
+epoch 008 | 634.1s | train loss 0.2960 AP 0.3473 | val loss 0.2846 AP 0.3968 | test loss 0.2860 AP 0.3812 | best val 0.3968 (epoch 8, test 0.3812051348979119)
+epoch 009 | 638.2s | train loss 0.2927 AP 0.3521 | val loss 0.2793 AP 0.3940 | test loss 0.2846 AP 0.3784 | best val 0.3968 (epoch 8, test 0.3812051348979119)
+epoch 010 | 637.9s | train loss 0.2842 AP 0.3736 | val loss 0.2689 AP 0.4197 | test loss 0.2777 AP 0.3866 | best val 0.4197 (epoch 10, test 0.38657494018894856)
+epoch 011 | 636.0s | train loss 0.2733 AP 0.3954 | val loss 0.2629 AP 0.4314 | test loss 0.2689 AP 0.4042 | best val 0.4314 (epoch 11, test 0.40422968001777376)
+epoch 012 | 638.6s | train loss 0.2667 AP 0.4058 | val loss 0.2570 AP 0.4352 | test loss 0.2659 AP 0.4106 | best val 0.4352 (epoch 12, test 0.41061960042899015)
+epoch 013 | 632.5s | train loss 0.2632 AP 0.4159 | val loss 0.2611 AP 0.4353 | test loss 0.2707 AP 0.4184 | best val 0.4353 (epoch 13, test 0.4183733269675825)
+epoch 014 | 624.9s | train loss 0.2576 AP 0.4294 | val loss 0.2564 AP 0.4463 | test loss 0.2661 AP 0.4255 | best val 0.4463 (epoch 14, test 0.4254825207139527)
+epoch 015 | 623.2s | train loss 0.2534 AP 0.4460 | val loss 0.2455 AP 0.4820 | test loss 0.2572 AP 0.4531 | best val 0.4820 (epoch 15, test 0.45305415664897986)
+epoch 016 | 623.0s | train loss 0.2469 AP 0.4609 | val loss 0.2444 AP 0.4793 | test loss 0.2519 AP 0.4636 | best val 0.4820 (epoch 15, test 0.45305415664897986)
+epoch 017 | 620.9s | train loss 0.2429 AP 0.4741 | val loss 0.2484 AP 0.4836 | test loss 0.2599 AP 0.4610 | best val 0.4836 (epoch 17, test 0.46095430346234456)
+epoch 018 | 620.6s | train loss 0.2384 AP 0.4868 | val loss 0.2373 AP 0.5079 | test loss 0.2472 AP 0.4773 | best val 0.5079 (epoch 18, test 0.4772880660608104)
+epoch 019 | 622.4s | train loss 0.2347 AP 0.4938 | val loss 0.2566 AP 0.4871 | test loss 0.2637 AP 0.4740 | best val 0.5079 (epoch 18, test 0.4772880660608104)
+epoch 020 | 619.4s | train loss 0.2325 AP 0.5015 | val loss 0.2341 AP 0.5023 | test loss 0.2434 AP 0.4896 | best val 0.5079 (epoch 18, test 0.4772880660608104)
+epoch 021 | 617.6s | train loss 0.2266 AP 0.5167 | val loss 0.2319 AP 0.5239 | test loss 0.2408 AP 0.4960 | best val 0.5239 (epoch 21, test 0.4960365538225842)
+epoch 022 | 629.7s | train loss 0.2258 AP 0.5217 | val loss 0.2296 AP 0.5340 | test loss 0.2430 AP 0.5029 | best val 0.5340 (epoch 22, test 0.5029299287698717)
+epoch 023 | 625.0s | train loss 0.2211 AP 0.5271 | val loss 0.2283 AP 0.5298 | test loss 0.2415 AP 0.5006 | best val 0.5340 (epoch 22, test 0.5029299287698717)
+epoch 024 | 624.6s | train loss 0.2190 AP 0.5298 | val loss 0.2274 AP 0.5369 | test loss 0.2405 AP 0.5084 | best val 0.5369 (epoch 24, test 0.5083806913407429)
+epoch 025 | 621.9s | train loss 0.2143 AP 0.5470 | val loss 0.2257 AP 0.5506 | test loss 0.2417 AP 0.5080 | best val 0.5506 (epoch 25, test 0.5080237287098448)
+epoch 026 | 626.5s | train loss 0.2135 AP 0.5455 | val loss 0.2288 AP 0.5335 | test loss 0.2422 AP 0.5080 | best val 0.5506 (epoch 25, test 0.5080237287098448)
+epoch 027 | 621.8s | train loss 0.2108 AP 0.5560 | val loss 0.2213 AP 0.5506 | test loss 0.2360 AP 0.5208 | best val 0.5506 (epoch 27, test 0.520779431117588)
+epoch 028 | 612.6s | train loss 0.2066 AP 0.5623 | val loss 0.2220 AP 0.5535 | test loss 0.2387 AP 0.5331 | best val 0.5535 (epoch 28, test 0.5331264370863663)
+epoch 029 | 623.4s | train loss 0.2056 AP 0.5699 | val loss 0.2241 AP 0.5548 | test loss 0.2325 AP 0.5246 | best val 0.5548 (epoch 29, test 0.5246214218339246)
+epoch 030 | 616.4s | train loss 0.2034 AP 0.5713 | val loss 0.2229 AP 0.5596 | test loss 0.2403 AP 0.5192 | best val 0.5596 (epoch 30, test 0.519193178606346)
+epoch 031 | 618.4s | train loss 0.1982 AP 0.5861 | val loss 0.2279 AP 0.5573 | test loss 0.2454 AP 0.5205 | best val 0.5596 (epoch 30, test 0.519193178606346)
+epoch 032 | 618.8s | train loss 0.1955 AP 0.5873 | val loss 0.2195 AP 0.5603 | test loss 0.2344 AP 0.5268 | best val 0.5603 (epoch 32, test 0.5267582749033515)
+epoch 033 | 618.3s | train loss 0.1927 AP 0.5938 | val loss 0.2379 AP 0.5514 | test loss 0.2508 AP 0.5258 | best val 0.5603 (epoch 32, test 0.5267582749033515)
+epoch 034 | 621.8s | train loss 0.1914 AP 0.5961 | val loss 0.2355 AP 0.5594 | test loss 0.2481 AP 0.5343 | best val 0.5603 (epoch 32, test 0.5267582749033515)
+epoch 035 | 619.5s | train loss 0.1884 AP 0.6057 | val loss 0.2177 AP 0.5750 | test loss 0.2277 AP 0.5419 | best val 0.5750 (epoch 35, test 0.5419310647530586)
+epoch 036 | 616.6s | train loss 0.1876 AP 0.6060 | val loss 0.2182 AP 0.5705 | test loss 0.2288 AP 0.5403 | best val 0.5750 (epoch 35, test 0.5419310647530586)
+epoch 037 | 625.5s | train loss 0.1822 AP 0.6188 | val loss 0.2196 AP 0.5780 | test loss 0.2301 AP 0.5499 | best val 0.5780 (epoch 37, test 0.5498942062665528)
+epoch 038 | 625.0s | train loss 0.1808 AP 0.6230 | val loss 0.2168 AP 0.5810 | test loss 0.2258 AP 0.5600 | best val 0.5810 (epoch 38, test 0.5600183459404443)
+epoch 039 | 611.4s | train loss 0.1807 AP 0.6292 | val loss 0.2214 AP 0.5824 | test loss 0.2332 AP 0.5616 | best val 0.5824 (epoch 39, test 0.5615617222763291)
+epoch 040 | 607.2s | train loss 0.1773 AP 0.6297 | val loss 0.2338 AP 0.5838 | test loss 0.2459 AP 0.5508 | best val 0.5838 (epoch 40, test 0.5508243937146909)
+epoch 041 | 614.8s | train loss 0.1766 AP 0.6355 | val loss 0.2291 AP 0.5891 | test loss 0.2395 AP 0.5654 | best val 0.5891 (epoch 41, test 0.5654011290781827)
+epoch 042 | 611.0s | train loss 0.1731 AP 0.6431 | val loss 0.2190 AP 0.6011 | test loss 0.2290 AP 0.5715 | best val 0.6011 (epoch 42, test 0.5714696320866371)
+epoch 043 | 612.3s | train loss 0.1705 AP 0.6470 | val loss 0.2358 AP 0.5960 | test loss 0.2508 AP 0.5543 | best val 0.6011 (epoch 42, test 0.5714696320866371)
+epoch 044 | 609.7s | train loss 0.1674 AP 0.6547 | val loss 0.2430 AP 0.5723 | test loss 0.2608 AP 0.5536 | best val 0.6011 (epoch 42, test 0.5714696320866371)
+epoch 045 | 614.3s | train loss 0.1674 AP 0.6549 | val loss 0.2294 AP 0.5909 | test loss 0.2447 AP 0.5688 | best val 0.6011 (epoch 42, test 0.5714696320866371)
+epoch 046 | 605.4s | train loss 0.1653 AP 0.6621 | val loss 0.2321 AP 0.6025 | test loss 0.2493 AP 0.5736 | best val 0.6025 (epoch 46, test 0.5735958176927922)
+epoch 047 | 607.3s | train loss 0.1604 AP 0.6739 | val loss 0.2381 AP 0.5955 | test loss 0.2585 AP 0.5718 | best val 0.6025 (epoch 46, test 0.5735958176927922)
+epoch 048 | 610.2s | train loss 0.1593 AP 0.6741 | val loss 0.2304 AP 0.6003 | test loss 0.2415 AP 0.5722 | best val 0.6025 (epoch 46, test 0.5735958176927922)
+epoch 049 | 612.1s | train loss 0.1599 AP 0.6793 | val loss 0.2245 AP 0.6002 | test loss 0.2383 AP 0.5725 | best val 0.6025 (epoch 46, test 0.5735958176927922)
+epoch 050 | 607.8s | train loss 0.1551 AP 0.6879 | val loss 0.2250 AP 0.6047 | test loss 0.2368 AP 0.5795 | best val 0.6047 (epoch 50, test 0.5794987304295451)
+epoch 051 | 606.8s | train loss 0.1540 AP 0.6898 | val loss 0.2341 AP 0.6045 | test loss 0.2548 AP 0.5725 | best val 0.6047 (epoch 50, test 0.5794987304295451)
+epoch 052 | 613.4s | train loss 0.1520 AP 0.6961 | val loss 0.2478 AP 0.5934 | test loss 0.2640 AP 0.5689 | best val 0.6047 (epoch 50, test 0.5794987304295451)
+epoch 053 | 608.6s | train loss 0.1496 AP 0.7021 | val loss 0.2414 AP 0.6000 | test loss 0.2601 AP 0.5691 | best val 0.6047 (epoch 50, test 0.5794987304295451)
+epoch 054 | 606.0s | train loss 0.1499 AP 0.7014 | val loss 0.2292 AP 0.6068 | test loss 0.2437 AP 0.5918 | best val 0.6068 (epoch 54, test 0.5918269779421973)
+epoch 055 | 609.0s | train loss 0.1483 AP 0.7091 | val loss 0.2352 AP 0.6061 | test loss 0.2497 AP 0.5875 | best val 0.6068 (epoch 54, test 0.5918269779421973)
+epoch 056 | 604.3s | train loss 0.1443 AP 0.7176 | val loss 0.2465 AP 0.6116 | test loss 0.2708 AP 0.5884 | best val 0.6116 (epoch 56, test 0.5884308842826499)
+epoch 057 | 608.5s | train loss 0.1459 AP 0.7121 | val loss 0.2267 AP 0.6192 | test loss 0.2366 AP 0.5986 | best val 0.6192 (epoch 57, test 0.5986366858795582)
+epoch 058 | 604.2s | train loss 0.1430 AP 0.7218 | val loss 0.2277 AP 0.6199 | test loss 0.2415 AP 0.5969 | best val 0.6199 (epoch 58, test 0.596898334979317)
+epoch 059 | 607.6s | train loss 0.1402 AP 0.7298 | val loss 0.2440 AP 0.6180 | test loss 0.2604 AP 0.5921 | best val 0.6199 (epoch 58, test 0.596898334979317)
+epoch 060 | 616.7s | train loss 0.1394 AP 0.7327 | val loss 0.2390 AP 0.6242 | test loss 0.2584 AP 0.6089 | best val 0.6242 (epoch 60, test 0.6089169228048323)
+epoch 061 | 604.3s | train loss 0.1385 AP 0.7308 | val loss 0.2410 AP 0.6173 | test loss 0.2555 AP 0.6036 | best val 0.6242 (epoch 60, test 0.6089169228048323)
+epoch 062 | 610.1s | train loss 0.1363 AP 0.7389 | val loss 0.2440 AP 0.6201 | test loss 0.2542 AP 0.6074 | best val 0.6242 (epoch 60, test 0.6089169228048323)
+epoch 063 | 609.7s | train loss 0.1342 AP 0.7429 | val loss 0.2392 AP 0.6231 | test loss 0.2613 AP 0.6006 | best val 0.6242 (epoch 60, test 0.6089169228048323)
+epoch 064 | 612.4s | train loss 0.1331 AP 0.7462 | val loss 0.2332 AP 0.6307 | test loss 0.2549 AP 0.6104 | best val 0.6307 (epoch 64, test 0.6104141659408523)
+epoch 065 | 605.6s | train loss 0.1308 AP 0.7478 | val loss 0.2372 AP 0.6270 | test loss 0.2549 AP 0.6189 | best val 0.6307 (epoch 64, test 0.6104141659408523)
+epoch 066 | 596.0s | train loss 0.1323 AP 0.7454 | val loss 0.2362 AP 0.6216 | test loss 0.2524 AP 0.6135 | best val 0.6307 (epoch 64, test 0.6104141659408523)
+epoch 067 | 595.2s | train loss 0.1312 AP 0.7559 | val loss 0.2307 AP 0.6336 | test loss 0.2477 AP 0.6159 | best val 0.6336 (epoch 67, test 0.6158703913158362)
+epoch 068 | 609.4s | train loss 0.1285 AP 0.7589 | val loss 0.2334 AP 0.6242 | test loss 0.2470 AP 0.6135 | best val 0.6336 (epoch 67, test 0.6158703913158362)
+epoch 069 | 604.5s | train loss 0.1276 AP 0.7612 | val loss 0.2547 AP 0.6161 | test loss 0.2612 AP 0.6136 | best val 0.6336 (epoch 67, test 0.6158703913158362)
+epoch 070 | 624.3s | train loss 0.1260 AP 0.7616 | val loss 0.2522 AP 0.6198 | test loss 0.2722 AP 0.5962 | best val 0.6336 (epoch 67, test 0.6158703913158362)
+epoch 071 | 644.2s | train loss 0.1245 AP 0.7637 | val loss 0.2386 AP 0.6440 | test loss 0.2607 AP 0.6119 | best val 0.6440 (epoch 71, test 0.6119064754043986)
+epoch 072 | 638.9s | train loss 0.1238 AP 0.7695 | val loss 0.2435 AP 0.6297 | test loss 0.2608 AP 0.6248 | best val 0.6440 (epoch 71, test 0.6119064754043986)
+epoch 073 | 629.9s | train loss 0.1208 AP 0.7748 | val loss 0.2530 AP 0.6347 | test loss 0.2664 AP 0.6227 | best val 0.6440 (epoch 71, test 0.6119064754043986)
+epoch 074 | 636.1s | train loss 0.1198 AP 0.7796 | val loss 0.2665 AP 0.6289 | test loss 0.2821 AP 0.6114 | best val 0.6440 (epoch 71, test 0.6119064754043986)
+epoch 075 | 636.4s | train loss 0.1190 AP 0.7787 | val loss 0.2464 AP 0.6332 | test loss 0.2617 AP 0.6090 | best val 0.6440 (epoch 71, test 0.6119064754043986)
+epoch 076 | 633.5s | train loss 0.1166 AP 0.7856 | val loss 0.2531 AP 0.6323 | test loss 0.2670 AP 0.6094 | best val 0.6440 (epoch 71, test 0.6119064754043986)
+epoch 077 | 635.2s | train loss 0.1169 AP 0.7873 | val loss 0.2426 AP 0.6322 | test loss 0.2546 AP 0.6106 | best val 0.6440 (epoch 71, test 0.6119064754043986)
+epoch 078 | 635.0s | train loss 0.1138 AP 0.7905 | val loss 0.2530 AP 0.6252 | test loss 0.2618 AP 0.6082 | best val 0.6440 (epoch 71, test 0.6119064754043986)
+epoch 079 | 664.7s | train loss 0.1137 AP 0.7912 | val loss 0.2562 AP 0.6322 | test loss 0.2704 AP 0.6144 | best val 0.6440 (epoch 71, test 0.6119064754043986)
+epoch 080 | 696.9s | train loss 0.1119 AP 0.7982 | val loss 0.2432 AP 0.6335 | test loss 0.2527 AP 0.6204 | best val 0.6440 (epoch 71, test 0.6119064754043986)
+epoch 081 | 658.5s | train loss 0.1122 AP 0.7960 | val loss 0.2536 AP 0.6423 | test loss 0.2578 AP 0.6318 | best val 0.6440 (epoch 71, test 0.6119064754043986)
+epoch 082 | 1239.5s | train loss 0.1112 AP 0.8050 | val loss 0.2550 AP 0.6457 | test loss 0.2715 AP 0.6188 | best val 0.6457 (epoch 82, test 0.6187982873151479)
+epoch 083 | 1390.7s | train loss 0.1101 AP 0.8076 | val loss 0.2630 AP 0.6442 | test loss 0.2817 AP 0.6162 | best val 0.6457 (epoch 82, test 0.6187982873151479)
+epoch 084 | 668.3s | train loss 0.1084 AP 0.8069 | val loss 0.2563 AP 0.6415 | test loss 0.2748 AP 0.6260 | best val 0.6457 (epoch 82, test 0.6187982873151479)
+epoch 085 | 666.5s | train loss 0.1067 AP 0.8128 | val loss 0.2639 AP 0.6307 | test loss 0.2749 AP 0.6348 | best val 0.6457 (epoch 82, test 0.6187982873151479)
+epoch 086 | 652.1s | train loss 0.1069 AP 0.8115 | val loss 0.2638 AP 0.6262 | test loss 0.2832 AP 0.6164 | best val 0.6457 (epoch 82, test 0.6187982873151479)
+epoch 087 | 648.3s | train loss 0.1066 AP 0.8117 | val loss 0.2522 AP 0.6418 | test loss 0.2617 AP 0.6345 | best val 0.6457 (epoch 82, test 0.6187982873151479)
+epoch 088 | 650.9s | train loss 0.1026 AP 0.8246 | val loss 0.2541 AP 0.6477 | test loss 0.2751 AP 0.6328 | best val 0.6477 (epoch 88, test 0.6327679357132684)
+epoch 089 | 662.9s | train loss 0.1028 AP 0.8214 | val loss 0.2532 AP 0.6490 | test loss 0.2651 AP 0.6407 | best val 0.6490 (epoch 89, test 0.6406931757147472)
+{'dataset': 'Peptides-func', 'max_hops': 40, 'use_lap_pe': True, 'lap_pe_dim': 8, 'hidden_dim': 128, 'hop_dim': 16, 'fuse_mode': 'concat_proj', 'khop_per_block': True, 'khop_num_heads': 4, 'no_residual_self': False, 'num_layers': 2, 'num_heads': 8, 'num_cross_layers': 1, 'no_proxy_self_attn': True, 'share_blocks': True, 'graph_pool': 'sum', 'dropout': 0.2, 'aux_loss_weight': 1.0, 'aux_loss_decay': 1.0, 'final_sa_layers': 0, 'final_sa_heads': 0, 'generator': 'pma', 'num_proxies': 128, 'score_hidden': 128, 'score_layers': 2, 'score_heads': 8, 'gnn_layers': 15, 'gnn_type': 'GINE', 'pool_types': ['mean'], 'decode_hidden': 128, 'decode_layers': 2, 'idx_emb_dim': 64, 'decode_mode': 'shared', 'pma_query_mode': 'farthest_point', 'coarsen_gnn_type': 'GIN', 'coarsen_reg_weight': 0.1, 'lr': 0.001, 'lr_min': 1e-06, 'weight_decay': 0.0003, 'batch_size': 64, 'max_epochs': 200, 'patience': 40, 'warmup_ratio': 0.05, 'grad_clip': 1.0, 'num_workers': 1, 'dist_mask_workers': 8, 'device': None, 'save_dir': 'checkpoints_khop_cross_attn_func_score_7', 'seed': 0}
+Unknown =  []
+[Peptides-func] task=multi_label level=graph metric=macro_ap (higher_is_better=True)
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/val.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/test.pkl
+trainable params: 0.938M
+epoch 000 | 658.0s | train loss 0.4490 AP 0.1959 | val loss 0.3469 AP 0.2618 | test loss 0.3471 AP 0.2613 | best val 0.2618 (epoch 0, test 0.26125969533134713)
+epoch 001 | 656.4s | train loss 0.3378 AP 0.2498 | val loss 0.3228 AP 0.2875 | test loss 0.3236 AP 0.2837 | best val 0.2875 (epoch 1, test 0.28366863590047275)

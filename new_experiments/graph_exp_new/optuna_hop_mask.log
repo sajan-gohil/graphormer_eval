@@ -1,0 +1,844 @@
+[Peptides-func] task=multi_label  metric=macro_ap (higher_is_better=True)
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/val.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/test.pkl
+Subsampled train: 10873 → 5436 (50%)
+Train batches: 170  Val batches: 73
+Max epochs/trial: 20  Patience: 10
+Optuna trials: 50  Pruning: True
+========================================================================
+Will run 50 new trials (target total: 50, existing: 0).
+  [trial 0] epoch 00 59.9s (bs=32) | train AP 0.2174 loss 0.3681 | val AP 0.3207 | best 0.3207
+  [trial 0] epoch 01 57.1s (bs=32) | train AP 0.3303 loss 0.3064 | val AP 0.3876 | best 0.3876
+  [trial 0] epoch 02 57.6s (bs=32) | train AP 0.3684 loss 0.2926 | val AP 0.4021 | best 0.4021
+  [trial 0] epoch 03 57.3s (bs=32) | train AP 0.3794 loss 0.2879 | val AP 0.4192 | best 0.4192
+  [trial 0] epoch 04 57.9s (bs=32) | train AP 0.4031 loss 0.2784 | val AP 0.4158 | best 0.4192
+  [trial 0] epoch 05 57.6s (bs=32) | train AP 0.4160 loss 0.2733 | val AP 0.4532 | best 0.4532
+  [trial 0] epoch 06 57.8s (bs=32) | train AP 0.4394 loss 0.2655 | val AP 0.4684 | best 0.4684
+  [trial 0] epoch 07 57.3s (bs=32) | train AP 0.4521 loss 0.2609 | val AP 0.4697 | best 0.4697
+  [trial 0] epoch 08 59.2s (bs=32) | train AP 0.4721 loss 0.2544 | val AP 0.4850 | best 0.4850
+  [trial 0] epoch 09 57.4s (bs=32) | train AP 0.4874 loss 0.2483 | val AP 0.4918 | best 0.4918
+  [trial 0] epoch 10 59.0s (bs=32) | train AP 0.5039 loss 0.2423 | val AP 0.5097 | best 0.5097
+  [trial 0] epoch 11 57.4s (bs=32) | train AP 0.5166 loss 0.2373 | val AP 0.5117 | best 0.5117
+  [trial 0] epoch 12 57.9s (bs=32) | train AP 0.5317 loss 0.2319 | val AP 0.5224 | best 0.5224
+  [trial 0] epoch 13 59.4s (bs=32) | train AP 0.5506 loss 0.2271 | val AP 0.5265 | best 0.5265
+  [trial 0] epoch 14 58.1s (bs=32) | train AP 0.5685 loss 0.2228 | val AP 0.5315 | best 0.5315
+  [trial 0] epoch 15 59.7s (bs=32) | train AP 0.5782 loss 0.2179 | val AP 0.5367 | best 0.5367
+  [trial 0] epoch 16 57.8s (bs=32) | train AP 0.5848 loss 0.2151 | val AP 0.5403 | best 0.5403
+  [trial 0] epoch 17 59.4s (bs=32) | train AP 0.5942 loss 0.2116 | val AP 0.5417 | best 0.5417
+  [trial 0] epoch 18 58.0s (bs=32) | train AP 0.5996 loss 0.2105 | val AP 0.5418 | best 0.5418
+  [trial 0] epoch 19 59.1s (bs=32) | train AP 0.6025 loss 0.2099 | val AP 0.5416 | best 0.5418
+[I 2026-05-12 20:57:38,544] Trial 0 finished with value: 0.5417541395517058 and parameters: {'hidden_dim': 256, 'num_heads': 16, 'ffn_ratio': 4, 'num_layers': 1, 'dropout': 0.05, 'hop_mode': 'window', 'hop_window': 4, 'num_global_heads': 4, 'graph_pool': 'sum', 'lr': 0.0008681616889493065, 'weight_decay': 0.0021957734465394567}. Best is trial 0 with value: 0.5417541395517058.
+  [trial 1] epoch 00 71.7s (bs=32) | train AP 0.2111 loss 0.3679 | val AP 0.2977 | best 0.2977
+  [trial 1] epoch 01 71.9s (bs=32) | train AP 0.2929 loss 0.3206 | val AP 0.3485 | best 0.3485
+  [trial 1] epoch 02 72.1s (bs=32) | train AP 0.3370 loss 0.3034 | val AP 0.3613 | best 0.3613
+  [trial 1] epoch 03 71.5s (bs=32) | train AP 0.3536 loss 0.2958 | val AP 0.3908 | best 0.3908
+  [trial 1] epoch 04 72.7s (bs=32) | train AP 0.3660 loss 0.2909 | val AP 0.3951 | best 0.3951
+  [trial 1] epoch 05 76.5s (bs=32) | train AP 0.3531 loss 0.2965 | val AP 0.3701 | best 0.3951
+  [trial 1] epoch 06 72.4s (bs=32) | train AP 0.3515 loss 0.2979 | val AP 0.3852 | best 0.3951
+  [trial 1] epoch 07 71.6s (bs=32) | train AP 0.3759 loss 0.2872 | val AP 0.4023 | best 0.4023
+  [trial 1] epoch 08 71.5s (bs=32) | train AP 0.3837 loss 0.2848 | val AP 0.4016 | best 0.4023
+  [trial 1] epoch 09 71.4s (bs=32) | train AP 0.3937 loss 0.2826 | val AP 0.4103 | best 0.4103
+  [trial 1] epoch 10 71.2s (bs=32) | train AP 0.3918 loss 0.2808 | val AP 0.4081 | best 0.4103
+  [trial 1] epoch 11 71.5s (bs=32) | train AP 0.4040 loss 0.2781 | val AP 0.4231 | best 0.4231
+  [trial 1] epoch 12 70.7s (bs=32) | train AP 0.4187 loss 0.2728 | val AP 0.4123 | best 0.4231
+  [trial 1] epoch 13 72.2s (bs=32) | train AP 0.4335 loss 0.2693 | val AP 0.4273 | best 0.4273
+  [trial 1] epoch 14 70.6s (bs=32) | train AP 0.4356 loss 0.2666 | val AP 0.4259 | best 0.4273
+  [trial 1] epoch 15 71.6s (bs=32) | train AP 0.4437 loss 0.2627 | val AP 0.4395 | best 0.4395
+  [trial 1] epoch 16 71.7s (bs=32) | train AP 0.4555 loss 0.2591 | val AP 0.4401 | best 0.4401
+  [trial 1] epoch 17 73.1s (bs=32) | train AP 0.4566 loss 0.2583 | val AP 0.4393 | best 0.4401
+  [trial 1] epoch 18 72.5s (bs=32) | train AP 0.4649 loss 0.2563 | val AP 0.4436 | best 0.4436
+  [trial 1] epoch 19 71.2s (bs=32) | train AP 0.4667 loss 0.2547 | val AP 0.4421 | best 0.4436
+[I 2026-05-12 21:21:40,396] Trial 1 finished with value: 0.4436072810437429 and parameters: {'hidden_dim': 384, 'num_heads': 8, 'ffn_ratio': 4, 'num_layers': 6, 'dropout': 0.3, 'hop_mode': 'window', 'hop_window': 4, 'num_global_heads': 0, 'graph_pool': 'mean', 'lr': 0.00048697180377348874, 'weight_decay': 2.436570001464197e-05}. Best is trial 0 with value: 0.5417541395517058.
+  [trial 2] epoch 00 77.1s (bs=32) | train AP 0.2254 loss 0.3534 | val AP 0.3005 | best 0.3005
+  [trial 2] epoch 01 76.4s (bs=32) | train AP 0.2735 loss 0.3283 | val AP 0.3048 | best 0.3048
+  [trial 2] epoch 02 77.4s (bs=32) | train AP 0.2975 loss 0.3176 | val AP 0.3481 | best 0.3481
+  [trial 2] epoch 03 76.9s (bs=32) | train AP 0.3212 loss 0.3088 | val AP 0.3572 | best 0.3572
+  [trial 2] epoch 04 77.0s (bs=32) | train AP 0.3086 loss 0.3143 | val AP 0.3360 | best 0.3572
+  [trial 2] epoch 05 77.9s (bs=32) | train AP 0.3193 loss 0.3102 | val AP 0.3560 | best 0.3572
+  [trial 2] epoch 06 77.1s (bs=32) | train AP 0.3250 loss 0.3073 | val AP 0.3459 | best 0.3572
+  [trial 2] epoch 07 79.4s (bs=32) | train AP 0.3208 loss 0.3090 | val AP 0.3570 | best 0.3572
+  [trial 2] epoch 08 77.1s (bs=32) | train AP 0.3401 loss 0.3021 | val AP 0.3583 | best 0.3583
+  [trial 2] epoch 09 77.0s (bs=32) | train AP 0.3470 loss 0.3006 | val AP 0.3687 | best 0.3687
+  [trial 2] epoch 10 77.0s (bs=32) | train AP 0.3208 loss 0.3090 | val AP 0.3602 | best 0.3687
+  [trial 2] epoch 11 78.1s (bs=32) | train AP 0.3307 loss 0.3039 | val AP 0.3674 | best 0.3687
+  [trial 2] epoch 12 80.1s (bs=32) | train AP 0.3595 loss 0.2943 | val AP 0.3824 | best 0.3824
+  [trial 2] epoch 13 77.3s (bs=32) | train AP 0.3734 loss 0.2899 | val AP 0.4004 | best 0.4004
+  [trial 2] epoch 14 77.8s (bs=32) | train AP 0.3756 loss 0.2894 | val AP 0.3926 | best 0.4004
+  [trial 2] epoch 15 78.6s (bs=32) | train AP 0.3780 loss 0.2870 | val AP 0.4000 | best 0.4004
+  [trial 2] epoch 16 78.4s (bs=32) | train AP 0.3852 loss 0.2855 | val AP 0.4102 | best 0.4102
+  [trial 2] epoch 17 79.2s (bs=32) | train AP 0.3963 loss 0.2821 | val AP 0.4107 | best 0.4107
+  [trial 2] epoch 18 79.6s (bs=32) | train AP 0.4008 loss 0.2810 | val AP 0.4116 | best 0.4116
+  [trial 2] epoch 19 80.3s (bs=32) | train AP 0.4020 loss 0.2804 | val AP 0.4122 | best 0.4122
+[I 2026-05-12 21:47:42,456] Trial 2 finished with value: 0.4121591012595255 and parameters: {'hidden_dim': 512, 'num_heads': 16, 'ffn_ratio': 2, 'num_layers': 4, 'dropout': 0.1, 'hop_mode': 'window', 'hop_window': 5, 'num_global_heads': 0, 'graph_pool': 'sum', 'lr': 0.002841716308815722, 'weight_decay': 0.00025465581928924377}. Best is trial 0 with value: 0.5417541395517058.
+  [trial 3] Model build failed: hidden_dim=128 must be divisible by num_heads=40
+  [trial 3] params: {'hidden_dim': 128, 'num_heads': 40, 'ffn_ratio': 2, 'num_layers': 4, 'dropout': 0.05, 'hop_mode': 'window', 'hop_window': 2, 'num_global_heads': 3, 'graph_pool': 'mean', 'lr': 0.0005841539903042611, 'weight_decay': 3.544655931853289e-05}
+[I 2026-05-12 21:47:43,475] Trial 3 pruned. 
+  [trial 4] epoch 00 66.2s (bs=32) | train AP 0.1955 loss 0.3738 | val AP 0.2916 | best 0.2916
+  [trial 4] epoch 01 63.9s (bs=32) | train AP 0.2670 loss 0.3310 | val AP 0.2947 | best 0.2947
+  [trial 4] epoch 02 64.3s (bs=32) | train AP 0.2659 loss 0.3297 | val AP 0.3046 | best 0.3046
+  [trial 4] epoch 03 61.6s (bs=32) | train AP 0.2903 loss 0.3204 | val AP 0.3190 | best 0.3190
+  [trial 4] epoch 04 61.1s (bs=32) | train AP 0.2944 loss 0.3196 | val AP 0.3059 | best 0.3190
+  [trial 4] epoch 05 60.8s (bs=32) | train AP 0.2778 loss 0.3250 | val AP 0.3199 | best 0.3199
+  [trial 4] epoch 06 60.9s (bs=32) | train AP 0.2882 loss 0.3221 | val AP 0.2987 | best 0.3199
+  [trial 4] epoch 07 60.8s (bs=32) | train AP 0.3042 loss 0.3148 | val AP 0.3060 | best 0.3199
+  [trial 4] epoch 08 60.7s (bs=32) | train AP 0.3022 loss 0.3151 | val AP 0.3317 | best 0.3317
+  [trial 4] epoch 09 60.6s (bs=32) | train AP 0.3151 loss 0.3102 | val AP 0.3372 | best 0.3372
+  [trial 4] epoch 10 60.3s (bs=32) | train AP 0.3218 loss 0.3078 | val AP 0.3367 | best 0.3372
+  [trial 4] epoch 11 60.3s (bs=32) | train AP 0.3282 loss 0.3059 | val AP 0.3402 | best 0.3402
+  [trial 4] epoch 12 60.2s (bs=32) | train AP 0.3346 loss 0.3045 | val AP 0.3449 | best 0.3449
+  [trial 4] epoch 13 61.1s (bs=32) | train AP 0.3452 loss 0.3010 | val AP 0.3470 | best 0.3470
+  [trial 4] epoch 14 61.0s (bs=32) | train AP 0.3453 loss 0.2998 | val AP 0.3444 | best 0.3470
+  [trial 4] epoch 15 60.7s (bs=32) | train AP 0.3523 loss 0.2978 | val AP 0.3552 | best 0.3552
+  [trial 4] epoch 16 60.7s (bs=32) | train AP 0.3583 loss 0.2959 | val AP 0.3560 | best 0.3560
+  [trial 4] epoch 17 60.9s (bs=32) | train AP 0.3601 loss 0.2956 | val AP 0.3595 | best 0.3595
+  [trial 4] epoch 18 61.1s (bs=32) | train AP 0.3631 loss 0.2951 | val AP 0.3612 | best 0.3612
+  [trial 4] epoch 19 60.6s (bs=32) | train AP 0.3616 loss 0.2949 | val AP 0.3603 | best 0.3612
+[I 2026-05-12 22:08:13,721] Trial 4 finished with value: 0.3611825859653903 and parameters: {'hidden_dim': 320, 'num_heads': 8, 'ffn_ratio': 4, 'num_layers': 3, 'dropout': 0.35000000000000003, 'hop_mode': 'contiguous', 'hop_window': 5, 'num_global_heads': 1, 'graph_pool': 'sum', 'lr': 0.002284844331681635, 'weight_decay': 0.001195624402212888}. Best is trial 0 with value: 0.5417541395517058.
+  [trial 5] epoch 00 73.5s (bs=32) | train AP 0.2085 loss 0.3683 | val AP 0.3065 | best 0.3065
+  [trial 5] epoch 01 72.9s (bs=32) | train AP 0.3088 loss 0.3146 | val AP 0.3588 | best 0.3588
+  [trial 5] epoch 02 75.2s (bs=32) | train AP 0.3336 loss 0.3038 | val AP 0.3876 | best 0.3876
+  [trial 5] epoch 03 75.1s (bs=32) | train AP 0.3600 loss 0.2947 | val AP 0.3979 | best 0.3979
+  [trial 5] epoch 04 73.9s (bs=32) | train AP 0.3768 loss 0.2883 | val AP 0.4168 | best 0.4168
+  [trial 5] epoch 05 74.1s (bs=32) | train AP 0.3764 loss 0.2878 | val AP 0.4091 | best 0.4168
+  [trial 5] epoch 06 76.5s (bs=32) | train AP 0.3967 loss 0.2791 | val AP 0.4329 | best 0.4329
+  [trial 5] epoch 07 75.3s (bs=32) | train AP 0.4081 loss 0.2746 | val AP 0.4466 | best 0.4466
+  [trial 5] epoch 08 76.2s (bs=32) | train AP 0.4222 loss 0.2682 | val AP 0.4473 | best 0.4473
+  [trial 5] epoch 09 75.7s (bs=32) | train AP 0.4364 loss 0.2650 | val AP 0.4573 | best 0.4573
+  [trial 5] epoch 10 75.4s (bs=32) | train AP 0.4414 loss 0.2617 | val AP 0.4549 | best 0.4573
+  [trial 5] epoch 11 76.1s (bs=32) | train AP 0.4454 loss 0.2608 | val AP 0.4587 | best 0.4587
+  [trial 5] epoch 12 75.6s (bs=32) | train AP 0.4630 loss 0.2552 | val AP 0.4699 | best 0.4699
+  [trial 5] epoch 13 75.0s (bs=32) | train AP 0.4781 loss 0.2500 | val AP 0.4791 | best 0.4791
+  [trial 5] epoch 14 74.2s (bs=32) | train AP 0.4879 loss 0.2458 | val AP 0.4830 | best 0.4830
+  [trial 5] epoch 15 76.3s (bs=32) | train AP 0.4998 loss 0.2413 | val AP 0.4846 | best 0.4846
+  [trial 5] epoch 16 75.7s (bs=32) | train AP 0.5147 loss 0.2376 | val AP 0.4877 | best 0.4877
+  [trial 5] epoch 17 75.3s (bs=32) | train AP 0.5111 loss 0.2357 | val AP 0.4867 | best 0.4877
+  [trial 5] epoch 18 75.6s (bs=32) | train AP 0.5222 loss 0.2340 | val AP 0.4890 | best 0.4890
+  [trial 5] epoch 19 75.0s (bs=32) | train AP 0.5227 loss 0.2327 | val AP 0.4884 | best 0.4890
+[I 2026-05-12 22:33:18,830] Trial 5 finished with value: 0.4890304062925882 and parameters: {'hidden_dim': 320, 'num_heads': 16, 'ffn_ratio': 4, 'num_layers': 4, 'dropout': 0.25, 'hop_mode': 'window', 'hop_window': 4, 'num_global_heads': 2, 'graph_pool': 'sum', 'lr': 0.0008184387435592441, 'weight_decay': 0.00473990966765613}. Best is trial 0 with value: 0.5417541395517058.
+  [trial 6] epoch 00 65.1s (bs=32) | train AP 0.2291 loss 0.3598 | val AP 0.3470 | best 0.3470
+  [trial 6] epoch 01 65.4s (bs=32) | train AP 0.3313 loss 0.3074 | val AP 0.3588 | best 0.3588
+  [trial 6] epoch 02 64.9s (bs=32) | train AP 0.3497 loss 0.3002 | val AP 0.3888 | best 0.3888
+  [trial 6] epoch 03 65.8s (bs=32) | train AP 0.3894 loss 0.2856 | val AP 0.4143 | best 0.4143
+  [trial 6] epoch 04 65.7s (bs=32) | train AP 0.4022 loss 0.2792 | val AP 0.4374 | best 0.4374
+  [trial 6] epoch 05 64.1s (bs=32) | train AP 0.4231 loss 0.2713 | val AP 0.4467 | best 0.4467
+  [trial 6] epoch 06 65.8s (bs=32) | train AP 0.4111 loss 0.2742 | val AP 0.4414 | best 0.4467
+  [trial 6] epoch 07 66.1s (bs=32) | train AP 0.4325 loss 0.2686 | val AP 0.4469 | best 0.4469
+  [trial 6] epoch 08 65.3s (bs=32) | train AP 0.4475 loss 0.2614 | val AP 0.4729 | best 0.4729
+  [trial 6] epoch 09 65.0s (bs=32) | train AP 0.4695 loss 0.2550 | val AP 0.4772 | best 0.4772
+  [trial 6] epoch 10 65.1s (bs=32) | train AP 0.4751 loss 0.2526 | val AP 0.4891 | best 0.4891
+  [trial 6] epoch 11 64.9s (bs=32) | train AP 0.4902 loss 0.2478 | val AP 0.4826 | best 0.4891
+  [trial 6] epoch 12 66.1s (bs=32) | train AP 0.4953 loss 0.2453 | val AP 0.4862 | best 0.4891
+  [trial 6] epoch 13 65.4s (bs=32) | train AP 0.5070 loss 0.2402 | val AP 0.5014 | best 0.5014
+  [trial 6] epoch 14 64.6s (bs=32) | train AP 0.5307 loss 0.2337 | val AP 0.5081 | best 0.5081
+  [trial 6] epoch 15 66.2s (bs=32) | train AP 0.5401 loss 0.2285 | val AP 0.5202 | best 0.5202
+  [trial 6] epoch 16 66.2s (bs=32) | train AP 0.5587 loss 0.2246 | val AP 0.5236 | best 0.5236
+  [trial 6] epoch 17 64.5s (bs=32) | train AP 0.5689 loss 0.2212 | val AP 0.5308 | best 0.5308
+  [trial 6] epoch 18 65.4s (bs=32) | train AP 0.5767 loss 0.2184 | val AP 0.5310 | best 0.5310
+  [trial 6] epoch 19 65.6s (bs=32) | train AP 0.5808 loss 0.2173 | val AP 0.5319 | best 0.5319
+[I 2026-05-12 22:55:07,843] Trial 6 finished with value: 0.5319262357950203 and parameters: {'hidden_dim': 640, 'num_heads': 8, 'ffn_ratio': 2, 'num_layers': 3, 'dropout': 0.05, 'hop_mode': 'contiguous', 'hop_window': 4, 'num_global_heads': 4, 'graph_pool': 'sum', 'lr': 0.00030820191928839066, 'weight_decay': 0.00012020822750412476}. Best is trial 0 with value: 0.5417541395517058.
+  [trial 7] Model build failed: hidden_dim=128 must be divisible by num_heads=20
+  [trial 7] params: {'hidden_dim': 128, 'num_heads': 20, 'ffn_ratio': 4, 'num_layers': 4, 'dropout': 0.1, 'hop_mode': 'contiguous', 'hop_window': 3, 'num_global_heads': 2, 'graph_pool': 'sum', 'lr': 0.0007504855193605641, 'weight_decay': 4.2611934121447093e-05}
+[I 2026-05-12 22:55:08,324] Trial 7 pruned. 
+  [trial 8] Model build failed: hidden_dim=256 must be divisible by num_heads=20
+  [trial 8] params: {'hidden_dim': 256, 'num_heads': 20, 'ffn_ratio': 4, 'num_layers': 5, 'dropout': 0.2, 'hop_mode': 'window', 'hop_window': 5, 'num_global_heads': 1, 'graph_pool': 'sum', 'lr': 0.0003146098054663126, 'weight_decay': 0.0018842388825327857}
+[I 2026-05-12 22:55:09,334] Trial 8 pruned. 
+  [trial 9] epoch 00 67.9s (bs=32) | train AP 0.2205 loss 0.3588 | val AP 0.3173 | best 0.3173
+  [trial 9] epoch 01 67.5s (bs=32) | train AP 0.3063 loss 0.3157 | val AP 0.3684 | best 0.3684
+  [trial 9] epoch 02 67.6s (bs=32) | train AP 0.3330 loss 0.3043 | val AP 0.3877 | best 0.3877
+  [trial 9] epoch 03 66.8s (bs=32) | train AP 0.3647 loss 0.2905 | val AP 0.3994 | best 0.3994
+  [trial 9] epoch 04 67.1s (bs=32) | train AP 0.3773 loss 0.2860 | val AP 0.4181 | best 0.4181
+  [trial 9] epoch 05 67.2s (bs=32) | train AP 0.3877 loss 0.2814 | val AP 0.4297 | best 0.4297
+  [trial 9] epoch 06 67.4s (bs=32) | train AP 0.3980 loss 0.2793 | val AP 0.4298 | best 0.4298
+  [trial 9] epoch 07 66.8s (bs=32) | train AP 0.4166 loss 0.2748 | val AP 0.4299 | best 0.4299
+  [trial 9] epoch 08 67.6s (bs=32) | train AP 0.3946 loss 0.2824 | val AP 0.4204 | best 0.4299
+  [trial 9] epoch 09 68.1s (bs=32) | train AP 0.4147 loss 0.2730 | val AP 0.4412 | best 0.4412
+  [trial 9] epoch 10 67.0s (bs=32) | train AP 0.4311 loss 0.2673 | val AP 0.4440 | best 0.4440
+  [trial 9] epoch 11 66.7s (bs=32) | train AP 0.4495 loss 0.2610 | val AP 0.4681 | best 0.4681
+  [trial 9] epoch 12 67.5s (bs=32) | train AP 0.4680 loss 0.2545 | val AP 0.4568 | best 0.4681
+  [trial 9] epoch 13 66.9s (bs=32) | train AP 0.4791 loss 0.2503 | val AP 0.4824 | best 0.4824
+  [trial 9] epoch 14 67.6s (bs=32) | train AP 0.4917 loss 0.2463 | val AP 0.4811 | best 0.4824
+  [trial 9] epoch 15 66.4s (bs=32) | train AP 0.5091 loss 0.2409 | val AP 0.4967 | best 0.4967
+  [trial 9] epoch 16 67.2s (bs=32) | train AP 0.5206 loss 0.2366 | val AP 0.4980 | best 0.4980
+  [trial 9] epoch 17 66.4s (bs=32) | train AP 0.5239 loss 0.2337 | val AP 0.5018 | best 0.5018
+  [trial 9] epoch 18 67.5s (bs=32) | train AP 0.5344 loss 0.2321 | val AP 0.5045 | best 0.5045
+  [trial 9] epoch 19 66.4s (bs=32) | train AP 0.5369 loss 0.2305 | val AP 0.5046 | best 0.5046
+[I 2026-05-12 23:17:35,107] Trial 9 finished with value: 0.5046341739775733 and parameters: {'hidden_dim': 640, 'num_heads': 20, 'ffn_ratio': 2, 'num_layers': 2, 'dropout': 0.1, 'hop_mode': 'contiguous', 'hop_window': 2, 'num_global_heads': 2, 'graph_pool': 'mean', 'lr': 0.0005685255159708854, 'weight_decay': 0.0005759079044844154}. Best is trial 0 with value: 0.5417541395517058.
+  [trial 10] epoch 00 62.2s (bs=32) | train AP 0.2044 loss 0.3778 | val AP 0.3048 | best 0.3048
+  [trial 10] epoch 01 63.9s (bs=32) | train AP 0.2916 loss 0.3212 | val AP 0.3639 | best 0.3639
+  [trial 10] epoch 02 63.5s (bs=32) | train AP 0.3382 loss 0.3029 | val AP 0.3872 | best 0.3872
+  [trial 10] epoch 03 62.5s (bs=32) | train AP 0.3587 loss 0.2938 | val AP 0.3905 | best 0.3905
+  [trial 10] epoch 04 64.4s (bs=32) | train AP 0.3740 loss 0.2887 | val AP 0.4168 | best 0.4168
+  [trial 10] epoch 05 63.7s (bs=32) | train AP 0.3833 loss 0.2854 | val AP 0.4148 | best 0.4168
+  [trial 10] epoch 06 63.8s (bs=32) | train AP 0.3945 loss 0.2809 | val AP 0.4063 | best 0.4168
+  [trial 10] PRUNED at epoch 6
+[I 2026-05-12 23:25:00,400] Trial 10 pruned. 
+  [trial 11] epoch 00 57.6s (bs=32) | train AP 0.1841 loss 0.3798 | val AP 0.2622 | best 0.2622
+  [trial 11] epoch 01 56.6s (bs=32) | train AP 0.2486 loss 0.3396 | val AP 0.3066 | best 0.3066
+  [trial 11] epoch 02 58.1s (bs=32) | train AP 0.2795 loss 0.3297 | val AP 0.2936 | best 0.3066
+  [trial 11] epoch 03 58.7s (bs=32) | train AP 0.2921 loss 0.3253 | val AP 0.3244 | best 0.3244
+  [trial 11] epoch 04 57.7s (bs=32) | train AP 0.3127 loss 0.3172 | val AP 0.3443 | best 0.3443
+  [trial 11] epoch 05 58.9s (bs=32) | train AP 0.3284 loss 0.3095 | val AP 0.3554 | best 0.3554
+  [trial 11] PRUNED at epoch 5
+[I 2026-05-12 23:30:49,418] Trial 11 pruned. 
+  [trial 12] epoch 00 67.1s (bs=32) | train AP 0.2260 loss 0.3555 | val AP 0.3089 | best 0.3089
+  [trial 12] epoch 01 66.4s (bs=32) | train AP 0.2761 loss 0.3280 | val AP 0.3389 | best 0.3389
+  [trial 12] epoch 02 67.0s (bs=32) | train AP 0.2992 loss 0.3180 | val AP 0.3367 | best 0.3389
+  [trial 12] epoch 03 65.7s (bs=32) | train AP 0.3132 loss 0.3107 | val AP 0.3544 | best 0.3544
+  [trial 12] epoch 04 66.7s (bs=32) | train AP 0.3359 loss 0.3047 | val AP 0.3606 | best 0.3606
+  [trial 12] epoch 05 66.1s (bs=32) | train AP 0.3383 loss 0.3018 | val AP 0.3673 | best 0.3673
+  [trial 12] PRUNED at epoch 5
+[I 2026-05-12 23:37:29,892] Trial 12 pruned. 
+  [trial 13] epoch 00 60.7s (bs=32) | train AP 0.1972 loss 0.3777 | val AP 0.3047 | best 0.3047
+  [trial 13] epoch 01 62.5s (bs=32) | train AP 0.3029 loss 0.3155 | val AP 0.3619 | best 0.3619
+  [trial 13] epoch 02 68.1s (bs=32) | train AP 0.3389 loss 0.3034 | val AP 0.3762 | best 0.3762
+  [trial 13] epoch 03 66.6s (bs=32) | train AP 0.3436 loss 0.3013 | val AP 0.3797 | best 0.3797
+  [trial 13] epoch 04 69.1s (bs=32) | train AP 0.3563 loss 0.2952 | val AP 0.3761 | best 0.3797
+  [trial 13] epoch 05 68.1s (bs=32) | train AP 0.3543 loss 0.2970 | val AP 0.3877 | best 0.3877
+  [trial 13] PRUNED at epoch 5
+[I 2026-05-12 23:44:05,805] Trial 13 pruned. 
+  [trial 14] epoch 00 93.7s (bs=32) | train AP 0.2095 loss 0.3720 | val AP 0.3526 | best 0.3526
+  [trial 14] epoch 01 92.9s (bs=32) | train AP 0.3423 loss 0.3021 | val AP 0.3824 | best 0.3824
+  [trial 14] epoch 02 93.4s (bs=32) | train AP 0.3824 loss 0.2857 | val AP 0.4133 | best 0.4133
+  [trial 14] epoch 03 92.7s (bs=32) | train AP 0.3944 loss 0.2805 | val AP 0.4323 | best 0.4323
+  [trial 14] epoch 04 92.7s (bs=32) | train AP 0.4196 loss 0.2709 | val AP 0.4559 | best 0.4559
+  [trial 14] epoch 05 95.1s (bs=32) | train AP 0.4363 loss 0.2636 | val AP 0.4694 | best 0.4694
+  [trial 14] epoch 06 94.1s (bs=32) | train AP 0.4490 loss 0.2592 | val AP 0.4811 | best 0.4811
+  [trial 14] epoch 07 93.4s (bs=32) | train AP 0.4834 loss 0.2481 | val AP 0.4938 | best 0.4938
+  [trial 14] epoch 08 94.4s (bs=32) | train AP 0.4999 loss 0.2405 | val AP 0.5232 | best 0.5232
+  [trial 14] epoch 09 95.3s (bs=32) | train AP 0.5247 loss 0.2343 | val AP 0.5401 | best 0.5401
+  [trial 14] epoch 10 94.2s (bs=32) | train AP 0.5500 loss 0.2238 | val AP 0.5387 | best 0.5401
+  [trial 14] epoch 11 93.8s (bs=32) | train AP 0.5788 loss 0.2145 | val AP 0.5529 | best 0.5529
+  [trial 14] epoch 12 93.7s (bs=32) | train AP 0.6065 loss 0.2046 | val AP 0.5715 | best 0.5715
+  [trial 14] epoch 13 94.7s (bs=32) | train AP 0.6370 loss 0.1937 | val AP 0.5796 | best 0.5796
+  [trial 14] epoch 14 94.3s (bs=32) | train AP 0.6706 loss 0.1799 | val AP 0.5900 | best 0.5900
+  [trial 14] epoch 15 94.0s (bs=32) | train AP 0.6932 loss 0.1708 | val AP 0.5930 | best 0.5930
+  [trial 14] epoch 16 94.3s (bs=32) | train AP 0.7232 loss 0.1612 | val AP 0.5963 | best 0.5963
+  [trial 14] epoch 17 94.3s (bs=32) | train AP 0.7408 loss 0.1542 | val AP 0.5967 | best 0.5967
+  [trial 14] epoch 18 94.3s (bs=32) | train AP 0.7505 loss 0.1499 | val AP 0.5982 | best 0.5982
+  [trial 14] epoch 19 93.9s (bs=32) | train AP 0.7548 loss 0.1487 | val AP 0.5986 | best 0.5986
+[I 2026-05-13 00:15:27,626] Trial 14 finished with value: 0.5985720260041724 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 3, 'dropout': 0.05, 'hop_mode': 'window', 'hop_window': 3, 'num_global_heads': 3, 'graph_pool': 'sum', 'lr': 0.00042084275653155826, 'weight_decay': 0.002612515352954185}. Best is trial 14 with value: 0.5985720260041724.
+  [trial 15] epoch 00 75.0s (bs=32) | train AP 0.2274 loss 0.3621 | val AP 0.3607 | best 0.3607
+  [trial 15] epoch 01 77.4s (bs=32) | train AP 0.3305 loss 0.3069 | val AP 0.3636 | best 0.3636
+  [trial 15] epoch 02 76.9s (bs=32) | train AP 0.3599 loss 0.2953 | val AP 0.4005 | best 0.4005
+  [trial 15] epoch 03 74.9s (bs=32) | train AP 0.3688 loss 0.2902 | val AP 0.4093 | best 0.4093
+  [trial 15] epoch 04 75.9s (bs=32) | train AP 0.3875 loss 0.2831 | val AP 0.4316 | best 0.4316
+  [trial 15] epoch 05 77.0s (bs=32) | train AP 0.4033 loss 0.2768 | val AP 0.4218 | best 0.4316
+  [trial 15] epoch 06 77.2s (bs=32) | train AP 0.4109 loss 0.2741 | val AP 0.4498 | best 0.4498
+  [trial 15] epoch 07 75.3s (bs=32) | train AP 0.4350 loss 0.2665 | val AP 0.4576 | best 0.4576
+  [trial 15] epoch 08 76.3s (bs=32) | train AP 0.4417 loss 0.2627 | val AP 0.4759 | best 0.4759
+  [trial 15] epoch 09 76.2s (bs=32) | train AP 0.4619 loss 0.2552 | val AP 0.4843 | best 0.4843
+  [trial 15] epoch 10 75.6s (bs=32) | train AP 0.4796 loss 0.2506 | val AP 0.4974 | best 0.4974
+  [trial 15] epoch 11 75.9s (bs=32) | train AP 0.4896 loss 0.2461 | val AP 0.4933 | best 0.4974
+  [trial 15] epoch 12 77.3s (bs=32) | train AP 0.5113 loss 0.2394 | val AP 0.5216 | best 0.5216
+  [trial 15] epoch 13 76.1s (bs=32) | train AP 0.5286 loss 0.2333 | val AP 0.5354 | best 0.5354
+  [trial 15] epoch 14 75.4s (bs=32) | train AP 0.5417 loss 0.2289 | val AP 0.5451 | best 0.5451
+  [trial 15] epoch 15 77.2s (bs=32) | train AP 0.5577 loss 0.2242 | val AP 0.5528 | best 0.5528
+  [trial 15] epoch 16 76.9s (bs=32) | train AP 0.5663 loss 0.2202 | val AP 0.5573 | best 0.5573
+  [trial 15] epoch 17 75.4s (bs=32) | train AP 0.5786 loss 0.2174 | val AP 0.5597 | best 0.5597
+  [trial 15] epoch 18 76.4s (bs=32) | train AP 0.5828 loss 0.2159 | val AP 0.5595 | best 0.5597
+  [trial 15] epoch 19 77.3s (bs=32) | train AP 0.5823 loss 0.2151 | val AP 0.5600 | best 0.5600
+[I 2026-05-13 00:40:55,306] Trial 15 finished with value: 0.5599510731205505 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 1, 'dropout': 0.15000000000000002, 'hop_mode': 'window', 'hop_window': 3, 'num_global_heads': 3, 'graph_pool': 'sum', 'lr': 0.0010668626356736457, 'weight_decay': 0.002105484451170432}. Best is trial 14 with value: 0.5985720260041724.
+  [trial 16] epoch 00 125.8s (bs=32) | train AP 0.1887 loss 0.3718 | val AP 0.2858 | best 0.2858
+  [trial 16] epoch 01 122.2s (bs=32) | train AP 0.2601 loss 0.3298 | val AP 0.3036 | best 0.3036
+  [trial 16] epoch 02 126.0s (bs=32) | train AP 0.2979 loss 0.3186 | val AP 0.3303 | best 0.3303
+  [trial 16] epoch 03 126.9s (bs=32) | train AP 0.2922 loss 0.3198 | val AP 0.3290 | best 0.3303
+  [trial 16] epoch 04 125.7s (bs=32) | train AP 0.3237 loss 0.3080 | val AP 0.3566 | best 0.3566
+  [trial 16] epoch 05 121.0s (bs=32) | train AP 0.3264 loss 0.3069 | val AP 0.3542 | best 0.3566
+  [trial 16] PRUNED at epoch 5
+[I 2026-05-13 00:53:24,404] Trial 16 pruned. 
+  [trial 17] epoch 00 94.0s (bs=32) | train AP 0.2142 loss 0.3670 | val AP 0.3079 | best 0.3079
+  [trial 17] epoch 01 93.3s (bs=32) | train AP 0.3155 loss 0.3121 | val AP 0.3877 | best 0.3877
+  [trial 17] epoch 02 93.0s (bs=32) | train AP 0.3646 loss 0.2918 | val AP 0.3996 | best 0.3996
+  [trial 17] epoch 03 92.9s (bs=32) | train AP 0.3943 loss 0.2804 | val AP 0.4322 | best 0.4322
+  [trial 17] epoch 04 94.2s (bs=32) | train AP 0.4144 loss 0.2718 | val AP 0.4494 | best 0.4494
+  [trial 17] epoch 05 93.0s (bs=32) | train AP 0.4336 loss 0.2643 | val AP 0.4603 | best 0.4603
+  [trial 17] epoch 06 94.3s (bs=32) | train AP 0.4530 loss 0.2575 | val AP 0.4807 | best 0.4807
+  [trial 17] epoch 07 91.1s (bs=32) | train AP 0.4616 loss 0.2535 | val AP 0.4997 | best 0.4997
+  [trial 17] epoch 08 89.7s (bs=32) | train AP 0.4776 loss 0.2481 | val AP 0.5118 | best 0.5118
+  [trial 17] epoch 09 91.2s (bs=32) | train AP 0.5065 loss 0.2374 | val AP 0.5231 | best 0.5231
+  [trial 17] epoch 10 89.6s (bs=32) | train AP 0.5233 loss 0.2321 | val AP 0.5296 | best 0.5296
+  [trial 17] epoch 11 91.2s (bs=32) | train AP 0.5489 loss 0.2231 | val AP 0.5467 | best 0.5467
+  [trial 17] epoch 12 90.4s (bs=32) | train AP 0.5788 loss 0.2115 | val AP 0.5637 | best 0.5637
+[Peptides-func] task=multi_label  metric=macro_ap (higher_is_better=True)
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/val.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/test.pkl
+Subsampled train: 10873 → 5436 (50%)
+Train batches: 170  Val batches: 73
+Max epochs/trial: 20  Patience: 10
+Optuna trials: 50  Pruning: True
+========================================================================
+Resuming study 'hop_masked_hparam_search' — 18 existing trials found.
+Will run 32 new trials (target total: 50, existing: 18).
+  [trial 18] epoch 00 87.6s (bs=32) | train AP 0.2084 loss 0.3729 | val AP 0.3116 | best 0.3116
+  [trial 18] epoch 01 88.6s (bs=32) | train AP 0.3228 loss 0.3098 | val AP 0.3763 | best 0.3763
+  [trial 18] epoch 02 87.9s (bs=32) | train AP 0.3547 loss 0.2968 | val AP 0.3905 | best 0.3905
+  [trial 18] epoch 03 86.7s (bs=32) | train AP 0.3782 loss 0.2862 | val AP 0.4152 | best 0.4152
+  [trial 18] epoch 04 87.5s (bs=32) | train AP 0.4046 loss 0.2769 | val AP 0.4396 | best 0.4396
+  [trial 18] epoch 05 87.4s (bs=32) | train AP 0.4150 loss 0.2718 | val AP 0.4290 | best 0.4396
+  [trial 18] epoch 06 87.9s (bs=32) | train AP 0.4357 loss 0.2634 | val AP 0.4752 | best 0.4752
+  [trial 18] epoch 07 87.3s (bs=32) | train AP 0.4620 loss 0.2539 | val AP 0.4765 | best 0.4765
+  [trial 18] epoch 08 89.2s (bs=32) | train AP 0.4870 loss 0.2455 | val AP 0.4977 | best 0.4977
+  [trial 18] epoch 09 88.5s (bs=32) | train AP 0.5210 loss 0.2322 | val AP 0.5045 | best 0.5045
+  [trial 18] epoch 10 89.8s (bs=32) | train AP 0.5399 loss 0.2262 | val AP 0.5286 | best 0.5286
+  [trial 18] epoch 11 88.4s (bs=32) | train AP 0.5683 loss 0.2134 | val AP 0.5357 | best 0.5357
+  [trial 18] epoch 12 88.7s (bs=32) | train AP 0.6036 loss 0.2014 | val AP 0.5581 | best 0.5581
+  [trial 18] epoch 13 88.9s (bs=32) | train AP 0.6278 loss 0.1907 | val AP 0.5589 | best 0.5589
+  [trial 18] epoch 14 89.1s (bs=32) | train AP 0.6506 loss 0.1808 | val AP 0.5758 | best 0.5758
+  [trial 18] epoch 15 92.2s (bs=32) | train AP 0.6784 loss 0.1708 | val AP 0.5755 | best 0.5758
+  [trial 18] epoch 16 92.2s (bs=32) | train AP 0.6981 loss 0.1639 | val AP 0.5795 | best 0.5795
+  [trial 18] epoch 17 93.6s (bs=32) | train AP 0.7157 loss 0.1574 | val AP 0.5800 | best 0.5800
+  [trial 18] epoch 18 96.9s (bs=32) | train AP 0.7222 loss 0.1530 | val AP 0.5805 | best 0.5805
+  [trial 18] epoch 19 93.2s (bs=32) | train AP 0.7262 loss 0.1526 | val AP 0.5812 | best 0.5812
+[I 2026-05-13 08:43:24,315] Trial 18 finished with value: 0.5811616372825268 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 3, 'dropout': 0.15000000000000002, 'hop_mode': 'window', 'hop_window': 3, 'num_global_heads': 3, 'graph_pool': 'sum', 'lr': 0.0004066135941964346, 'weight_decay': 0.003333361498225621}. Best is trial 14 with value: 0.5985720260041724.
+  [trial 19] epoch 00 94.7s (bs=32) | train AP 0.2030 loss 0.3741 | val AP 0.2978 | best 0.2978
+  [trial 19] epoch 01 94.6s (bs=32) | train AP 0.3035 loss 0.3155 | val AP 0.3668 | best 0.3668
+  [trial 19] epoch 02 94.3s (bs=32) | train AP 0.3542 loss 0.2961 | val AP 0.3961 | best 0.3961
+  [trial 19] epoch 03 94.0s (bs=32) | train AP 0.3808 loss 0.2861 | val AP 0.4227 | best 0.4227
+  [trial 19] epoch 04 92.4s (bs=32) | train AP 0.4035 loss 0.2766 | val AP 0.4404 | best 0.4404
+  [trial 19] epoch 05 94.4s (bs=32) | train AP 0.4198 loss 0.2704 | val AP 0.4562 | best 0.4562
+  [trial 19] epoch 06 92.6s (bs=32) | train AP 0.4408 loss 0.2618 | val AP 0.4831 | best 0.4831
+  [trial 19] epoch 07 94.9s (bs=32) | train AP 0.4680 loss 0.2526 | val AP 0.4925 | best 0.4925
+  [trial 19] epoch 08 94.4s (bs=32) | train AP 0.4806 loss 0.2473 | val AP 0.5128 | best 0.5128
+  [trial 19] epoch 09 94.7s (bs=32) | train AP 0.5120 loss 0.2384 | val AP 0.5158 | best 0.5158
+  [trial 19] epoch 10 93.1s (bs=32) | train AP 0.5269 loss 0.2312 | val AP 0.5315 | best 0.5315
+  [trial 19] epoch 11 93.7s (bs=32) | train AP 0.5405 loss 0.2249 | val AP 0.5464 | best 0.5464
+  [trial 19] epoch 12 95.1s (bs=32) | train AP 0.5690 loss 0.2156 | val AP 0.5586 | best 0.5586
+  [trial 19] epoch 13 92.4s (bs=32) | train AP 0.5840 loss 0.2106 | val AP 0.5696 | best 0.5696
+  [trial 19] epoch 14 94.0s (bs=32) | train AP 0.5999 loss 0.2034 | val AP 0.5697 | best 0.5697
+  [trial 19] epoch 15 92.8s (bs=32) | train AP 0.6132 loss 0.1990 | val AP 0.5800 | best 0.5800
+  [trial 19] epoch 16 93.8s (bs=32) | train AP 0.6286 loss 0.1945 | val AP 0.5755 | best 0.5800
+  [trial 19] epoch 17 93.6s (bs=32) | train AP 0.6318 loss 0.1920 | val AP 0.5760 | best 0.5800
+  [trial 19] epoch 18 91.5s (bs=32) | train AP 0.6393 loss 0.1893 | val AP 0.5764 | best 0.5800
+  [trial 19] epoch 19 94.2s (bs=32) | train AP 0.6457 loss 0.1869 | val AP 0.5778 | best 0.5800
+[I 2026-05-13 09:14:41,383] Trial 19 finished with value: 0.5800440030516101 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 3, 'dropout': 0.25, 'hop_mode': 'window', 'hop_window': 1, 'num_global_heads': 3, 'graph_pool': 'mean', 'lr': 0.00042342248525042595, 'weight_decay': 0.004845535518958415}. Best is trial 14 with value: 0.5985720260041724.
+  [trial 20] epoch 00 113.6s (bs=32) | train AP 0.2078 loss 0.3736 | val AP 0.3253 | best 0.3253
+  [trial 20] epoch 01 114.0s (bs=32) | train AP 0.3218 loss 0.3100 | val AP 0.3815 | best 0.3815
+  [trial 20] epoch 02 113.8s (bs=32) | train AP 0.3669 loss 0.2913 | val AP 0.3973 | best 0.3973
+  [trial 20] epoch 03 112.7s (bs=32) | train AP 0.3904 loss 0.2810 | val AP 0.4145 | best 0.4145
+  [trial 20] epoch 04 114.2s (bs=32) | train AP 0.4159 loss 0.2718 | val AP 0.4354 | best 0.4354
+  [trial 20] epoch 05 114.3s (bs=32) | train AP 0.4401 loss 0.2617 | val AP 0.4642 | best 0.4642
+  [trial 20] epoch 06 113.9s (bs=32) | train AP 0.4662 loss 0.2540 | val AP 0.4587 | best 0.4642
+  [trial 20] epoch 07 115.1s (bs=32) | train AP 0.4724 loss 0.2509 | val AP 0.4874 | best 0.4874
+  [trial 20] epoch 08 115.0s (bs=32) | train AP 0.4985 loss 0.2396 | val AP 0.5113 | best 0.5113
+  [trial 20] epoch 09 113.3s (bs=32) | train AP 0.5335 loss 0.2261 | val AP 0.5384 | best 0.5384
+  [trial 20] epoch 10 113.2s (bs=32) | train AP 0.5604 loss 0.2166 | val AP 0.5555 | best 0.5555
+  [trial 20] epoch 11 113.7s (bs=32) | train AP 0.5943 loss 0.2039 | val AP 0.5780 | best 0.5780
+  [trial 20] epoch 12 112.3s (bs=32) | train AP 0.6292 loss 0.1908 | val AP 0.5906 | best 0.5906
+  [trial 20] epoch 13 112.7s (bs=32) | train AP 0.6635 loss 0.1781 | val AP 0.5878 | best 0.5906
+  [trial 20] epoch 14 115.5s (bs=32) | train AP 0.6996 loss 0.1662 | val AP 0.5957 | best 0.5957
+  [trial 20] epoch 15 114.4s (bs=32) | train AP 0.7238 loss 0.1553 | val AP 0.6064 | best 0.6064
+  [trial 20] epoch 16 115.7s (bs=32) | train AP 0.7480 loss 0.1463 | val AP 0.6093 | best 0.6093
+  [trial 20] epoch 17 114.7s (bs=32) | train AP 0.7626 loss 0.1388 | val AP 0.6115 | best 0.6115
+  [trial 20] epoch 18 113.4s (bs=32) | train AP 0.7760 loss 0.1348 | val AP 0.6120 | best 0.6120
+  [trial 20] epoch 19 114.9s (bs=32) | train AP 0.7832 loss 0.1324 | val AP 0.6121 | best 0.6121
+[I 2026-05-13 09:52:44,123] Trial 20 finished with value: 0.6121116060834857 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 5, 'dropout': 0.1, 'hop_mode': 'window', 'hop_window': 2, 'num_global_heads': 1, 'graph_pool': 'sum', 'lr': 0.0004107382016293528, 'weight_decay': 0.0007794438764598863}. Best is trial 20 with value: 0.6121116060834857.
+  [trial 21] Model build failed: hidden_dim=512 must be divisible by num_heads=40
+  [trial 21] params: {'hidden_dim': 512, 'num_heads': 40, 'ffn_ratio': 4, 'num_layers': 5, 'dropout': 0.1, 'hop_mode': 'window', 'hop_window': 2, 'num_global_heads': 1, 'graph_pool': 'sum', 'lr': 0.0006011662187236887, 'weight_decay': 0.000803786408116614}
+[I 2026-05-13 09:52:45,165] Trial 21 pruned. 
+  [trial 22] epoch 00 115.3s (bs=32) | train AP 0.1965 loss 0.3744 | val AP 0.3005 | best 0.3005
+  [trial 22] epoch 01 113.9s (bs=32) | train AP 0.2932 loss 0.3202 | val AP 0.3723 | best 0.3723
+  [trial 22] epoch 02 116.0s (bs=32) | train AP 0.3469 loss 0.2985 | val AP 0.3988 | best 0.3988
+  [trial 22] epoch 03 119.6s (bs=32) | train AP 0.3799 loss 0.2849 | val AP 0.4298 | best 0.4298
+  [trial 22] epoch 04 115.1s (bs=32) | train AP 0.4071 loss 0.2750 | val AP 0.4462 | best 0.4462
+  [trial 22] epoch 05 114.2s (bs=32) | train AP 0.4221 loss 0.2693 | val AP 0.4510 | best 0.4510
+  [trial 22] epoch 06 115.2s (bs=32) | train AP 0.4498 loss 0.2584 | val AP 0.4649 | best 0.4649
+  [trial 22] epoch 07 116.1s (bs=32) | train AP 0.4694 loss 0.2512 | val AP 0.4808 | best 0.4808
+  [trial 22] epoch 08 116.4s (bs=32) | train AP 0.4875 loss 0.2430 | val AP 0.4988 | best 0.4988
+  [trial 22] epoch 09 118.4s (bs=32) | train AP 0.5185 loss 0.2335 | val AP 0.5182 | best 0.5182
+  [trial 22] epoch 10 114.7s (bs=32) | train AP 0.5392 loss 0.2255 | val AP 0.5360 | best 0.5360
+  [trial 22] epoch 11 114.5s (bs=32) | train AP 0.5692 loss 0.2155 | val AP 0.5324 | best 0.5360
+  [trial 22] epoch 12 113.9s (bs=32) | train AP 0.5898 loss 0.2051 | val AP 0.5654 | best 0.5654
+  [trial 22] epoch 13 115.9s (bs=32) | train AP 0.6265 loss 0.1944 | val AP 0.5632 | best 0.5654
+  [trial 22] epoch 14 115.7s (bs=32) | train AP 0.6500 loss 0.1846 | val AP 0.5813 | best 0.5813
+  [trial 22] epoch 15 115.0s (bs=32) | train AP 0.6801 loss 0.1734 | val AP 0.5801 | best 0.5813
+  [trial 22] epoch 16 117.1s (bs=32) | train AP 0.7044 loss 0.1656 | val AP 0.5885 | best 0.5885
+  [trial 22] epoch 17 116.4s (bs=32) | train AP 0.7163 loss 0.1601 | val AP 0.5917 | best 0.5917
+  [trial 22] epoch 18 115.5s (bs=32) | train AP 0.7272 loss 0.1557 | val AP 0.5912 | best 0.5917
+  [trial 22] epoch 19 115.5s (bs=32) | train AP 0.7306 loss 0.1539 | val AP 0.5917 | best 0.5917
+[I 2026-05-13 10:31:21,827] Trial 22 finished with value: 0.5917346494421318 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 5, 'dropout': 0.15000000000000002, 'hop_mode': 'window', 'hop_window': 3, 'num_global_heads': 1, 'graph_pool': 'sum', 'lr': 0.00041329861643648957, 'weight_decay': 0.0030659149204407946}. Best is trial 20 with value: 0.6121116060834857.
+  [trial 23] epoch 00 118.5s (bs=32) | train AP 0.2077 loss 0.3712 | val AP 0.3099 | best 0.3099
+  [trial 23] epoch 01 115.3s (bs=32) | train AP 0.3146 loss 0.3111 | val AP 0.3673 | best 0.3673
+  [trial 23] epoch 02 118.1s (bs=32) | train AP 0.3614 loss 0.2938 | val AP 0.3767 | best 0.3767
+  [trial 23] epoch 03 115.6s (bs=32) | train AP 0.3775 loss 0.2873 | val AP 0.4082 | best 0.4082
+  [trial 23] epoch 04 113.2s (bs=32) | train AP 0.4024 loss 0.2783 | val AP 0.4155 | best 0.4155
+  [trial 23] epoch 05 115.1s (bs=32) | train AP 0.4143 loss 0.2728 | val AP 0.4445 | best 0.4445
+  [trial 23] epoch 06 116.8s (bs=32) | train AP 0.4347 loss 0.2641 | val AP 0.4643 | best 0.4643
+  [trial 23] epoch 07 116.4s (bs=32) | train AP 0.4547 loss 0.2574 | val AP 0.4654 | best 0.4654
+  [trial 23] epoch 08 115.9s (bs=32) | train AP 0.4840 loss 0.2483 | val AP 0.4965 | best 0.4965
+  [trial 23] epoch 09 115.3s (bs=32) | train AP 0.5167 loss 0.2355 | val AP 0.5173 | best 0.5173
+  [trial 23] epoch 10 115.0s (bs=32) | train AP 0.5511 loss 0.2245 | val AP 0.5354 | best 0.5354
+  [trial 23] epoch 11 115.4s (bs=32) | train AP 0.5881 loss 0.2101 | val AP 0.5414 | best 0.5414
+  [trial 23] epoch 12 115.5s (bs=32) | train AP 0.6186 loss 0.1976 | val AP 0.5578 | best 0.5578
+  [trial 23] epoch 13 115.4s (bs=32) | train AP 0.6565 loss 0.1835 | val AP 0.5621 | best 0.5621
+  [trial 23] epoch 14 114.4s (bs=32) | train AP 0.6958 loss 0.1694 | val AP 0.5676 | best 0.5676
+  [trial 23] epoch 15 114.7s (bs=32) | train AP 0.7342 loss 0.1551 | val AP 0.5809 | best 0.5809
+  [trial 23] epoch 16 115.7s (bs=32) | train AP 0.7590 loss 0.1452 | val AP 0.5825 | best 0.5825
+  [trial 23] epoch 17 116.7s (bs=32) | train AP 0.7752 loss 0.1378 | val AP 0.5826 | best 0.5826
+  [trial 23] epoch 18 114.2s (bs=32) | train AP 0.7904 loss 0.1332 | val AP 0.5833 | best 0.5833
+  [trial 23] epoch 19 117.9s (bs=32) | train AP 0.7911 loss 0.1308 | val AP 0.5833 | best 0.5833
+[I 2026-05-13 11:09:59,340] Trial 23 finished with value: 0.58326741134009 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 5, 'dropout': 0.1, 'hop_mode': 'window', 'hop_window': 3, 'num_global_heads': 1, 'graph_pool': 'sum', 'lr': 0.0004344990503484184, 'weight_decay': 0.0012449844942935872}. Best is trial 20 with value: 0.6121116060834857.
+  [trial 24] epoch 00 113.1s (bs=32) | train AP 0.2008 loss 0.3794 | val AP 0.2927 | best 0.2927
+  [trial 24] epoch 01 115.5s (bs=32) | train AP 0.3030 loss 0.3153 | val AP 0.3742 | best 0.3742
+  [trial 24] epoch 02 114.0s (bs=32) | train AP 0.3476 loss 0.2973 | val AP 0.4002 | best 0.4002
+  [trial 24] epoch 03 114.2s (bs=32) | train AP 0.3771 loss 0.2854 | val AP 0.4065 | best 0.4065
+  [trial 24] epoch 04 115.8s (bs=32) | train AP 0.4078 loss 0.2759 | val AP 0.4389 | best 0.4389
+  [trial 24] epoch 05 114.9s (bs=32) | train AP 0.4184 loss 0.2693 | val AP 0.4471 | best 0.4471
+  [trial 24] epoch 06 113.8s (bs=32) | train AP 0.4336 loss 0.2649 | val AP 0.4740 | best 0.4740
+  [trial 24] epoch 07 116.5s (bs=32) | train AP 0.4613 loss 0.2538 | val AP 0.4890 | best 0.4890
+  [trial 24] epoch 08 115.1s (bs=32) | train AP 0.4797 loss 0.2485 | val AP 0.5121 | best 0.5121
+  [trial 24] epoch 09 115.3s (bs=32) | train AP 0.5062 loss 0.2383 | val AP 0.5113 | best 0.5121
+  [trial 24] epoch 10 114.1s (bs=32) | train AP 0.5319 loss 0.2289 | val AP 0.5395 | best 0.5395
+  [trial 24] epoch 11 114.6s (bs=32) | train AP 0.5565 loss 0.2215 | val AP 0.5470 | best 0.5470
+  [trial 24] epoch 12 114.8s (bs=32) | train AP 0.5794 loss 0.2113 | val AP 0.5523 | best 0.5523
+  [trial 24] epoch 13 115.2s (bs=32) | train AP 0.6058 loss 0.2034 | val AP 0.5584 | best 0.5584
+  [trial 24] epoch 14 114.2s (bs=32) | train AP 0.6286 loss 0.1955 | val AP 0.5721 | best 0.5721
+  [trial 24] epoch 15 114.2s (bs=32) | train AP 0.6471 loss 0.1877 | val AP 0.5794 | best 0.5794
+  [trial 24] epoch 16 115.4s (bs=32) | train AP 0.6698 loss 0.1803 | val AP 0.5781 | best 0.5794
+  [trial 24] epoch 17 115.0s (bs=32) | train AP 0.6830 loss 0.1748 | val AP 0.5790 | best 0.5794
+  [trial 24] epoch 18 112.8s (bs=32) | train AP 0.6919 loss 0.1717 | val AP 0.5820 | best 0.5820
+  [trial 24] epoch 19 113.3s (bs=32) | train AP 0.6976 loss 0.1700 | val AP 0.5824 | best 0.5824
+[I 2026-05-13 11:48:13,697] Trial 24 finished with value: 0.5824162013276071 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 5, 'dropout': 0.2, 'hop_mode': 'window', 'hop_window': 2, 'num_global_heads': 0, 'graph_pool': 'sum', 'lr': 0.0003753537106395991, 'weight_decay': 1.0478748933755123e-05}. Best is trial 20 with value: 0.6121116060834857.
+  [trial 25] epoch 00 76.7s (bs=32) | train AP 0.1900 loss 0.3770 | val AP 0.2813 | best 0.2813
+  [trial 25] epoch 01 79.0s (bs=32) | train AP 0.2814 loss 0.3256 | val AP 0.3234 | best 0.3234
+  [trial 25] epoch 02 77.3s (bs=32) | train AP 0.3128 loss 0.3116 | val AP 0.3536 | best 0.3536
+  [trial 25] epoch 03 77.8s (bs=32) | train AP 0.3179 loss 0.3095 | val AP 0.3509 | best 0.3536
+  [trial 25] epoch 04 77.0s (bs=32) | train AP 0.3208 loss 0.3081 | val AP 0.3574 | best 0.3574
+  [trial 25] epoch 05 78.3s (bs=32) | train AP 0.3370 loss 0.3013 | val AP 0.3629 | best 0.3629
+  [trial 25] PRUNED at epoch 5
+[I 2026-05-13 11:56:01,110] Trial 25 pruned. 
+  [trial 26] epoch 00 113.3s (bs=32) | train AP 0.2100 loss 0.3663 | val AP 0.3067 | best 0.3067
+  [trial 26] epoch 01 113.4s (bs=32) | train AP 0.2987 loss 0.3175 | val AP 0.3573 | best 0.3573
+  [trial 26] epoch 02 111.7s (bs=32) | train AP 0.3514 loss 0.2965 | val AP 0.3956 | best 0.3956
+  [trial 26] epoch 03 114.1s (bs=32) | train AP 0.3758 loss 0.2852 | val AP 0.3987 | best 0.3987
+  [trial 26] epoch 04 114.4s (bs=32) | train AP 0.3967 loss 0.2794 | val AP 0.4227 | best 0.4227
+  [trial 26] epoch 05 114.1s (bs=32) | train AP 0.4148 loss 0.2713 | val AP 0.4400 | best 0.4400
+  [trial 26] PRUNED at epoch 5
+[I 2026-05-13 12:07:23,527] Trial 26 pruned. 
+  [trial 27] epoch 00 105.4s (bs=32) | train AP 0.2059 loss 0.3714 | val AP 0.3112 | best 0.3112
+  [trial 27] epoch 01 106.4s (bs=32) | train AP 0.3170 loss 0.3101 | val AP 0.3851 | best 0.3851
+  [trial 27] epoch 02 103.7s (bs=32) | train AP 0.3699 loss 0.2889 | val AP 0.4069 | best 0.4069
+  [trial 27] epoch 03 104.9s (bs=32) | train AP 0.3911 loss 0.2797 | val AP 0.4319 | best 0.4319
+  [trial 27] epoch 04 103.7s (bs=32) | train AP 0.4098 loss 0.2713 | val AP 0.4454 | best 0.4454
+  [trial 27] epoch 05 104.4s (bs=32) | train AP 0.4483 loss 0.2581 | val AP 0.4669 | best 0.4669
+  [trial 27] epoch 06 105.4s (bs=32) | train AP 0.4675 loss 0.2509 | val AP 0.4818 | best 0.4818
+  [trial 27] epoch 07 104.5s (bs=32) | train AP 0.4908 loss 0.2422 | val AP 0.4985 | best 0.4985
+  [trial 27] epoch 08 105.9s (bs=32) | train AP 0.5184 loss 0.2328 | val AP 0.5062 | best 0.5062
+  [trial 27] epoch 09 105.8s (bs=32) | train AP 0.5499 loss 0.2205 | val AP 0.5466 | best 0.5466
+  [trial 27] epoch 10 104.6s (bs=32) | train AP 0.5786 loss 0.2097 | val AP 0.5474 | best 0.5474
+  [trial 27] epoch 11 104.0s (bs=32) | train AP 0.6120 loss 0.1971 | val AP 0.5597 | best 0.5597
+  [trial 27] epoch 12 104.1s (bs=32) | train AP 0.6391 loss 0.1862 | val AP 0.5739 | best 0.5739
+  [trial 27] epoch 13 105.4s (bs=32) | train AP 0.6727 loss 0.1718 | val AP 0.5779 | best 0.5779
+  [trial 27] epoch 14 104.9s (bs=32) | train AP 0.7039 loss 0.1591 | val AP 0.5882 | best 0.5882
+  [trial 27] epoch 15 104.5s (bs=32) | train AP 0.7280 loss 0.1486 | val AP 0.5934 | best 0.5934
+  [trial 27] epoch 16 103.4s (bs=32) | train AP 0.7559 loss 0.1390 | val AP 0.5899 | best 0.5934
+  [trial 27] epoch 17 103.7s (bs=32) | train AP 0.7725 loss 0.1333 | val AP 0.5924 | best 0.5934
+[Peptides-func] task=multi_label  metric=macro_ap (higher_is_better=True)
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/val.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/test.pkl
+Subsampled train: 10873 → 5436 (50%)
+Train batches: 170  Val batches: 73
+Max epochs/trial: 20  Patience: 10
+Optuna trials: 50  Pruning: True
+========================================================================
+Resuming study 'hop_masked_hparam_search' — 28 existing trials found.
+Will run 22 new trials (target total: 50, existing: 28).
+[W 2026-05-13 14:00:59,158] Trial 28 failed with parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 4, 'dropout': 0.1} because of the following error: ValueError('CategoricalDistribution does not support dynamic value space.').
+Traceback (most recent call last):
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/study/_optimize.py", line 206, in _run_trial
+    value_or_values = func(trial)
+                      ^^^^^^^^^^^
+  File "/home/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/optuna_hop_masked_search.py", line 215, in objective
+    hp = suggest_hparams(trial)
+         ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/optuna_hop_masked_search.py", line 126, in suggest_hparams
+    hp["hop_mode"] = trial.suggest_categorical(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/trial/_trial.py", line 414, in suggest_categorical
+    return self._suggest(name, CategoricalDistribution(choices=choices))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/trial/_trial.py", line 649, in _suggest
+    storage.set_trial_param(trial_id, name, param_value_in_internal_repr, distribution)
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/storages/_cached_storage.py", line 167, in set_trial_param
+    self._backend._set_trial_param(
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/storages/_rdb/storage.py", line 597, in _set_trial_param
+    self._set_trial_param_without_commit(
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/storages/_rdb/storage.py", line 632, in _set_trial_param_without_commit
+    distributions.check_distribution_compatibility(previous_distribution, distribution)
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/distributions.py", line 656, in check_distribution_compatibility
+    raise ValueError(
+ValueError: CategoricalDistribution does not support dynamic value space.
+[W 2026-05-13 14:00:59,234] Trial 28 failed with value None.
+[Peptides-func] task=multi_label  metric=macro_ap (higher_is_better=True)
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/val.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/test.pkl
+Subsampled train: 10873 → 5436 (50%)
+Train batches: 170  Val batches: 73
+Max epochs/trial: 20  Patience: 10
+Optuna trials: 50  Pruning: True
+========================================================================
+Resuming study 'hop_masked_hparam_search' — 29 existing trials found.
+Will run 21 new trials (target total: 50, existing: 29).
+[W 2026-05-13 14:01:22,163] Trial 29 failed with parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 4, 'dropout': 0.1} because of the following error: ValueError('CategoricalDistribution does not support dynamic value space.').
+Traceback (most recent call last):
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/study/_optimize.py", line 206, in _run_trial
+    value_or_values = func(trial)
+                      ^^^^^^^^^^^
+  File "/home/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/optuna_hop_masked_search.py", line 215, in objective
+    hp = suggest_hparams(trial)
+         ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/optuna_hop_masked_search.py", line 126, in suggest_hparams
+    hp["hop_mode"] = trial.suggest_categorical(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/trial/_trial.py", line 414, in suggest_categorical
+    return self._suggest(name, CategoricalDistribution(choices=choices))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/trial/_trial.py", line 649, in _suggest
+    storage.set_trial_param(trial_id, name, param_value_in_internal_repr, distribution)
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/storages/_cached_storage.py", line 167, in set_trial_param
+    self._backend._set_trial_param(
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/storages/_rdb/storage.py", line 597, in _set_trial_param
+    self._set_trial_param_without_commit(
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/storages/_rdb/storage.py", line 632, in _set_trial_param_without_commit
+    distributions.check_distribution_compatibility(previous_distribution, distribution)
+  File "/home/sajan_rg/.local/lib/python3.12/site-packages/optuna/distributions.py", line 656, in check_distribution_compatibility
+    raise ValueError(
+ValueError: CategoricalDistribution does not support dynamic value space.
+[W 2026-05-13 14:01:22,167] Trial 29 failed with value None.
+[Peptides-func] task=multi_label  metric=macro_ap (higher_is_better=True)
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/val.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/test.pkl
+Subsampled train: 10873 → 5436 (50%)
+Train batches: 170  Val batches: 73
+Max epochs/trial: 20  Patience: 10
+Optuna trials: 50  Pruning: True
+========================================================================
+Resuming study 'hop_masked_hparam_search' — 30 existing trials found.
+Will run 20 new trials (target total: 50, existing: 30).
+  [trial 30] epoch 00 103.7s (bs=32) | train AP 0.1967 loss 0.3817 | val AP 0.3021 | best 0.3021
+  [trial 30] epoch 01 103.1s (bs=32) | train AP 0.3167 loss 0.3117 | val AP 0.3767 | best 0.3767
+  [trial 30] epoch 02 102.4s (bs=32) | train AP 0.3595 loss 0.2939 | val AP 0.4027 | best 0.4027
+  [trial 30] epoch 03 104.8s (bs=32) | train AP 0.3842 loss 0.2825 | val AP 0.4207 | best 0.4207
+  [trial 30] epoch 04 102.9s (bs=32) | train AP 0.4094 loss 0.2730 | val AP 0.4507 | best 0.4507
+  [trial 30] epoch 05 102.4s (bs=32) | train AP 0.4417 loss 0.2626 | val AP 0.4769 | best 0.4769
+  [trial 30] epoch 06 105.2s (bs=32) | train AP 0.4658 loss 0.2536 | val AP 0.4877 | best 0.4877
+  [trial 30] epoch 07 103.7s (bs=32) | train AP 0.5042 loss 0.2409 | val AP 0.5157 | best 0.5157
+  [trial 30] epoch 08 102.3s (bs=32) | train AP 0.5312 loss 0.2288 | val AP 0.5270 | best 0.5270
+  [trial 30] epoch 09 103.1s (bs=32) | train AP 0.5699 loss 0.2171 | val AP 0.5509 | best 0.5509
+  [trial 30] epoch 10 102.7s (bs=32) | train AP 0.5975 loss 0.2027 | val AP 0.5519 | best 0.5519
+  [trial 30] epoch 11 104.5s (bs=32) | train AP 0.6360 loss 0.1908 | val AP 0.5693 | best 0.5693
+  [trial 30] epoch 12 104.8s (bs=32) | train AP 0.6703 loss 0.1765 | val AP 0.5905 | best 0.5905
+  [trial 30] epoch 13 104.0s (bs=32) | train AP 0.7025 loss 0.1633 | val AP 0.6004 | best 0.6004
+  [trial 30] epoch 14 102.4s (bs=32) | train AP 0.7433 loss 0.1481 | val AP 0.6051 | best 0.6051
+  [trial 30] epoch 15 102.4s (bs=32) | train AP 0.7663 loss 0.1386 | val AP 0.6046 | best 0.6051
+  [trial 30] epoch 16 104.1s (bs=32) | train AP 0.7911 loss 0.1288 | val AP 0.6005 | best 0.6051
+  [trial 30] epoch 17 101.8s (bs=32) | train AP 0.8088 loss 0.1226 | val AP 0.6047 | best 0.6051
+  [trial 30] epoch 18 102.6s (bs=32) | train AP 0.8149 loss 0.1185 | val AP 0.6060 | best 0.6060
+  [trial 30] epoch 19 103.4s (bs=32) | train AP 0.8187 loss 0.1171 | val AP 0.6056 | best 0.6060
+[I 2026-05-13 14:37:54,463] Trial 30 finished with value: 0.606009630652658 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 4, 'dropout': 0.1, 'hop_mode': 'window', 'hop_window': 2, 'num_global_heads': 2, 'graph_pool': 'mean', 'lr': 0.0003504045452042765, 'weight_decay': 0.0035783482290405923}. Best is trial 20 with value: 0.6121116060834857.
+  [trial 31] epoch 00 102.9s (bs=32) | train AP 0.2028 loss 0.3745 | val AP 0.3026 | best 0.3026
+  [trial 31] epoch 01 103.4s (bs=32) | train AP 0.3174 loss 0.3123 | val AP 0.3836 | best 0.3836
+  [trial 31] epoch 02 102.2s (bs=32) | train AP 0.3670 loss 0.2905 | val AP 0.4002 | best 0.4002
+  [trial 31] epoch 03 102.5s (bs=32) | train AP 0.3981 loss 0.2789 | val AP 0.4318 | best 0.4318
+  [trial 31] epoch 04 103.1s (bs=32) | train AP 0.4251 loss 0.2683 | val AP 0.4513 | best 0.4513
+  [trial 31] epoch 05 103.0s (bs=32) | train AP 0.4516 loss 0.2579 | val AP 0.4742 | best 0.4742
+  [trial 31] epoch 06 104.0s (bs=32) | train AP 0.4756 loss 0.2489 | val AP 0.4974 | best 0.4974
+  [trial 31] epoch 07 103.6s (bs=32) | train AP 0.5033 loss 0.2368 | val AP 0.5172 | best 0.5172
+  [trial 31] epoch 08 103.4s (bs=32) | train AP 0.5195 loss 0.2315 | val AP 0.5313 | best 0.5313
+  [trial 31] epoch 09 104.7s (bs=32) | train AP 0.5566 loss 0.2173 | val AP 0.5452 | best 0.5452
+  [trial 31] epoch 10 102.7s (bs=32) | train AP 0.5847 loss 0.2069 | val AP 0.5598 | best 0.5598
+  [trial 31] epoch 11 104.3s (bs=32) | train AP 0.6214 loss 0.1939 | val AP 0.5714 | best 0.5714
+  [trial 31] epoch 12 104.4s (bs=32) | train AP 0.6429 loss 0.1845 | val AP 0.5780 | best 0.5780
+  [trial 31] epoch 13 102.8s (bs=32) | train AP 0.6848 loss 0.1701 | val AP 0.5920 | best 0.5920
+  [trial 31] epoch 14 103.3s (bs=32) | train AP 0.7113 loss 0.1581 | val AP 0.5978 | best 0.5978
+  [trial 31] epoch 15 106.3s (bs=32) | train AP 0.7479 loss 0.1454 | val AP 0.5976 | best 0.5978
+  [trial 31] epoch 16 102.9s (bs=32) | train AP 0.7692 loss 0.1374 | val AP 0.5981 | best 0.5981
+  [trial 31] epoch 17 102.6s (bs=32) | train AP 0.7811 loss 0.1319 | val AP 0.6011 | best 0.6011
+  [trial 31] epoch 18 103.3s (bs=32) | train AP 0.7900 loss 0.1287 | val AP 0.6018 | best 0.6018
+  [trial 31] epoch 19 102.5s (bs=32) | train AP 0.7933 loss 0.1266 | val AP 0.6016 | best 0.6018
+[I 2026-05-13 15:12:24,904] Trial 31 finished with value: 0.6018449227746626 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 4, 'dropout': 0.1, 'hop_mode': 'window', 'hop_window': 2, 'num_global_heads': 2, 'graph_pool': 'mean', 'lr': 0.00037121543934056636, 'weight_decay': 0.00042105261639098924}. Best is trial 20 with value: 0.6121116060834857.
+  [trial 32] epoch 00 105.2s (bs=32) | train AP 0.2130 loss 0.3657 | val AP 0.3270 | best 0.3270
+  [trial 32] epoch 01 105.2s (bs=32) | train AP 0.3259 loss 0.3083 | val AP 0.3844 | best 0.3844
+  [trial 32] epoch 02 104.3s (bs=32) | train AP 0.3576 loss 0.2968 | val AP 0.4066 | best 0.4066
+  [trial 32] epoch 03 103.5s (bs=32) | train AP 0.3836 loss 0.2848 | val AP 0.4049 | best 0.4066
+  [trial 32] epoch 04 105.3s (bs=32) | train AP 0.4037 loss 0.2759 | val AP 0.4512 | best 0.4512
+  [trial 32] epoch 05 103.0s (bs=32) | train AP 0.4258 loss 0.2679 | val AP 0.4678 | best 0.4678
+  [trial 32] epoch 06 105.3s (bs=32) | train AP 0.4519 loss 0.2589 | val AP 0.4888 | best 0.4888
+  [trial 32] epoch 07 105.0s (bs=32) | train AP 0.4691 loss 0.2520 | val AP 0.4807 | best 0.4888
+  [trial 32] epoch 08 104.1s (bs=32) | train AP 0.4894 loss 0.2452 | val AP 0.5179 | best 0.5179
+  [trial 32] epoch 09 104.6s (bs=32) | train AP 0.5160 loss 0.2356 | val AP 0.5183 | best 0.5183
+  [trial 32] epoch 10 104.6s (bs=32) | train AP 0.5423 loss 0.2283 | val AP 0.5363 | best 0.5363
+  [trial 32] epoch 11 105.3s (bs=32) | train AP 0.5634 loss 0.2181 | val AP 0.5558 | best 0.5558
+  [trial 32] epoch 12 103.7s (bs=32) | train AP 0.5930 loss 0.2088 | val AP 0.5675 | best 0.5675
+  [trial 32] epoch 13 103.6s (bs=32) | train AP 0.6193 loss 0.2007 | val AP 0.5766 | best 0.5766
+  [trial 32] epoch 14 103.5s (bs=32) | train AP 0.6413 loss 0.1919 | val AP 0.5899 | best 0.5899
+  [trial 32] epoch 15 102.8s (bs=32) | train AP 0.6656 loss 0.1828 | val AP 0.5884 | best 0.5899
+  [trial 32] epoch 16 105.9s (bs=32) | train AP 0.6883 loss 0.1754 | val AP 0.5938 | best 0.5938
+  [trial 32] epoch 17 103.5s (bs=32) | train AP 0.6942 loss 0.1712 | val AP 0.5923 | best 0.5938
+  [trial 32] epoch 18 106.1s (bs=32) | train AP 0.7065 loss 0.1669 | val AP 0.5955 | best 0.5955
+  [trial 32] epoch 19 105.6s (bs=32) | train AP 0.7062 loss 0.1667 | val AP 0.5944 | best 0.5955
+[I 2026-05-13 15:47:17,517] Trial 32 finished with value: 0.5954678182659798 and parameters: {'hidden_dim': 512, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 4, 'dropout': 0.2, 'hop_mode': 'window', 'hop_window': 2, 'num_global_heads': 2, 'graph_pool': 'mean', 'lr': 0.00036069428330277756, 'weight_decay': 0.0003619413501640486}. Best is trial 20 with value: 0.6121116060834857.
+  [trial 33] epoch 00 71.1s (bs=32) | train AP 0.1953 loss 0.3749 | val AP 0.2742 | best 0.2742
+  [trial 33] epoch 01 72.0s (bs=32) | train AP 0.2808 loss 0.3256 | val AP 0.3085 | best 0.3085
+  [trial 33] epoch 02 72.9s (bs=32) | train AP 0.3172 loss 0.3130 | val AP 0.2950 | best 0.3085
+  [trial 33] epoch 03 70.3s (bs=32) | train AP 0.2971 loss 0.3180 | val AP 0.3116 | best 0.3116
+  [trial 33] epoch 04 72.1s (bs=32) | train AP 0.3191 loss 0.3103 | val AP 0.3356 | best 0.3356
+  [trial 33] epoch 05 71.2s (bs=32) | train AP 0.3321 loss 0.3064 | val AP 0.3502 | best 0.3502
+  [trial 33] PRUNED at epoch 5
+[I 2026-05-13 15:54:28,408] Trial 33 pruned. 
+  [trial 34] Model build failed: hidden_dim=128 must be divisible by num_heads=40
+  [trial 34] params: {'hidden_dim': 128, 'num_heads': 40, 'ffn_ratio': 4, 'num_layers': 6, 'dropout': 0.3, 'hop_mode': 'window', 'hop_window': 2, 'num_global_heads': 1, 'graph_pool': 'mean', 'lr': 0.0003540548480025125, 'weight_decay': 0.000505942336279798}
+[I 2026-05-13 15:54:29,464] Trial 34 pruned. 
+  [trial 35] epoch 00 94.0s (bs=32) | train AP 0.2145 loss 0.3705 | val AP 0.3038 | best 0.3038
+  [trial 35] epoch 01 91.6s (bs=32) | train AP 0.3197 loss 0.3094 | val AP 0.3777 | best 0.3777
+  [trial 35] epoch 02 93.7s (bs=32) | train AP 0.3671 loss 0.2915 | val AP 0.4029 | best 0.4029
+  [trial 35] epoch 03 92.2s (bs=32) | train AP 0.3985 loss 0.2771 | val AP 0.4441 | best 0.4441
+  [trial 35] epoch 04 93.0s (bs=32) | train AP 0.4199 loss 0.2697 | val AP 0.4813 | best 0.4813
+  [trial 35] epoch 05 93.8s (bs=32) | train AP 0.4540 loss 0.2580 | val AP 0.4666 | best 0.4813
+  [trial 35] epoch 06 93.1s (bs=32) | train AP 0.4832 loss 0.2455 | val AP 0.5091 | best 0.5091
+  [trial 35] epoch 07 93.8s (bs=32) | train AP 0.5008 loss 0.2388 | val AP 0.5190 | best 0.5190
+  [trial 35] epoch 08 93.0s (bs=32) | train AP 0.5430 loss 0.2227 | val AP 0.5342 | best 0.5342
+  [trial 35] epoch 09 91.9s (bs=32) | train AP 0.5707 loss 0.2119 | val AP 0.5593 | best 0.5593
+  [trial 35] epoch 10 93.0s (bs=32) | train AP 0.6101 loss 0.1980 | val AP 0.5833 | best 0.5833
+  [trial 35] epoch 11 93.4s (bs=32) | train AP 0.6483 loss 0.1839 | val AP 0.5809 | best 0.5833
+  [trial 35] epoch 12 92.9s (bs=32) | train AP 0.6897 loss 0.1669 | val AP 0.6066 | best 0.6066
+  [trial 35] epoch 13 94.3s (bs=32) | train AP 0.7299 loss 0.1485 | val AP 0.6065 | best 0.6066
+  [trial 35] epoch 14 93.7s (bs=32) | train AP 0.7663 loss 0.1341 | val AP 0.6052 | best 0.6066
+  [trial 35] epoch 15 93.3s (bs=32) | train AP 0.7925 loss 0.1224 | val AP 0.6076 | best 0.6076
+  [trial 35] epoch 16 93.8s (bs=32) | train AP 0.8198 loss 0.1116 | val AP 0.6134 | best 0.6134
+  [trial 35] epoch 17 91.5s (bs=32) | train AP 0.8375 loss 0.1044 | val AP 0.6145 | best 0.6145
+  [trial 35] epoch 18 93.9s (bs=32) | train AP 0.8434 loss 0.1020 | val AP 0.6128 | best 0.6145
+  [trial 35] epoch 19 92.9s (bs=32) | train AP 0.8485 loss 0.0993 | val AP 0.6135 | best 0.6145
+[I 2026-05-13 16:25:34,778] Trial 35 finished with value: 0.6145012414827129 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 3, 'dropout': 0.05, 'hop_mode': 'window', 'hop_window': 2, 'num_global_heads': 2, 'graph_pool': 'mean', 'lr': 0.00047616159061091327, 'weight_decay': 0.0014185166601235076}. Best is trial 35 with value: 0.6145012414827129.
+  [trial 36] epoch 00 101.8s (bs=32) | train AP 0.2166 loss 0.3683 | val AP 0.3168 | best 0.3168
+  [trial 36] epoch 01 101.9s (bs=32) | train AP 0.3262 loss 0.3072 | val AP 0.3930 | best 0.3930
+  [trial 36] epoch 02 103.0s (bs=32) | train AP 0.3776 loss 0.2871 | val AP 0.4097 | best 0.4097
+  [trial 36] epoch 03 102.9s (bs=32) | train AP 0.3997 loss 0.2790 | val AP 0.4409 | best 0.4409
+  [trial 36] epoch 04 103.0s (bs=32) | train AP 0.4290 loss 0.2680 | val AP 0.4572 | best 0.4572
+  [trial 36] epoch 05 101.4s (bs=32) | train AP 0.4598 loss 0.2579 | val AP 0.4887 | best 0.4887
+  [trial 36] epoch 06 103.4s (bs=32) | train AP 0.4953 loss 0.2457 | val AP 0.5055 | best 0.5055
+  [trial 36] epoch 07 101.3s (bs=32) | train AP 0.5005 loss 0.2400 | val AP 0.5036 | best 0.5055
+  [trial 36] epoch 08 103.1s (bs=32) | train AP 0.5187 loss 0.2340 | val AP 0.5286 | best 0.5286
+  [trial 36] epoch 09 102.0s (bs=32) | train AP 0.5606 loss 0.2204 | val AP 0.5442 | best 0.5442
+  [trial 36] epoch 10 104.1s (bs=32) | train AP 0.5857 loss 0.2111 | val AP 0.5560 | best 0.5560
+  [trial 36] epoch 11 102.4s (bs=32) | train AP 0.6148 loss 0.1985 | val AP 0.5828 | best 0.5828
+  [trial 36] epoch 12 102.5s (bs=32) | train AP 0.6625 loss 0.1816 | val AP 0.5919 | best 0.5919
+  [trial 36] epoch 13 101.9s (bs=32) | train AP 0.7104 loss 0.1629 | val AP 0.5997 | best 0.5997
+  [trial 36] epoch 14 102.6s (bs=32) | train AP 0.7491 loss 0.1466 | val AP 0.6047 | best 0.6047
+  [trial 36] epoch 15 103.1s (bs=32) | train AP 0.7879 loss 0.1322 | val AP 0.6067 | best 0.6067
+  [trial 36] epoch 16 104.4s (bs=32) | train AP 0.8143 loss 0.1205 | val AP 0.6092 | best 0.6092
+  [trial 36] epoch 17 102.7s (bs=32) | train AP 0.8337 loss 0.1117 | val AP 0.6083 | best 0.6092
+  [trial 36] epoch 18 102.3s (bs=32) | train AP 0.8462 loss 0.1077 | val AP 0.6112 | best 0.6112
+  [trial 36] epoch 19 99.9s (bs=32) | train AP 0.8523 loss 0.1053 | val AP 0.6104 | best 0.6112
+[I 2026-05-13 16:59:46,434] Trial 36 finished with value: 0.6111699589830167 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 4, 'dropout': 0.05, 'hop_mode': 'window', 'hop_window': 2, 'num_global_heads': 2, 'graph_pool': 'mean', 'lr': 0.000488634246806206, 'weight_decay': 0.0008842825681313607}. Best is trial 35 with value: 0.6145012414827129.
+  [trial 37] epoch 00 97.7s (bs=32) | train AP 0.2027 loss 0.3720 | val AP 0.3044 | best 0.3044
+  [trial 37] epoch 01 96.9s (bs=32) | train AP 0.3016 loss 0.3151 | val AP 0.3653 | best 0.3653
+  [trial 37] epoch 02 97.0s (bs=32) | train AP 0.3560 loss 0.2937 | val AP 0.4028 | best 0.4028
+  [trial 37] epoch 03 93.7s (bs=32) | train AP 0.3912 loss 0.2811 | val AP 0.4151 | best 0.4151
+  [trial 37] epoch 04 96.9s (bs=32) | train AP 0.4090 loss 0.2739 | val AP 0.4475 | best 0.4475
+  [trial 37] epoch 05 93.4s (bs=32) | train AP 0.4346 loss 0.2635 | val AP 0.4696 | best 0.4696
+  [trial 37] epoch 06 95.6s (bs=32) | train AP 0.4586 loss 0.2554 | val AP 0.4873 | best 0.4873
+  [trial 37] epoch 07 100.7s (bs=32) | train AP 0.4860 loss 0.2439 | val AP 0.4929 | best 0.4929
+  [trial 37] epoch 08 94.1s (bs=32) | train AP 0.5066 loss 0.2365 | val AP 0.5253 | best 0.5253
+  [trial 37] epoch 09 94.9s (bs=32) | train AP 0.5399 loss 0.2237 | val AP 0.5322 | best 0.5322
+  [trial 37] epoch 10 94.9s (bs=32) | train AP 0.5692 loss 0.2126 | val AP 0.5553 | best 0.5553
+  [trial 37] epoch 11 95.1s (bs=32) | train AP 0.6216 loss 0.1945 | val AP 0.5548 | best 0.5553
+  [trial 37] epoch 12 95.2s (bs=32) | train AP 0.6472 loss 0.1817 | val AP 0.5729 | best 0.5729
+  [trial 37] epoch 13 93.4s (bs=32) | train AP 0.6940 loss 0.1636 | val AP 0.5860 | best 0.5860
+  [trial 37] epoch 14 95.0s (bs=32) | train AP 0.7392 loss 0.1471 | val AP 0.6001 | best 0.6001
+  [trial 37] epoch 15 93.3s (bs=32) | train AP 0.7677 loss 0.1335 | val AP 0.5936 | best 0.6001
+  [trial 37] epoch 16 87.8s (bs=32) | train AP 0.7948 loss 0.1227 | val AP 0.6044 | best 0.6044
+  [trial 37] epoch 17 88.1s (bs=32) | train AP 0.8173 loss 0.1145 | val AP 0.6034 | best 0.6044
+  [trial 37] epoch 18 99.9s (bs=32) | train AP 0.8276 loss 0.1106 | val AP 0.6028 | best 0.6044
+  [trial 37] epoch 19 94.4s (bs=32) | train AP 0.8294 loss 0.1088 | val AP 0.6026 | best 0.6044
+[I 2026-05-13 17:31:40,899] Trial 37 finished with value: 0.6044068113031094 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 4, 'dropout': 0.05, 'hop_mode': 'window', 'hop_window': 1, 'num_global_heads': 0, 'graph_pool': 'mean', 'lr': 0.0005052126022639414, 'weight_decay': 0.0016234034701963673}. Best is trial 35 with value: 0.6145012414827129.
+  [trial 38] epoch 00 91.2s (bs=32) | train AP 0.2130 loss 0.3665 | val AP 0.3066 | best 0.3066
+  [trial 38] epoch 01 95.2s (bs=32) | train AP 0.3241 loss 0.3085 | val AP 0.3748 | best 0.3748
+  [trial 38] epoch 02 95.6s (bs=32) | train AP 0.3607 loss 0.2932 | val AP 0.4071 | best 0.4071
+  [trial 38] epoch 03 95.5s (bs=32) | train AP 0.3901 loss 0.2829 | val AP 0.4269 | best 0.4269
+  [trial 38] epoch 04 94.5s (bs=32) | train AP 0.4142 loss 0.2745 | val AP 0.4392 | best 0.4392
+  [trial 38] epoch 05 92.1s (bs=32) | train AP 0.4333 loss 0.2660 | val AP 0.4532 | best 0.4532
+  [trial 38] epoch 06 88.1s (bs=32) | train AP 0.4558 loss 0.2571 | val AP 0.4847 | best 0.4847
+  [trial 38] epoch 07 84.7s (bs=32) | train AP 0.4799 loss 0.2485 | val AP 0.5046 | best 0.5046
+  [trial 38] epoch 08 86.6s (bs=32) | train AP 0.5091 loss 0.2381 | val AP 0.5026 | best 0.5046
+  [trial 38] epoch 09 95.0s (bs=32) | train AP 0.5256 loss 0.2316 | val AP 0.5300 | best 0.5300
+  [trial 38] epoch 10 91.3s (bs=32) | train AP 0.5496 loss 0.2218 | val AP 0.5454 | best 0.5454
+  [trial 38] epoch 11 93.8s (bs=32) | train AP 0.5872 loss 0.2092 | val AP 0.5494 | best 0.5494
+  [trial 38] epoch 12 94.8s (bs=32) | train AP 0.6174 loss 0.1968 | val AP 0.5468 | best 0.5494
+  [trial 38] PRUNED at epoch 12
+[I 2026-05-13 17:51:46,255] Trial 38 pruned. 
+  [trial 39] epoch 00 112.0s (bs=32) | train AP 0.2051 loss 0.3706 | val AP 0.3089 | best 0.3089
+  [trial 39] epoch 01 107.4s (bs=32) | train AP 0.3152 loss 0.3114 | val AP 0.3821 | best 0.3821
+  [trial 39] epoch 02 104.0s (bs=32) | train AP 0.3658 loss 0.2929 | val AP 0.3943 | best 0.3943
+  [trial 39] epoch 03 103.4s (bs=32) | train AP 0.3808 loss 0.2852 | val AP 0.4169 | best 0.4169
+  [trial 39] epoch 04 104.7s (bs=32) | train AP 0.4061 loss 0.2761 | val AP 0.4485 | best 0.4485
+  [trial 39] epoch 05 102.3s (bs=32) | train AP 0.4244 loss 0.2673 | val AP 0.4605 | best 0.4605
+  [trial 39] epoch 06 105.4s (bs=32) | train AP 0.4411 loss 0.2604 | val AP 0.4772 | best 0.4772
+  [trial 39] epoch 07 102.6s (bs=32) | train AP 0.4713 loss 0.2490 | val AP 0.4817 | best 0.4817
+  [trial 39] epoch 08 104.3s (bs=32) | train AP 0.4977 loss 0.2379 | val AP 0.4985 | best 0.4985
+  [trial 39] PRUNED at epoch 8
+[I 2026-05-13 18:07:34,376] Trial 39 pruned. 
+  [trial 40] epoch 00 76.4s (bs=32) | train AP 0.2152 loss 0.3613 | val AP 0.3092 | best 0.3092
+  [trial 40] epoch 01 77.6s (bs=32) | train AP 0.3131 loss 0.3137 | val AP 0.3772 | best 0.3772
+  [trial 40] epoch 02 76.5s (bs=32) | train AP 0.3514 loss 0.2969 | val AP 0.3890 | best 0.3890
+  [trial 40] epoch 03 76.4s (bs=32) | train AP 0.3547 loss 0.2959 | val AP 0.3976 | best 0.3976
+  [trial 40] epoch 04 76.6s (bs=32) | train AP 0.3777 loss 0.2873 | val AP 0.3931 | best 0.3976
+  [trial 40] epoch 05 76.0s (bs=32) | train AP 0.3856 loss 0.2819 | val AP 0.4313 | best 0.4313
+  [trial 40] PRUNED at epoch 5
+[I 2026-05-13 18:15:15,364] Trial 40 pruned. 
+  [trial 41] epoch 00 79.1s (bs=32) | train AP 0.2095 loss 0.3685 | val AP 0.3041 | best 0.3041
+  [trial 41] epoch 01 80.2s (bs=32) | train AP 0.3121 loss 0.3112 | val AP 0.3760 | best 0.3760
+  [trial 41] epoch 02 80.0s (bs=32) | train AP 0.3514 loss 0.2974 | val AP 0.3780 | best 0.3780
+  [trial 41] epoch 03 79.7s (bs=32) | train AP 0.3750 loss 0.2888 | val AP 0.4185 | best 0.4185
+  [trial 41] epoch 04 79.5s (bs=32) | train AP 0.4019 loss 0.2765 | val AP 0.4307 | best 0.4307
+  [trial 41] epoch 05 80.7s (bs=32) | train AP 0.4172 loss 0.2709 | val AP 0.4605 | best 0.4605
+  [trial 41] epoch 06 79.6s (bs=32) | train AP 0.4434 loss 0.2636 | val AP 0.4694 | best 0.4694
+  [trial 41] epoch 07 78.9s (bs=32) | train AP 0.4598 loss 0.2565 | val AP 0.4836 | best 0.4836
+  [trial 41] epoch 08 79.5s (bs=32) | train AP 0.4877 loss 0.2445 | val AP 0.5115 | best 0.5115
+  [trial 41] epoch 09 79.7s (bs=32) | train AP 0.5115 loss 0.2360 | val AP 0.5112 | best 0.5115
+  [trial 41] PRUNED at epoch 9
+[I 2026-05-13 18:28:33,936] Trial 41 pruned. 
+  [trial 42] epoch 00 61.2s (bs=32) | train AP 0.1703 loss 0.4362 | val AP 0.2589 | best 0.2589
+  [trial 42] epoch 01 61.1s (bs=32) | train AP 0.3013 loss 0.3170 | val AP 0.3629 | best 0.3629
+  [trial 42] epoch 02 60.7s (bs=32) | train AP 0.3517 loss 0.2984 | val AP 0.3899 | best 0.3899
+  [trial 42] epoch 03 61.4s (bs=32) | train AP 0.3792 loss 0.2872 | val AP 0.4098 | best 0.4098
+  [trial 42] epoch 04 61.2s (bs=32) | train AP 0.3914 loss 0.2801 | val AP 0.4072 | best 0.4098
+  [trial 42] epoch 05 61.3s (bs=32) | train AP 0.4166 loss 0.2713 | val AP 0.4406 | best 0.4406
+  [trial 42] PRUNED at epoch 5
+[I 2026-05-13 18:34:42,344] Trial 42 pruned. 
+  [trial 43] epoch 00 92.1s (bs=32) | train AP 0.2196 loss 0.3561 | val AP 0.2641 | best 0.2641
+  [trial 43] epoch 01 92.9s (bs=32) | train AP 0.2836 loss 0.3226 | val AP 0.3456 | best 0.3456
+  [trial 43] epoch 02 92.6s (bs=32) | train AP 0.3018 loss 0.3179 | val AP 0.3447 | best 0.3456
+  [trial 43] epoch 03 92.7s (bs=32) | train AP 0.3070 loss 0.3151 | val AP 0.3597 | best 0.3597
+  [trial 43] epoch 04 91.8s (bs=32) | train AP 0.3407 loss 0.3011 | val AP 0.3667 | best 0.3667
+  [trial 43] epoch 05 91.0s (bs=32) | train AP 0.3437 loss 0.3005 | val AP 0.3838 | best 0.3838
+  [trial 43] PRUNED at epoch 5
+[I 2026-05-13 18:43:56,992] Trial 43 pruned. 
+  [trial 44] Model build failed: hidden_dim=384 must be divisible by num_heads=20
+  [trial 44] params: {'hidden_dim': 384, 'num_heads': 20, 'ffn_ratio': 4, 'num_layers': 4, 'dropout': 0.3, 'hop_mode': 'contiguous', 'hop_window': 2, 'num_global_heads': 2, 'graph_pool': 'mean', 'lr': 0.000544202693974083, 'weight_decay': 0.002584622655490367}
+[I 2026-05-13 18:43:58,067] Trial 44 pruned. 
+  [trial 45] epoch 00 93.9s (bs=32) | train AP 0.2124 loss 0.3650 | val AP 0.3142 | best 0.3142
+  [trial 45] epoch 01 91.5s (bs=32) | train AP 0.3239 loss 0.3095 | val AP 0.3958 | best 0.3958
+  [trial 45] epoch 02 91.8s (bs=32) | train AP 0.3753 loss 0.2875 | val AP 0.4157 | best 0.4157
+  [trial 45] epoch 03 91.0s (bs=32) | train AP 0.4024 loss 0.2760 | val AP 0.4382 | best 0.4382
+  [trial 45] epoch 04 94.0s (bs=32) | train AP 0.4176 loss 0.2690 | val AP 0.4492 | best 0.4492
+  [trial 45] epoch 05 93.1s (bs=32) | train AP 0.4378 loss 0.2614 | val AP 0.4736 | best 0.4736
+  [trial 45] epoch 06 93.7s (bs=32) | train AP 0.4680 loss 0.2514 | val AP 0.4888 | best 0.4888
+  [trial 45] epoch 07 96.7s (bs=32) | train AP 0.4886 loss 0.2448 | val AP 0.5081 | best 0.5081
+  [trial 45] epoch 08 94.0s (bs=32) | train AP 0.5185 loss 0.2325 | val AP 0.5163 | best 0.5163
+  [trial 45] epoch 09 92.6s (bs=32) | train AP 0.5409 loss 0.2239 | val AP 0.5187 | best 0.5187
+  [trial 45] epoch 10 92.7s (bs=32) | train AP 0.5803 loss 0.2106 | val AP 0.5647 | best 0.5647
+  [trial 45] epoch 11 92.0s (bs=32) | train AP 0.6118 loss 0.1981 | val AP 0.5747 | best 0.5747
+  [trial 45] epoch 12 92.6s (bs=32) | train AP 0.6444 loss 0.1846 | val AP 0.5853 | best 0.5853
+  [trial 45] epoch 13 90.9s (bs=32) | train AP 0.6911 loss 0.1657 | val AP 0.5819 | best 0.5853
+  [trial 45] epoch 14 94.4s (bs=32) | train AP 0.7261 loss 0.1505 | val AP 0.6015 | best 0.6015
+  [trial 45] epoch 15 91.8s (bs=32) | train AP 0.7635 loss 0.1358 | val AP 0.6045 | best 0.6045
+  [trial 45] epoch 16 91.6s (bs=32) | train AP 0.7913 loss 0.1236 | val AP 0.6070 | best 0.6070
+  [trial 45] epoch 17 93.5s (bs=32) | train AP 0.8173 loss 0.1142 | val AP 0.6106 | best 0.6106
+  [trial 45] epoch 18 93.2s (bs=32) | train AP 0.8313 loss 0.1087 | val AP 0.6097 | best 0.6106
+  [trial 45] epoch 19 94.2s (bs=32) | train AP 0.8359 loss 0.1069 | val AP 0.6098 | best 0.6106
+[I 2026-05-13 19:14:59,557] Trial 45 finished with value: 0.6106496737098068 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 4, 'dropout': 0.05, 'hop_mode': 'window', 'hop_window': 1, 'num_global_heads': 0, 'graph_pool': 'mean', 'lr': 0.0004893000057002949, 'weight_decay': 0.0018310007262777432}. Best is trial 35 with value: 0.6145012414827129.
+  [trial 46] epoch 00 83.2s (bs=32) | train AP 0.2046 loss 0.3757 | val AP 0.3047 | best 0.3047
+  [trial 46] epoch 01 82.7s (bs=32) | train AP 0.3106 loss 0.3122 | val AP 0.3880 | best 0.3880
+  [trial 46] epoch 02 83.1s (bs=32) | train AP 0.3687 loss 0.2898 | val AP 0.3951 | best 0.3951
+  [trial 46] epoch 03 83.1s (bs=32) | train AP 0.3932 loss 0.2794 | val AP 0.4281 | best 0.4281
+  [trial 46] epoch 04 83.3s (bs=32) | train AP 0.4204 loss 0.2679 | val AP 0.4410 | best 0.4410
+  [trial 46] epoch 05 84.4s (bs=32) | train AP 0.4448 loss 0.2610 | val AP 0.4740 | best 0.4740
+  [trial 46] epoch 06 84.6s (bs=32) | train AP 0.4681 loss 0.2523 | val AP 0.4782 | best 0.4782
+  [trial 46] epoch 07 83.2s (bs=32) | train AP 0.4897 loss 0.2411 | val AP 0.4918 | best 0.4918
+  [trial 46] epoch 08 83.8s (bs=32) | train AP 0.5226 loss 0.2318 | val AP 0.5225 | best 0.5225
+  [trial 46] epoch 09 83.8s (bs=32) | train AP 0.5467 loss 0.2216 | val AP 0.5237 | best 0.5237
+  [trial 46] epoch 10 83.3s (bs=32) | train AP 0.5776 loss 0.2094 | val AP 0.5592 | best 0.5592
+  [trial 46] epoch 11 83.0s (bs=32) | train AP 0.6142 loss 0.1959 | val AP 0.5639 | best 0.5639
+  [trial 46] epoch 12 84.1s (bs=32) | train AP 0.6548 loss 0.1802 | val AP 0.5777 | best 0.5777
+  [trial 46] epoch 13 83.5s (bs=32) | train AP 0.6936 loss 0.1650 | val AP 0.5783 | best 0.5783
+  [trial 46] epoch 14 83.0s (bs=32) | train AP 0.7344 loss 0.1498 | val AP 0.5901 | best 0.5901
+  [trial 46] epoch 15 82.8s (bs=32) | train AP 0.7638 loss 0.1348 | val AP 0.5889 | best 0.5901
+  [trial 46] epoch 16 84.1s (bs=32) | train AP 0.7893 loss 0.1254 | val AP 0.5936 | best 0.5936
+  [trial 46] epoch 17 82.8s (bs=32) | train AP 0.8108 loss 0.1169 | val AP 0.5987 | best 0.5987
+  [trial 46] epoch 18 82.6s (bs=32) | train AP 0.8197 loss 0.1123 | val AP 0.5961 | best 0.5987
+  [trial 46] epoch 19 83.1s (bs=32) | train AP 0.8278 loss 0.1100 | val AP 0.5960 | best 0.5987
+[I 2026-05-13 19:42:49,485] Trial 46 finished with value: 0.5987291469431889 and parameters: {'hidden_dim': 384, 'num_heads': 32, 'ffn_ratio': 4, 'num_layers': 3, 'dropout': 0.05, 'hop_mode': 'window', 'hop_window': 1, 'num_global_heads': 0, 'graph_pool': 'mean', 'lr': 0.000455953165165513, 'weight_decay': 0.0015990011909130424}. Best is trial 35 with value: 0.6145012414827129.
+  [trial 47] epoch 00 91.9s (bs=32) | train AP 0.2115 loss 0.3639 | val AP 0.3170 | best 0.3170
+  [trial 47] epoch 01 92.7s (bs=32) | train AP 0.3217 loss 0.3096 | val AP 0.3664 | best 0.3664
+  [trial 47] epoch 02 91.3s (bs=32) | train AP 0.3601 loss 0.2917 | val AP 0.4086 | best 0.4086
+  [trial 47] epoch 03 92.0s (bs=32) | train AP 0.3877 loss 0.2814 | val AP 0.4211 | best 0.4211
+  [trial 47] epoch 04 91.8s (bs=32) | train AP 0.4128 loss 0.2732 | val AP 0.4467 | best 0.4467
+  [trial 47] epoch 05 91.3s (bs=32) | train AP 0.4308 loss 0.2644 | val AP 0.4573 | best 0.4573
+  [trial 47] epoch 06 95.9s (bs=32) | train AP 0.4513 loss 0.2572 | val AP 0.4772 | best 0.4772
+  [trial 47] epoch 07 96.1s (bs=32) | train AP 0.4733 loss 0.2493 | val AP 0.4868 | best 0.4868
+  [trial 47] epoch 08 92.4s (bs=32) | train AP 0.5027 loss 0.2399 | val AP 0.5078 | best 0.5078
+  [trial 47] PRUNED at epoch 8
+[I 2026-05-13 19:56:46,389] Trial 47 pruned. 
+  [trial 48] epoch 00 73.6s (bs=32) | train AP 0.1978 loss 0.3856 | val AP 0.3012 | best 0.3012
+  [trial 48] epoch 01 72.7s (bs=32) | train AP 0.2968 loss 0.3183 | val AP 0.3690 | best 0.3690
+  [trial 48] epoch 02 73.2s (bs=32) | train AP 0.3527 loss 0.2968 | val AP 0.3932 | best 0.3932
+  [trial 48] epoch 03 73.2s (bs=32) | train AP 0.3833 loss 0.2836 | val AP 0.4119 | best 0.4119
+  [trial 48] epoch 04 72.0s (bs=32) | train AP 0.4089 loss 0.2763 | val AP 0.4356 | best 0.4356
+  [trial 48] epoch 05 73.8s (bs=32) | train AP 0.4268 loss 0.2675 | val AP 0.4496 | best 0.4496
+  [trial 48] PRUNED at epoch 5
+[I 2026-05-13 20:04:06,376] Trial 48 pruned. 
+  [trial 49] epoch 00 103.5s (bs=32) | train AP 0.2124 loss 0.3660 | val AP 0.3031 | best 0.3031
+  [trial 49] epoch 01 104.1s (bs=32) | train AP 0.2972 loss 0.3175 | val AP 0.3382 | best 0.3382
+  [trial 49] epoch 02 106.0s (bs=32) | train AP 0.3525 loss 0.2958 | val AP 0.3928 | best 0.3928
+  [trial 49] epoch 03 103.3s (bs=32) | train AP 0.3759 loss 0.2891 | val AP 0.4182 | best 0.4182
+  [trial 49] epoch 04 105.6s (bs=32) | train AP 0.3847 loss 0.2835 | val AP 0.4290 | best 0.4290
+  [trial 49] epoch 05 105.5s (bs=32) | train AP 0.4046 loss 0.2765 | val AP 0.4459 | best 0.4459
+  [trial 49] PRUNED at epoch 5
+[I 2026-05-13 20:14:35,718] Trial 49 pruned. 
+
+========================================================================
+OPTUNA SEARCH COMPLETE
+========================================================================
+
+Best trial #35
+  Value (AP): 0.614501
+  Params (11):
+    dropout: 0.05
+    ffn_ratio: 4
+    graph_pool: mean
+    hidden_dim: 384
+    hop_mode: window
+    hop_window: 2
+    lr: 0.00047616159061091327
+    num_global_heads: 2
+    num_heads: 32
+    num_layers: 3
+    weight_decay: 0.0014185166601235076
+  Model size: 5.691M params
+  Actual batch size: 32
+
+Saved to optuna_hop_masked_best.json
+
+Top 5 trials:
+  #35  AP=0.6145  params: {'dropout': 0.05, 'ffn_ratio': 4, 'graph_pool': 'mean', 'hidden_dim': 384, 'hop_mode': 'window', 'hop_window': 2, 'lr': 0.00047616159061091327, 'num_global_heads': 2, 'num_heads': 32, 'num_layers': 3, 'weight_decay': 0.0014185166601235076}
+  #20  AP=0.6121  params: {'dropout': 0.1, 'ffn_ratio': 4, 'graph_pool': 'sum', 'hidden_dim': 384, 'hop_mode': 'window', 'hop_window': 2, 'lr': 0.0004107382016293528, 'num_global_heads': 1, 'num_heads': 32, 'num_layers': 5, 'weight_decay': 0.0007794438764598863}
+  #36  AP=0.6112  params: {'dropout': 0.05, 'ffn_ratio': 4, 'graph_pool': 'mean', 'hidden_dim': 384, 'hop_mode': 'window', 'hop_window': 2, 'lr': 0.000488634246806206, 'num_global_heads': 2, 'num_heads': 32, 'num_layers': 4, 'weight_decay': 0.0008842825681313607}
+  #45  AP=0.6106  params: {'dropout': 0.05, 'ffn_ratio': 4, 'graph_pool': 'mean', 'hidden_dim': 384, 'hop_mode': 'window', 'hop_window': 1, 'lr': 0.0004893000057002949, 'num_global_heads': 0, 'num_heads': 32, 'num_layers': 4, 'weight_decay': 0.0018310007262777432}
+  #30  AP=0.6060  params: {'dropout': 0.1, 'ffn_ratio': 4, 'graph_pool': 'mean', 'hidden_dim': 384, 'hop_mode': 'window', 'hop_window': 2, 'lr': 0.0003504045452042765, 'num_global_heads': 2, 'num_heads': 32, 'num_layers': 4, 'weight_decay': 0.0035783482290405923}
+
+Recommended full training command:
+
+  python train_hop_masked_transformer.py \
+    --dataset Peptides-func \
+    --max_hops 40 \
+    --hidden_dim 384 \
+    --num_heads 32 \
+    --ffn_ratio 4 \
+    --num_layers 3 \
+    --dropout 0.05 \
+    --hop_mode window \
+    --hop_window 2 \
+    --num_global_heads 2 \
+    --graph_pool mean \
+    --lr 0.00047616159061091327 \
+    --weight_decay 0.0014185166601235076 \
+    --batch_size 64 \
+    --max_epochs 200 \
+    --patience 40 \
+    --save_dir checkpoints_hop_masked_optuna_best
+

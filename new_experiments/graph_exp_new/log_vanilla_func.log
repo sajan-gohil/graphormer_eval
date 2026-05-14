@@ -1,0 +1,338 @@
+EPOCH ===================: 0
+  ✓ New best val_AP=0.2155, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.16572026908397675, 'val_ap': 0.21549092233181, 'test_ap': 0.21262355148792267, 'train_loss': 0.36950585842132566, 'val_loss': 0.3580300588356821, 'test_loss': 0.3583128593469921}
+EPOCH ===================: 1
+  ✓ New best val_AP=0.2590, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.20806768536567688, 'val_ap': 0.25898510217666626, 'test_ap': 0.25963425636291504, 'train_loss': 0.35010949899168575, 'val_loss': 0.3341767584022723, 'test_loss': 0.3356679756390421}
+EPOCH ===================: 2
+  ✓ New best val_AP=0.3071, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.2506156861782074, 'val_ap': 0.3071194291114807, 'test_ap': 0.29681164026260376, 'train_loss': 0.3348116499536178, 'val_loss': 0.3227808930371937, 'test_loss': 0.3243028866617303}
+EPOCH ===================: 3
+  ✓ New best val_AP=0.3307, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.28492170572280884, 'val_ap': 0.330660879611969, 'test_ap': 0.3247714638710022, 'train_loss': 0.3254383294021382, 'val_loss': 0.3175930349450362, 'test_loss': 0.3177893977416189}
+EPOCH ===================: 4
+  ✓ New best val_AP=0.3787, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.32787489891052246, 'val_ap': 0.37874922156333923, 'test_ap': 0.37840408086776733, 'train_loss': 0.3089601088972653, 'val_loss': 0.2941508920569169, 'test_loss': 0.29620204473796646}
+EPOCH ===================: 5
+  ✓ New best val_AP=0.4056, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.37180396914482117, 'val_ap': 0.4055880010128021, 'test_ap': 0.4035724699497223, 'train_loss': 0.2920400321483612, 'val_loss': 0.2871623666662919, 'test_loss': 0.28972917952035604}
+EPOCH ===================: 6
+  ✓ New best val_AP=0.4277, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.4020388722419739, 'val_ap': 0.42772847414016724, 'test_ap': 0.4220840036869049, 'train_loss': 0.27994561423273645, 'val_loss': 0.27413712755629893, 'test_loss': 0.27902671851609884}
+EPOCH ===================: 7
+  ✓ New best val_AP=0.4516, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.4211624264717102, 'val_ap': 0.4516359269618988, 'test_ap': 0.4372013509273529, 'train_loss': 0.27298490931006036, 'val_loss': 0.26323888097938736, 'test_loss': 0.27058086740343196}
+EPOCH ===================: 8
+  ✓ New best val_AP=0.4531, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.43138226866722107, 'val_ap': 0.45306873321533203, 'test_ap': 0.433183491230011, 'train_loss': 0.2694003031534307, 'val_loss': 0.2677216043597774, 'test_loss': 0.27478620958955663}
+EPOCH ===================: 9
+  No improvement for 1/40 epochs (best=0.4531)
+EPOCH RESULTS: {'train_ap': 0.4465748965740204, 'val_ap': 0.4490537643432617, 'test_ap': 0.4474109709262848, 'train_loss': 0.2629627541584127, 'val_loss': 0.2699812368342751, 'test_loss': 0.2755941246685229}
+EPOCH ===================: 10
+  ✓ New best val_AP=0.4681, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.4574181139469147, 'val_ap': 0.4680688977241516, 'test_ap': 0.4547109603881836, 'train_loss': 0.2602092879659989, 'val_loss': 0.2683193299331163, 'test_loss': 0.2757974635613592}
+EPOCH ===================: 11
+  ✓ New best val_AP=0.4994, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.4681278169155121, 'val_ap': 0.499439537525177, 'test_ap': 0.4827512800693512, 'train_loss': 0.2550469466868569, 'val_loss': 0.25356392013399226, 'test_loss': 0.2614000235733233}
+EPOCH ===================: 12
+  ✓ New best val_AP=0.5143, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.4899808466434479, 'val_ap': 0.5143021941184998, 'test_ap': 0.4982423782348633, 'train_loss': 0.24976789355278015, 'val_loss': 0.24597194398704328, 'test_loss': 0.25176220269579636}
+EPOCH ===================: 13
+  ✓ New best val_AP=0.5160, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.490260511636734, 'val_ap': 0.5160214304924011, 'test_ap': 0.49760445952415466, 'train_loss': 0.24993824836085823, 'val_loss': 0.24428126843352066, 'test_loss': 0.2533107917559774}
+EPOCH ===================: 14
+  ✓ New best val_AP=0.5161, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.5040044188499451, 'val_ap': 0.5161426663398743, 'test_ap': 0.5020024180412292, 'train_loss': 0.24418928184930017, 'val_loss': 0.24486426852251353, 'test_loss': 0.2527079182235818}
+EPOCH ===================: 15
+  ✓ New best val_AP=0.5403, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.5172773599624634, 'val_ap': 0.5403231978416443, 'test_ap': 0.5141949653625488, 'train_loss': 0.24090143599930933, 'val_loss': 0.23826705860464195, 'test_loss': 0.2473936473068438}
+EPOCH ===================: 16
+  No improvement for 1/40 epochs (best=0.5403)
+EPOCH RESULTS: {'train_ap': 0.5247521996498108, 'val_ap': 0.5253612995147705, 'test_ap': 0.5079335570335388, 'train_loss': 0.2384697370669421, 'val_loss': 0.24286319629142158, 'test_loss': 0.24975780907430148}
+EPOCH ===================: 17
+  ✓ New best val_AP=0.5549, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.5345087051391602, 'val_ap': 0.55485600233078, 'test_ap': 0.5224555134773254, 'train_loss': 0.23414774870171268, 'val_loss': 0.23925130382964485, 'test_loss': 0.2451234397135283}
+EPOCH ===================: 18
+  No improvement for 1/40 epochs (best=0.5549)
+EPOCH RESULTS: {'train_ap': 0.5390899777412415, 'val_ap': 0.5471207499504089, 'test_ap': 0.5218666791915894, 'train_loss': 0.23340121595298544, 'val_loss': 0.2422866138972734, 'test_loss': 0.25120096222350474}
+EPOCH ===================: 19
+  No improvement for 2/40 epochs (best=0.5549)
+EPOCH RESULTS: {'train_ap': 0.550071656703949, 'val_ap': 0.5402159094810486, 'test_ap': 0.5149953961372375, 'train_loss': 0.23055284566739026, 'val_loss': 0.23768941509096245, 'test_loss': 0.2491103536204288}
+EPOCH ===================: 20
+  ✓ New best val_AP=0.5589, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.5573196411132812, 'val_ap': 0.558892548084259, 'test_ap': 0.5299479365348816, 'train_loss': 0.2271983223802903, 'val_loss': 0.2366863544050016, 'test_loss': 0.24643193734319588}
+EPOCH ===================: 21
+  No improvement for 1/40 epochs (best=0.5589)
+EPOCH RESULTS: {'train_ap': 0.5675727128982544, 'val_ap': 0.5538083910942078, 'test_ap': 0.5384069681167603, 'train_loss': 0.22436747217879577, 'val_loss': 0.2375319419722808, 'test_loss': 0.24256295279452675}
+EPOCH ===================: 22
+  ✓ New best val_AP=0.5667, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.5755221843719482, 'val_ap': 0.5667440891265869, 'test_ap': 0.5551202893257141, 'train_loss': 0.2213911268640967, 'val_loss': 0.23216795529189863, 'test_loss': 0.24011053929203435}
+EPOCH ===================: 23
+  No improvement for 1/40 epochs (best=0.5667)
+EPOCH RESULTS: {'train_ap': 0.5756978988647461, 'val_ap': 0.5566412210464478, 'test_ap': 0.5447413325309753, 'train_loss': 0.22142624399241279, 'val_loss': 0.24333101275720095, 'test_loss': 0.25080736138318716}
+EPOCH ===================: 24
+  ✓ New best val_AP=0.5708, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.5837092995643616, 'val_ap': 0.5708266496658325, 'test_ap': 0.5431157946586609, 'train_loss': 0.21803791540510514, 'val_loss': 0.23433700125468404, 'test_loss': 0.24468194418831876}
+EPOCH ===================: 25
+  No improvement for 1/40 epochs (best=0.5708)
+EPOCH RESULTS: {'train_ap': 0.586982250213623, 'val_ap': 0.5567198395729065, 'test_ap': 0.5419213175773621, 'train_loss': 0.21717403197989743, 'val_loss': 0.2383807748556137, 'test_loss': 0.24661228452858172}
+EPOCH ===================: 26
+  ✓ New best val_AP=0.5764, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.599934995174408, 'val_ap': 0.5764037370681763, 'test_ap': 0.558387279510498, 'train_loss': 0.21301385234383977, 'val_loss': 0.23045994184519114, 'test_loss': 0.2385733935393785}
+EPOCH ===================: 27
+  No improvement for 1/40 epochs (best=0.5764)
+EPOCH RESULTS: {'train_ap': 0.6080743670463562, 'val_ap': 0.5727295279502869, 'test_ap': 0.5542446374893188, 'train_loss': 0.21181464493274688, 'val_loss': 0.232150441721866, 'test_loss': 0.23957183094401108}
+EPOCH ===================: 28
+  No improvement for 2/40 epochs (best=0.5764)
+EPOCH RESULTS: {'train_ap': 0.6151823401451111, 'val_ap': 0.5745348334312439, 'test_ap': 0.5528079271316528, 'train_loss': 0.20922247294117421, 'val_loss': 0.2392514606839732, 'test_loss': 0.24721324208535647}
+EPOCH ===================: 29
+  No improvement for 3/40 epochs (best=0.5764)
+EPOCH RESULTS: {'train_ap': 0.6201533675193787, 'val_ap': 0.5746194124221802, 'test_ap': 0.5628644824028015, 'train_loss': 0.20760581528439243, 'val_loss': 0.23084326480564318, 'test_loss': 0.23940284550189972}
+EPOCH ===================: 30
+  ✓ New best val_AP=0.5832, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.618336021900177, 'val_ap': 0.5832124352455139, 'test_ap': 0.5585393309593201, 'train_loss': 0.20759486275560715, 'val_loss': 0.23782288322323247, 'test_loss': 0.24658655179174324}
+EPOCH ===================: 31
+  ✓ New best val_AP=0.5895, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.6260923743247986, 'val_ap': 0.5895432829856873, 'test_ap': 0.5653917789459229, 'train_loss': 0.20616698650752796, 'val_loss': 0.22923623339125984, 'test_loss': 0.23769332860645495}
+EPOCH ===================: 32
+  No improvement for 1/40 epochs (best=0.5895)
+EPOCH RESULTS: {'train_ap': 0.6343216300010681, 'val_ap': 0.5885598063468933, 'test_ap': 0.5598805546760559, 'train_loss': 0.20292283016092638, 'val_loss': 0.23367230280449516, 'test_loss': 0.24350081384181976}
+EPOCH ===================: 33
+  ✓ New best val_AP=0.5916, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.6399610638618469, 'val_ap': 0.5915502905845642, 'test_ap': 0.5716325044631958, 'train_loss': 0.19973194879644057, 'val_loss': 0.2288473068099273, 'test_loss': 0.23900850744623886}
+EPOCH ===================: 34
+  No improvement for 1/40 epochs (best=0.5916)
+EPOCH RESULTS: {'train_ap': 0.6444644331932068, 'val_ap': 0.5840134024620056, 'test_ap': 0.5743510127067566, 'train_loss': 0.19801172561505262, 'val_loss': 0.2278965092019031, 'test_loss': 0.2374685171403383}
+EPOCH ===================: 35
+  ✓ New best val_AP=0.5960, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.6496331095695496, 'val_ap': 0.5959562659263611, 'test_ap': 0.573529839515686, 'train_loss': 0.1959235436776105, 'val_loss': 0.2301259895688609, 'test_loss': 0.24054540458478427}
+EPOCH ===================: 36
+  No improvement for 1/40 epochs (best=0.5960)
+EPOCH RESULTS: {'train_ap': 0.6602468490600586, 'val_ap': 0.5956910252571106, 'test_ap': 0.5701443552970886, 'train_loss': 0.19274607511127698, 'val_loss': 0.23094838622369265, 'test_loss': 0.24389564206725672}
+EPOCH ===================: 37
+  No improvement for 2/40 epochs (best=0.5960)
+EPOCH RESULTS: {'train_ap': 0.6613790988922119, 'val_ap': 0.589525043964386, 'test_ap': 0.5703020095825195, 'train_loss': 0.1936810577616972, 'val_loss': 0.23245376191641154, 'test_loss': 0.24370708355778142}
+EPOCH ===================: 38
+  ✓ New best val_AP=0.6013, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.6680701375007629, 'val_ap': 0.601270854473114, 'test_ap': 0.5709152221679688, 'train_loss': 0.19031325806589688, 'val_loss': 0.23141132844121834, 'test_loss': 0.24793845650396848}
+EPOCH ===================: 39
+  No improvement for 1/40 epochs (best=0.6013)
+EPOCH RESULTS: {'train_ap': 0.6677247285842896, 'val_ap': 0.5996127128601074, 'test_ap': 0.5747373104095459, 'train_loss': 0.1899145359502119, 'val_loss': 0.22626171143431412, 'test_loss': 0.24028041252964422}
+EPOCH ===================: 40
+  No improvement for 2/40 epochs (best=0.6013)
+EPOCH RESULTS: {'train_ap': 0.676205575466156, 'val_ap': 0.5995513796806335, 'test_ap': 0.5745768547058105, 'train_loss': 0.1879866286235697, 'val_loss': 0.23053361789176338, 'test_loss': 0.2411679766680065}
+EPOCH ===================: 41
+  ✓ New best val_AP=0.6074, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.6861790418624878, 'val_ap': 0.6074199080467224, 'test_ap': 0.5815191268920898, 'train_loss': 0.18381490128881792, 'val_loss': 0.2227800339460373, 'test_loss': 0.23957177918208272}
+EPOCH ===================: 42
+  No improvement for 1/40 epochs (best=0.6074)
+EPOCH RESULTS: {'train_ap': 0.6857567429542542, 'val_ap': 0.5981723070144653, 'test_ap': 0.5697996020317078, 'train_loss': 0.18390467184431414, 'val_loss': 0.24019791734846016, 'test_loss': 0.25263012004526036}
+EPOCH ===================: 43
+  No improvement for 2/40 epochs (best=0.6074)
+EPOCH RESULTS: {'train_ap': 0.6843447685241699, 'val_ap': 0.5980573892593384, 'test_ap': 0.5752529501914978, 'train_loss': 0.18342778893078074, 'val_loss': 0.23204500188952998, 'test_loss': 0.24347801114383497}
+EPOCH ===================: 44
+  No improvement for 3/40 epochs (best=0.6074)
+EPOCH RESULTS: {'train_ap': 0.6923402547836304, 'val_ap': 0.60186368227005, 'test_ap': 0.5687656998634338, 'train_loss': 0.17974106827202965, 'val_loss': 0.23854289713658786, 'test_loss': 0.25698827442369965}
+EPOCH ===================: 45
+  No improvement for 4/40 epochs (best=0.6074)
+EPOCH RESULTS: {'train_ap': 0.7012267708778381, 'val_ap': 0.5871372818946838, 'test_ap': 0.5758450627326965, 'train_loss': 0.1770267739015467, 'val_loss': 0.24090291089133212, 'test_loss': 0.25324649638251256}
+EPOCH ===================: 46
+  ✓ New best val_AP=0.6081, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.7067613005638123, 'val_ap': 0.6081461310386658, 'test_ap': 0.5783033967018127, 'train_loss': 0.17538274701903847, 'val_loss': 0.2345069568408163, 'test_loss': 0.2506283396168759}
+EPOCH ===================: 47
+  No improvement for 1/40 epochs (best=0.6081)
+EPOCH RESULTS: {'train_ap': 0.7081112265586853, 'val_ap': 0.5972387194633484, 'test_ap': 0.5696782469749451, 'train_loss': 0.17419934062396777, 'val_loss': 0.2481890995251505, 'test_loss': 0.26827087057264226}
+EPOCH ===================: 48
+  ✓ New best val_AP=0.6093, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.7085906267166138, 'val_ap': 0.6092570424079895, 'test_ap': 0.5876681208610535, 'train_loss': 0.17412457097979153, 'val_loss': 0.22844174974843076, 'test_loss': 0.24520063949258705}
+EPOCH ===================: 49
+  No improvement for 1/40 epochs (best=0.6093)
+EPOCH RESULTS: {'train_ap': 0.7226407527923584, 'val_ap': 0.602938175201416, 'test_ap': 0.5803629755973816, 'train_loss': 0.17018430443371044, 'val_loss': 0.22965238831545176, 'test_loss': 0.24716982245445251}
+EPOCH ===================: 50
+  No improvement for 2/40 epochs (best=0.6093)
+EPOCH RESULTS: {'train_ap': 0.7250338196754456, 'val_ap': 0.60710209608078, 'test_ap': 0.5923721790313721, 'train_loss': 0.16777658374870524, 'val_loss': 0.23502161157758614, 'test_loss': 0.24935217201709747}
+EPOCH ===================: 51
+  ✓ New best val_AP=0.6153, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.7278537154197693, 'val_ap': 0.6153185963630676, 'test_ap': 0.587234616279602, 'train_loss': 0.16890084322761087, 'val_loss': 0.23435758524819425, 'test_loss': 0.25175648692407104}
+EPOCH ===================: 52
+  No improvement for 1/40 epochs (best=0.6153)
+EPOCH RESULTS: {'train_ap': 0.7283318042755127, 'val_ap': 0.605390727519989, 'test_ap': 0.5886271595954895, 'train_loss': 0.1675438660909148, 'val_loss': 0.23884960146326767, 'test_loss': 0.254729068592975}
+EPOCH ===================: 53
+  No improvement for 2/40 epochs (best=0.6153)
+EPOCH RESULTS: {'train_ap': 0.7371665239334106, 'val_ap': 0.6120865345001221, 'test_ap': 0.5928123593330383, 'train_loss': 0.16268127998884988, 'val_loss': 0.23323079237812444, 'test_loss': 0.24648950288170263}
+EPOCH ===================: 54
+  No improvement for 3/40 epochs (best=0.6153)
+EPOCH RESULTS: {'train_ap': 0.744619607925415, 'val_ap': 0.6109380722045898, 'test_ap': 0.5996900796890259, 'train_loss': 0.16157517678597394, 'val_loss': 0.23618782586173007, 'test_loss': 0.2531300877269946}
+EPOCH ===================: 55
+  No improvement for 4/40 epochs (best=0.6153)
+EPOCH RESULTS: {'train_ap': 0.7474550604820251, 'val_ap': 0.6149216294288635, 'test_ap': 0.59344083070755, 'train_loss': 0.15987703396993524, 'val_loss': 0.24085487111618645, 'test_loss': 0.25600335001945496}
+EPOCH ===================: 56
+  ✓ New best val_AP=0.6210, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.7481751441955566, 'val_ap': 0.620952308177948, 'test_ap': 0.5962899327278137, 'train_loss': 0.1598898033008856, 'val_loss': 0.23073265976027438, 'test_loss': 0.25098486950522975}
+EPOCH ===================: 57
+  No improvement for 1/40 epochs (best=0.6210)
+EPOCH RESULTS: {'train_ap': 0.7554888129234314, 'val_ap': 0.6073283553123474, 'test_ap': 0.5869770646095276, 'train_loss': 0.1565749777590527, 'val_loss': 0.24042230922924845, 'test_loss': 0.2563901622044413}
+EPOCH ===================: 58
+  ✓ New best val_AP=0.6221, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.761847972869873, 'val_ap': 0.6220839619636536, 'test_ap': 0.600537896156311, 'train_loss': 0.1538636928972076, 'val_loss': 0.23907209697522616, 'test_loss': 0.2592637836933136}
+EPOCH ===================: 59
+  No improvement for 1/40 epochs (best=0.6221)
+EPOCH RESULTS: {'train_ap': 0.7612543106079102, 'val_ap': 0.6015388369560242, 'test_ap': 0.5800566673278809, 'train_loss': 0.15434125740738475, 'val_loss': 0.25155698625664963, 'test_loss': 0.27243274764010783}
+EPOCH ===================: 60
+  No improvement for 2/40 epochs (best=0.6221)
+EPOCH RESULTS: {'train_ap': 0.7653142809867859, 'val_ap': 0.6073030829429626, 'test_ap': 0.5802984833717346, 'train_loss': 0.1529417896971983, 'val_loss': 0.24729606038645693, 'test_loss': 0.2711859149368186}
+EPOCH ===================: 61
+  No improvement for 3/40 epochs (best=0.6221)
+EPOCH RESULTS: {'train_ap': 0.7715770602226257, 'val_ap': 0.6153231859207153, 'test_ap': 0.5914546251296997, 'train_loss': 0.15052002905046238, 'val_loss': 0.24168238043785095, 'test_loss': 0.26368012396912827}
+EPOCH ===================: 62
+  No improvement for 4/40 epochs (best=0.6221)
+EPOCH RESULTS: {'train_ap': 0.7733850479125977, 'val_ap': 0.6117323637008667, 'test_ap': 0.5907815098762512, 'train_loss': 0.14870630020604414, 'val_loss': 0.2403680776294909, 'test_loss': 0.2626932780993612}
+EPOCH ===================: 63
+  No improvement for 5/40 epochs (best=0.6221)
+EPOCH RESULTS: {'train_ap': 0.7803066968917847, 'val_ap': 0.6037085652351379, 'test_ap': 0.5846638083457947, 'train_loss': 0.14878408102428212, 'val_loss': 0.24938357425363442, 'test_loss': 0.2706954659600007}
+EPOCH ===================: 64
+  No improvement for 6/40 epochs (best=0.6221)
+EPOCH RESULTS: {'train_ap': 0.7825716137886047, 'val_ap': 0.6129867434501648, 'test_ap': 0.6008374691009521, 'train_loss': 0.14724286549231586, 'val_loss': 0.26152871862838145, 'test_loss': 0.27815845451856913}
+EPOCH ===================: 65
+  No improvement for 7/40 epochs (best=0.6221)
+EPOCH RESULTS: {'train_ap': 0.7866697311401367, 'val_ap': 0.6052212715148926, 'test_ap': 0.5897374153137207, 'train_loss': 0.14505707674166735, 'val_loss': 0.2677314132452011, 'test_loss': 0.281447349410308}
+EPOCH ===================: 66
+  No improvement for 8/40 epochs (best=0.6221)
+EPOCH RESULTS: {'train_ap': 0.7869750261306763, 'val_ap': 0.6016496419906616, 'test_ap': 0.5892615914344788, 'train_loss': 0.1444283541511087, 'val_loss': 0.2583896721664228, 'test_loss': 0.2817257870184748}
+EPOCH ===================: 67
+  No improvement for 9/40 epochs (best=0.6221)
+EPOCH RESULTS: {'train_ap': 0.7955067157745361, 'val_ap': 0.5993579030036926, 'test_ap': 0.592007577419281, 'train_loss': 0.14117438135778201, 'val_loss': 0.2776675851721513, 'test_loss': 0.29029588715026255}
+EPOCH ===================: 68
+  No improvement for 10/40 epochs (best=0.6221)
+EPOCH RESULTS: {'train_ap': 0.7982667088508606, 'val_ap': 0.6180415153503418, 'test_ap': 0.6002259254455566, 'train_loss': 0.13841350543148379, 'val_loss': 0.2528521222503562, 'test_loss': 0.2711466621411474}
+EPOCH ===================: 69
+  No improvement for 11/40 epochs (best=0.6221)
+EPOCH RESULTS: {'train_ap': 0.7969169020652771, 'val_ap': 0.6178833842277527, 'test_ap': 0.6082075238227844, 'train_loss': 0.13808732225614437, 'val_loss': 0.2651912687640441, 'test_loss': 0.2826248054441653}
+EPOCH ===================: 70
+  ✓ New best val_AP=0.6278, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.833696186542511, 'val_ap': 0.6277787089347839, 'test_ap': 0.6103318333625793, 'train_loss': 0.12433080024578992, 'val_loss': 0.2635887547543174, 'test_loss': 0.2813116664949216}
+EPOCH ===================: 71
+  ✓ New best val_AP=0.6286, saved to checkpoints_vanilla_func_best/best_model.pt
+EPOCH RESULTS: {'train_ap': 0.8454548120498657, 'val_ap': 0.628644585609436, 'test_ap': 0.6112887859344482, 'train_loss': 0.1182821999577915, 'val_loss': 0.2667691668397502, 'test_loss': 0.29038143942230626}
+EPOCH ===================: 72
+  No improvement for 1/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8495370745658875, 'val_ap': 0.6271615624427795, 'test_ap': 0.6101890802383423, 'train_loss': 0.11678292540942921, 'val_loss': 0.2697537988424301, 'test_loss': 0.29129362184750407}
+EPOCH ===================: 73
+  No improvement for 2/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8507561087608337, 'val_ap': 0.6258975863456726, 'test_ap': 0.6076774001121521, 'train_loss': 0.11626497033764334, 'val_loss': 0.2648359858676007, 'test_loss': 0.2896166145801544}
+EPOCH ===================: 74
+  No improvement for 3/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8566446304321289, 'val_ap': 0.6150850653648376, 'test_ap': 0.6110885143280029, 'train_loss': 0.11372779975919163, 'val_loss': 0.2781868890712136, 'test_loss': 0.2962170086408916}
+EPOCH ===================: 75
+  No improvement for 4/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8598350882530212, 'val_ap': 0.6205602884292603, 'test_ap': 0.6076772809028625, 'train_loss': 0.11256736253990847, 'val_loss': 0.27622663582626145, 'test_loss': 0.3042956308314675}
+EPOCH ===================: 76
+  No improvement for 5/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.859963059425354, 'val_ap': 0.611549437046051, 'test_ap': 0.5915016531944275, 'train_loss': 0.11223275608876172, 'val_loss': 0.2955023999276914, 'test_loss': 0.32246696321587814}
+EPOCH ===================: 77
+  No improvement for 6/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8623396158218384, 'val_ap': 0.6207589507102966, 'test_ap': 0.5983190536499023, 'train_loss': 0.11070599512142294, 'val_loss': 0.2908921155490373, 'test_loss': 0.3171268779980509}
+EPOCH ===================: 78
+  No improvement for 7/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.867275059223175, 'val_ap': 0.6130446791648865, 'test_ap': 0.6057682037353516, 'train_loss': 0.1084455643506611, 'val_loss': 0.2860069533711986, 'test_loss': 0.30553004773039566}
+EPOCH ===================: 79
+  No improvement for 8/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8686025738716125, 'val_ap': 0.6139344573020935, 'test_ap': 0.6022688746452332, 'train_loss': 0.1070560542976155, 'val_loss': 0.29630208407577713, 'test_loss': 0.32401749021128606}
+EPOCH ===================: 80
+  No improvement for 9/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8687405586242676, 'val_ap': 0.6174632906913757, 'test_ap': 0.6049851179122925, 'train_loss': 0.10702319180264193, 'val_loss': 0.298151170736865, 'test_loss': 0.3218054936120385}
+EPOCH ===================: 81
+  No improvement for 10/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8743147850036621, 'val_ap': 0.6089751720428467, 'test_ap': 0.5992252230644226, 'train_loss': 0.10528579669840196, 'val_loss': 0.3055127906171899, 'test_loss': 0.33432274272567347}
+EPOCH ===================: 82
+  No improvement for 11/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8732200860977173, 'val_ap': 0.6193903088569641, 'test_ap': 0.5965076684951782, 'train_loss': 0.10358657337286893, 'val_loss': 0.2991576257504915, 'test_loss': 0.32634808436820384}
+EPOCH ===================: 83
+  No improvement for 12/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8882189989089966, 'val_ap': 0.6207494139671326, 'test_ap': 0.604543924331665, 'train_loss': 0.09740057762931376, 'val_loss': 0.29377301664728867, 'test_loss': 0.3246804350300839}
+EPOCH ===================: 84
+  No improvement for 13/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8938976526260376, 'val_ap': 0.6200548410415649, 'test_ap': 0.6071538329124451, 'train_loss': 0.09366988899076686, 'val_loss': 0.3064306511690742, 'test_loss': 0.33727979424752685}
+EPOCH ===================: 85
+  No improvement for 14/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8966477513313293, 'val_ap': 0.6228596568107605, 'test_ap': 0.6102291941642761, 'train_loss': 0.09336766955607077, 'val_loss': 0.31071756623293223, 'test_loss': 0.3383988824329878}
+EPOCH ===================: 86
+  No improvement for 15/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.8977822661399841, 'val_ap': 0.6250521540641785, 'test_ap': 0.608785092830658, 'train_loss': 0.09199407223392936, 'val_loss': 0.30873419265998037, 'test_loss': 0.33655815767614466}
+EPOCH ===================: 87
+  No improvement for 16/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9026870727539062, 'val_ap': 0.6191571950912476, 'test_ap': 0.6060259938240051, 'train_loss': 0.09075423303772422, 'val_loss': 0.3144213384703586, 'test_loss': 0.3432833795484744}
+EPOCH ===================: 88
+  No improvement for 17/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9014616012573242, 'val_ap': 0.6199671626091003, 'test_ap': 0.6063824892044067, 'train_loss': 0.09007539902539814, 'val_loss': 0.31327904447128896, 'test_loss': 0.3410614030925851}
+EPOCH ===================: 89
+  No improvement for 18/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9011344313621521, 'val_ap': 0.6240231394767761, 'test_ap': 0.6076090931892395, 'train_loss': 0.08951933199868482, 'val_loss': 0.31417238006466314, 'test_loss': 0.344927150167917}
+EPOCH ===================: 90
+  No improvement for 19/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9036750197410583, 'val_ap': 0.6186407804489136, 'test_ap': 0.6035389304161072, 'train_loss': 0.0892438729896265, 'val_loss': 0.32189910113811493, 'test_loss': 0.3542380685869016}
+EPOCH ===================: 91
+  No improvement for 20/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.906619668006897, 'val_ap': 0.6176120638847351, 'test_ap': 0.6097613573074341, 'train_loss': 0.08757201994166655, 'val_loss': 0.322378756184327, 'test_loss': 0.3494148026955755}
+EPOCH ===================: 92
+  No improvement for 21/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9058861136436462, 'val_ap': 0.620019257068634, 'test_ap': 0.609227180480957, 'train_loss': 0.08646794312140521, 'val_loss': 0.32753870597011164, 'test_loss': 0.3537774101683968}
+EPOCH ===================: 93
+  No improvement for 22/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9072931408882141, 'val_ap': 0.6207466125488281, 'test_ap': 0.6074000597000122, 'train_loss': 0.08719479178681093, 'val_loss': 0.3283041935218008, 'test_loss': 0.3583961717392269}
+EPOCH ===================: 94
+  No improvement for 23/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9170822501182556, 'val_ap': 0.6163732409477234, 'test_ap': 0.6104273200035095, 'train_loss': 0.08271998110062936, 'val_loss': 0.3323388303581037, 'test_loss': 0.3607281760165566}
+EPOCH ===================: 95
+  No improvement for 24/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9146062731742859, 'val_ap': 0.6197460293769836, 'test_ap': 0.6091858148574829, 'train_loss': 0.08186145196942722, 'val_loss': 0.3349587980069612, 'test_loss': 0.3636440305333388}
+EPOCH ===================: 96
+  No improvement for 25/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9155837893486023, 'val_ap': 0.6158108115196228, 'test_ap': 0.6094352602958679, 'train_loss': 0.08099310775013531, 'val_loss': 0.341808682209567, 'test_loss': 0.37065669580509786}
+EPOCH ===================: 97
+  No improvement for 26/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9165884256362915, 'val_ap': 0.6134792566299438, 'test_ap': 0.6059377789497375, 'train_loss': 0.08082593074616264, 'val_loss': 0.3377102997742201, 'test_loss': 0.36343144115648773}
+EPOCH ===================: 98
+  No improvement for 27/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9178468585014343, 'val_ap': 0.6147322058677673, 'test_ap': 0.606194257736206, 'train_loss': 0.08055142808486433, 'val_loss': 0.3445401215239575, 'test_loss': 0.37329702314577606}
+EPOCH ===================: 99
+  No improvement for 28/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9210411310195923, 'val_ap': 0.6139408946037292, 'test_ap': 0.6042513251304626, 'train_loss': 0.07917572124039425, 'val_loss': 0.3447264628975015, 'test_loss': 0.3746086782530734}
+EPOCH ===================: 100
+  No improvement for 29/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9220679402351379, 'val_ap': 0.6110310554504395, 'test_ap': 0.609088122844696, 'train_loss': 0.07837257678894435, 'val_loss': 0.346924616318, 'test_loss': 0.3741359867547688}
+EPOCH ===================: 101
+  No improvement for 30/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9228353500366211, 'val_ap': 0.6159588694572449, 'test_ap': 0.6063814163208008, 'train_loss': 0.07768194430014666, 'val_loss': 0.34151564303197357, 'test_loss': 0.3712125169603448}
+EPOCH ===================: 102
+  No improvement for 31/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9197561144828796, 'val_ap': 0.6155715584754944, 'test_ap': 0.6045144200325012, 'train_loss': 0.07763367076130474, 'val_loss': 0.3485643149990785, 'test_loss': 0.3769053110950871}
+EPOCH ===================: 103
+  No improvement for 32/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9215189218521118, 'val_ap': 0.6131507754325867, 'test_ap': 0.6034302115440369, 'train_loss': 0.07704801318400047, 'val_loss': 0.34165469047270325, 'test_loss': 0.3705223783066398}
+EPOCH ===================: 104
+  No improvement for 33/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9254508018493652, 'val_ap': 0.6151047945022583, 'test_ap': 0.6054778695106506, 'train_loss': 0.07714896723628044, 'val_loss': 0.3483631759881973, 'test_loss': 0.3806144453977284}
+EPOCH ===================: 105
+  No improvement for 34/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9267191290855408, 'val_ap': 0.6158232688903809, 'test_ap': 0.6065983176231384, 'train_loss': 0.07464429661631584, 'val_loss': 0.3522784482491644, 'test_loss': 0.3841225426448019}
+EPOCH ===================: 106
+  No improvement for 35/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9257509112358093, 'val_ap': 0.6164564490318298, 'test_ap': 0.6068457961082458, 'train_loss': 0.0751429545967018, 'val_loss': 0.3491536214163429, 'test_loss': 0.3811200010149102}
+EPOCH ===================: 107
+  No improvement for 36/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9294397234916687, 'val_ap': 0.6150960326194763, 'test_ap': 0.6076397895812988, 'train_loss': 0.07359310445540092, 'val_loss': 0.35512767418434743, 'test_loss': 0.3869980840306533}
+EPOCH ===================: 108
+  No improvement for 37/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9285728335380554, 'val_ap': 0.6150496602058411, 'test_ap': 0.6100063323974609, 'train_loss': 0.07414570972323417, 'val_loss': 0.34839022865420893, 'test_loss': 0.37849564301340205}
+EPOCH ===================: 109
+  No improvement for 38/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.9281507730484009, 'val_ap': 0.6142078638076782, 'test_ap': 0.6090980172157288, 'train_loss': 0.07351308679755997, 'val_loss': 0.3571996249650654, 'test_loss': 0.3878252270974611}
+EPOCH ===================: 110
+  No improvement for 39/40 epochs (best=0.6286)
+EPOCH RESULTS: {'train_ap': 0.931277871131897, 'val_ap': 0.6169143319129944, 'test_ap': 0.607500433921814, 'train_loss': 0.07300797043477787, 'val_loss': 0.356639636190314, 'test_loss': 0.38867205224539103}
+EPOCH ===================: 111
+  No improvement for 40/40 epochs (best=0.6286)
+Early stopping at epoch 111.
+
+Training complete. Best val_AP = 0.6286
