@@ -198,34 +198,30 @@ class PeptideGraphormerCollator:
 # ------------------------------------------------------------------ #
 
 class GraphormerPeptideDataset(torch.utils.data.Dataset):
-    """Wraps a PyG LRGBDataset and applies Graphormer preprocessing on-the-fly.
+    """Wraps a PyG LRGBDataset and applies Graphormer preprocessing lazily.
 
-    Each item goes through ``preprocess_item`` (Floyd-Warshall shortest
-    paths, edge input construction) and is returned as a dict consumable
-    by ``GraphormerDataCollator``.
+    ``preprocess_item`` (Floyd-Warshall + gen_edge_input) creates dense
+    ``input_edges`` arrays of shape ``(N, N, diameter, edge_feats)``
+    — roughly **10 MB per graph** for Peptides (N≈150, diameter≈20).
+    Storing all ~15K training graphs at once would consume **150+ GB**.
+
+    Instead, this dataset stores only the lightweight PyG graphs and
+    runs ``preprocess_item`` lazily inside ``__getitem__``.
+    Floyd-Warshall on N≈150 finishes in < 1 ms with the Cython backend,
+    so the per-access overhead is negligible.
     """
 
     def __init__(self, pyg_dataset, config, split="train"):
         self.pyg_dataset = pyg_dataset
         self.config = config
         self.split = split
-        # Pre-process all items upfront to avoid Cython overhead in
-        # DataLoader workers (the preprocessing is deterministic for
-        # non-augmented splits).
-        # Disable the single-graph CACHED global in collating_graphormer —
-        # that cache was designed for node-level tasks with one graph and
-        # would make every Peptides graph return the same first result.
-        import graphormer_hf.collating_graphormer as _cg
-        _cg.CACHED = None
 
-        self.items = []
+        # Pre-convert PyG Data objects to lightweight dicts (only the
+        # raw arrays that preprocess_item expects).  These are tiny
+        # compared to the preprocessed output.
+        self.raw_items = []
         for i in range(len(pyg_dataset)):
-            _cg.CACHED = None  # reset per-graph
-            g = pyg_dataset[i]
-            item = self._graph_to_dict(g)
-            processed = preprocess_item(item, config=self.config,
-                                        keep_features=True, split=self.split)
-            self.items.append(processed)
+            self.raw_items.append(self._graph_to_dict(pyg_dataset[i]))
 
     @staticmethod
     def _graph_to_dict(g):
@@ -242,7 +238,6 @@ class GraphormerPeptideDataset(torch.utils.data.Dataset):
         else:
             n_edges = d["edge_index"].shape[1]
             d["edge_attr"] = np.ones((n_edges, 1), dtype=np.int64)
-        # Labels
         y = g.y
         if isinstance(y, torch.Tensor):
             y = y.numpy()
@@ -251,10 +246,18 @@ class GraphormerPeptideDataset(torch.utils.data.Dataset):
         return d
 
     def __len__(self):
-        return len(self.items)
+        return len(self.raw_items)
 
     def __getitem__(self, idx):
-        return self.items[idx]
+        import copy
+        import graphormer_hf.collating_graphormer as _cg
+        # Reset the single-graph cache that preprocess_item uses — it was
+        # designed for node-level tasks with one graph and would otherwise
+        # return the same cached first graph for every index.
+        _cg.CACHED = None
+        item = copy.deepcopy(self.raw_items[idx])
+        return preprocess_item(
+            item, config=self.config, keep_features=True, split=self.split)
 
 
 # ------------------------------------------------------------------ #
@@ -464,8 +467,8 @@ def main():
     val_ds = LRGBDataset(root="./data", name=args.dataset, split="val")
     test_ds = LRGBDataset(root="./data", name=args.dataset, split="test")
 
-    # Wrap with Graphormer preprocessing
-    print("Preprocessing graphs (Floyd-Warshall + edge encoding)...", flush=True)
+    # Wrap with Graphormer preprocessing (lazy — Floyd-Warshall runs per-batch)
+    print("Wrapping datasets for lazy Graphormer preprocessing...", flush=True)
     train_processed = GraphormerPeptideDataset(train_ds, config, split="train")
     val_processed = GraphormerPeptideDataset(val_ds, config, split="val")
     test_processed = GraphormerPeptideDataset(test_ds, config, split="test")

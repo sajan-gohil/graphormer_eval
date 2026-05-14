@@ -163,6 +163,83 @@ def build_head_hop_sets(
 
 
 # ---------------------------------------------------------------------------
+# Block-diagonal linear: per-head projection with no cross-head mixing.
+# ---------------------------------------------------------------------------
+class BlockDiagLinear(nn.Module):
+    """Block-diagonal linear: each head's Dh-dim slice is projected
+    independently. Equivalent to H parallel (Dh -> Dh) Linears, stored
+    as a single (H, Dh, Dh) weight tensor for batched einsum.
+
+    Preserves per-head identity end-to-end through the output projection,
+    so the dedicated cross-hop mixer is the only place where hop channels
+    interact.
+    """
+
+    def __init__(self, num_heads: int, head_dim: int):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.weight = nn.Parameter(torch.empty(num_heads, head_dim, head_dim))
+        self.bias = nn.Parameter(torch.zeros(num_heads, head_dim))
+        for h in range(num_heads):
+            nn.init.kaiming_uniform_(self.weight[h], a=math.sqrt(5))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, N, d = x.shape
+        H, Dh = self.num_heads, self.head_dim
+        x = x.view(B, N, H, Dh)
+        out = torch.einsum("bnhd,hde->bnhe", x, self.weight) + self.bias
+        return out.reshape(B, N, d)
+
+
+# ---------------------------------------------------------------------------
+# Dynamic cross-hop mixer: self-attention along the hop axis.
+# ---------------------------------------------------------------------------
+class DynamicCrossHopMixer(nn.Module):
+    """Per-node attention across the H hop-tagged slabs.
+
+    For each node v, treat its H head-outputs as a length-H sequence
+    (each of dim Dh) and run single-head self-attention over them.
+    The Q/K/V projections make the mixing *dynamic* (input-dependent)
+    rather than a static learned matrix — different nodes produce
+    different hop-mixing weights.
+
+    Cost: O(B * N * H² * Dh) — negligible since H is small (e.g. 8).
+    """
+
+    def __init__(self, num_heads: int, head_dim: int, dropout: float = 0.0):
+        super().__init__()
+        self.H = num_heads
+        self.Dh = head_dim
+        self.q = nn.Linear(head_dim, head_dim)
+        self.k = nn.Linear(head_dim, head_dim)
+        self.v = nn.Linear(head_dim, head_dim)
+        self.out = nn.Linear(head_dim, head_dim)
+        self.drop = nn.Dropout(dropout)
+        self.scale = head_dim ** -0.5
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, N, H*Dh) -> (B, N, H*Dh) with dynamic cross-hop mixing."""
+        B, N, d = x.shape
+        x = x.view(B, N, self.H, self.Dh)          # (B, N, H, Dh)
+
+        q = self.q(x)  # (B, N, H, Dh)
+        k = self.k(x)
+        v = self.v(x)
+
+        # Attention along the H (hop) axis for each (batch, node) pair.
+        # attn: (B, N, H_query, H_key)
+        attn = torch.einsum('bnhd,bnkd->bnhk', q, k) * self.scale
+        attn = F.softmax(attn, dim=-1)
+        attn = self.drop(attn)
+
+        # Mix: (B, N, H, H) @ (B, N, H, Dh) -> (B, N, H, Dh)
+        out = torch.einsum('bnhk,bnkd->bnhd', attn, v)
+        out = self.out(out)
+        return out.reshape(B, N, d)
+
+
+# ---------------------------------------------------------------------------
 # Hop-masked multi-head attention.
 # ---------------------------------------------------------------------------
 class HopMaskedMHA(nn.Module):
@@ -171,9 +248,16 @@ class HopMaskedMHA(nn.Module):
     Each head h is restricted to attend to (v, u) pairs whose shortest-path
     distance lies in the head's hop set. Heads whose hop set is "None" in
     the per-head mask receive all-ones masking (free global attention).
+
+    Args:
+        block_diag_out: if True, use a block-diagonal output projection
+            (one (Dh, Dh) block per head) so heads are not mixed in
+            out_proj. This preserves per-head/per-hop identity; the
+            dynamic cross-hop mixer sublayer handles mixing instead.
     """
 
-    def __init__(self, hidden_dim: int, num_heads: int, dropout: float = 0.0):
+    def __init__(self, hidden_dim: int, num_heads: int, dropout: float = 0.0,
+                 block_diag_out: bool = False):
         super().__init__()
         if hidden_dim % num_heads != 0:
             raise ValueError(
@@ -182,10 +266,14 @@ class HopMaskedMHA(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
+        self.block_diag_out = block_diag_out
         self.q_proj = nn.Linear(hidden_dim, hidden_dim)
         self.k_proj = nn.Linear(hidden_dim, hidden_dim)
         self.v_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.out_proj = nn.Linear(hidden_dim, hidden_dim)
+        if block_diag_out:
+            self.out_proj = BlockDiagLinear(num_heads, self.head_dim)
+        else:
+            self.out_proj = nn.Linear(hidden_dim, hidden_dim)
         self.attn_drop = nn.Dropout(dropout)
 
     def forward(
@@ -220,24 +308,59 @@ class HopMaskedMHA(nn.Module):
 
         out = torch.matmul(attn, v)                       # (B, H, N, Dh)
         out = out.transpose(1, 2).reshape(B, N, d)        # (B, N, d)
-        return out + self.out_proj(out)
+        return self.out_proj(out)
 
 
 # ---------------------------------------------------------------------------
 # Pre-norm transformer encoder layer with hop-masked self-attention.
 # ---------------------------------------------------------------------------
 class HopMaskedTransformerLayer(nn.Module):
+    """Pre-norm encoder layer.
+
+    Sublayer order with default flags:
+        x = x + attn(norm1(x))
+        x = x + ffn(norm2(x))
+
+    With ``dynamic_cross_hop=True`` an extra sublayer is inserted between
+    attention and FFN:
+        x = x + attn(norm1(x))
+        x = x + cross_hop_attn(norm_ch(x))   # dynamic mixing across H hop slabs
+        x = x + ffn(norm2(x))                # pointwise channel mixer
+
+    Pairing ``block_diag_out=True`` (no cross-head mixing inside attention)
+    with ``dynamic_cross_hop=True`` gives a clean separation: attention is
+    the "within-hop" mixer, the cross-hop attention is the "across-hop"
+    mixer (dynamic, node-conditioned), and the FFN remains the pointwise
+    channel mixer.
+    """
+
     def __init__(
         self,
         hidden_dim: int,
         num_heads: int,
         ffn_dim: int,
         dropout: float = 0.1,
+        block_diag_out: bool = False,
+        dynamic_cross_hop: bool = False,
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_dim)
-        self.attn = HopMaskedMHA(hidden_dim, num_heads, dropout)
+        self.attn = HopMaskedMHA(
+            hidden_dim, num_heads, dropout, block_diag_out=block_diag_out
+        )
         self.drop1 = nn.Dropout(dropout)
+
+        self.use_cross_hop = dynamic_cross_hop
+        if dynamic_cross_hop:
+            head_dim = hidden_dim // num_heads
+            self.norm_ch = nn.LayerNorm(hidden_dim)
+            self.cross_hop = DynamicCrossHopMixer(
+                num_heads=num_heads,
+                head_dim=head_dim,
+                dropout=dropout,
+            )
+            self.drop_ch = nn.Dropout(dropout)
+
         self.norm2 = nn.LayerNorm(hidden_dim)
         self.ffn = nn.Sequential(
             nn.Linear(hidden_dim, ffn_dim),
@@ -249,6 +372,8 @@ class HopMaskedTransformerLayer(nn.Module):
 
     def forward(self, x, per_head_mask, node_mask):
         x = x + self.drop1(self.attn(self.norm1(x), per_head_mask, node_mask))
+        if self.use_cross_hop:
+            x = x + self.drop_ch(self.cross_hop(self.norm_ch(x)))
         x = x + self.drop2(self.ffn(self.norm2(x)))
         return x
 
@@ -293,6 +418,8 @@ class HopMaskedTransformerModel(nn.Module):
         task_level: str = "graph",
         dataset_name: str = "Peptides-func",
         lap_pe_dim: int = 0,
+        block_diag_out: bool = False,
+        dynamic_cross_hop: bool = False,
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -322,7 +449,11 @@ class HopMaskedTransformerModel(nn.Module):
 
         ffn_dim = hidden_dim * ffn_ratio
         self.layers = nn.ModuleList([
-            HopMaskedTransformerLayer(hidden_dim, num_heads, ffn_dim, dropout)
+            HopMaskedTransformerLayer(
+                hidden_dim, num_heads, ffn_dim, dropout,
+                block_diag_out=block_diag_out,
+                dynamic_cross_hop=dynamic_cross_hop,
+            )
             for _ in range(num_layers)
         ])
 

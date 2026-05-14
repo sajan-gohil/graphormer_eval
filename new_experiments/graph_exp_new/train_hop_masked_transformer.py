@@ -63,6 +63,13 @@ def build_parser():
     p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--graph_pool", type=str, default="sum",
                    choices=["sum", "mean"])
+    p.add_argument("--block_diag_out", action="store_true", default=False,
+                   help="Use block-diagonal out_proj in MHA (no cross-head "
+                        "mixing inside attention).")
+    p.add_argument("--dynamic_cross_hop", action="store_true", default=False,
+                   help="Insert a dynamic cross-hop attention sublayer "
+                        "between MHA and FFN. Best paired with "
+                        "--block_diag_out.")
 
     # Hop-to-head assignment
     p.add_argument("--hop_mode", type=str, default="contiguous",
@@ -187,6 +194,8 @@ def main():
         task_level=task.level,
         dataset_name=args.dataset,
         lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
+        block_diag_out=args.block_diag_out,
+        dynamic_cross_hop=args.dynamic_cross_hop,
     ).to(args.device)
 
     # Print the head -> hop-set assignment so it's logged for reproducibility.
