@@ -1,5 +1,6 @@
 # models.py
 import math
+import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -140,6 +141,10 @@ def build_node_encoder(hidden_dim, lap_pe_dim=0, dataset_name="Peptides-func",
         else:
             in_dim = info.get("node_feat_dim")
         if in_dim in (None, "auto"):
+            warnings.warn(
+                f"node_feat_dim not set for {dataset_name}; falling back to hidden_dim.",
+                RuntimeWarning,
+            )
             in_dim = hidden_dim
         return LinearNodeEncoder(
             in_dim=in_dim,

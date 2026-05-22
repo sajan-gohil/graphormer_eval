@@ -236,7 +236,12 @@ class Task:
             raise ValueError(f"Unknown task_type: {self.task_type}")
 
     def _flatten_labels(self, y):
-        """Flatten labels for multiclass tasks to match logits shape."""
+        """Flatten labels for multiclass tasks to match (N,) expectations.
+
+        CrossEntropyLoss expects 1D class indices when logits are 2D
+        (batch_or_nodes, num_classes). Some datasets store labels with an
+        extra singleton dimension, so flattening keeps loss/metrics aligned.
+        """
         if y.dim() > 1:
             return y.view(-1)
         return y
