@@ -137,8 +137,10 @@ def canonicalize_dataset_name(name: str) -> str:
     key = name.lower()
     if key in DATASET_ALIASES:
         return DATASET_ALIASES[key]
+    alias_list = sorted(DATASET_ALIASES.keys())
     raise ValueError(
-        f"Unknown dataset '{name}'. Available: {sorted(GRAPH_DATASETS.keys())}."
+        f"Unknown dataset '{name}'. Available: {sorted(GRAPH_DATASETS.keys())} "
+        f"(aliases: {alias_list})."
     )
 
 
@@ -173,9 +175,10 @@ def _infer_output_dim(info, dataset):
                 y_flat = y_flat[y_flat >= 0]
                 if y_flat.numel() == 0:
                     return 1
-                return int(torch.unique(y_flat).numel())
-            y_np = np.asarray(y_flat)
-            y_np = y_np[y_np >= 0]
+                y_np = y_flat.cpu().numpy()
+            else:
+                y_np = np.asarray(y_flat)
+                y_np = y_np[y_np >= 0]
             return int(np.unique(y_np).size) if y_np.size else 1
         return int(y.size(-1)) if y.dim() > 1 else 1
     return info.get("output_dim", 1)
@@ -189,6 +192,7 @@ def _infer_node_feat_dim(dataset):
     if hasattr(dataset, "data") and getattr(dataset.data, "x", None) is not None:
         return int(dataset.data.x.size(-1))
     try:
+        # Some datasets disallow direct indexing or have empty splits.
         sample = dataset[0]
         if hasattr(sample, "x") and sample.x is not None:
             return int(sample.x.size(-1))

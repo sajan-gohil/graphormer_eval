@@ -236,6 +236,7 @@ class Task:
             raise ValueError(f"Unknown task_type: {self.task_type}")
 
     def _flatten_labels(self, y):
+        """Flatten labels for multiclass tasks to match logits shape."""
         if y.dim() > 1:
             return y.view(-1)
         return y
