@@ -134,6 +134,7 @@ def build_node_encoder(hidden_dim, lap_pe_dim=0, dataset_name="Peptides-func",
     if kind == "atom_categorical":
         return NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim)
     if kind == "linear":
+        # Precedence: explicit arg > registry info > hidden_dim fallback.
         if node_feat_dim not in (None, "auto"):
             in_dim = node_feat_dim
         else:

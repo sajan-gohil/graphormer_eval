@@ -168,7 +168,15 @@ def _infer_output_dim(info, dataset):
         if y.numel() == 0:
             return 1
         if info.get("task_type") == "multiclass":
-            return int(y.max().item() + 1)
+            y_flat = y.view(-1)
+            if torch.is_tensor(y_flat):
+                y_flat = y_flat[y_flat >= 0]
+                if y_flat.numel() == 0:
+                    return 1
+                return int(torch.unique(y_flat).numel())
+            y_np = np.asarray(y_flat)
+            y_np = y_np[y_np >= 0]
+            return int(np.unique(y_np).size) if y_np.size else 1
         return int(y.size(-1)) if y.dim() > 1 else 1
     return info.get("output_dim", 1)
 
@@ -184,7 +192,7 @@ def _infer_node_feat_dim(dataset):
         sample = dataset[0]
         if hasattr(sample, "x") and sample.x is not None:
             return int(sample.x.size(-1))
-    except Exception:
+    except (IndexError, AttributeError, TypeError, RuntimeError):
         pass
     return None
 
