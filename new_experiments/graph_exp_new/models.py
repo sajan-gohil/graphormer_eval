@@ -119,10 +119,11 @@ class LinearNodeEncoder(nn.Module):
         return h
 
 
-def build_node_encoder(hidden_dim, lap_pe_dim=0, dataset_name="Peptides-func"):
-    """Factory: pick the right node encoder for an LRGB dataset.
+def build_node_encoder(hidden_dim, lap_pe_dim=0, dataset_name="Peptides-func",
+                       node_feat_dim=None):
+    """Factory: pick the right node encoder for a registered dataset.
 
-    Reads ``data.LRGB_DATASETS[dataset_name]`` to decide between the
+    Reads ``data.GRAPH_DATASETS[dataset_name]`` to decide between the
     Peptides-style categorical encoder and a learnable Linear projection
     for continuous features (e.g. PascalVOC-SP). Other call sites should
     use this rather than instantiating ``NodeEncoder`` directly so that
@@ -133,8 +134,14 @@ def build_node_encoder(hidden_dim, lap_pe_dim=0, dataset_name="Peptides-func"):
     if kind == "atom_categorical":
         return NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim)
     if kind == "linear":
+        if node_feat_dim not in (None, "auto"):
+            in_dim = node_feat_dim
+        else:
+            in_dim = info.get("node_feat_dim")
+        if in_dim in (None, "auto"):
+            in_dim = hidden_dim
         return LinearNodeEncoder(
-            in_dim=info["node_feat_dim"],
+            in_dim=in_dim,
             hidden_dim=hidden_dim,
             lap_pe_dim=lap_pe_dim,
         )

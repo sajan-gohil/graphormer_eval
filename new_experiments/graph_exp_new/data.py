@@ -4,7 +4,7 @@ import pickle
 import numpy as np
 import torch
 import torch_geometric
-from torch_geometric.datasets import LRGBDataset
+from torch_geometric.datasets import LRGBDataset, GNNBenchmarkDataset, ZINC
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import get_laplacian, to_scipy_sparse_matrix
 from scipy.sparse.csgraph import floyd_warshall
@@ -14,12 +14,12 @@ from multiprocessing import Pool
 
 
 # ================================================================
-# LRGB DATASET REGISTRY
+# GRAPH DATASET REGISTRY (LRGB + GNNBenchmark + ZINC)
 # ================================================================
 #
-# Single source of truth for everything that varies between LRGB datasets.
+# Single source of truth for everything that varies between graph datasets.
 # Driven entirely by the --dataset CLI flag in the training scripts. Adding a
-# new LRGB dataset means adding one entry here.
+# new dataset means adding one entry here.
 #
 # Fields:
 #   output_dim    : number of output channels for the task head.
@@ -29,13 +29,16 @@ from multiprocessing import Pool
 #                   "linear" (continuous float features projected via Linear).
 #   node_feat_dim : in_dim hint for the linear node encoder. Ignored for
 #                   "atom_categorical".
-#   metric_name   : "macro_ap" | "mae" | "node_f1_macro".
+#   metric_name   : "macro_ap" | "mae" | "node_f1_macro" | "accuracy".
+#   source        : "lrgb" | "gnn_benchmark" | "zinc".
+#   pyg_name      : name string for the underlying PyG dataset (optional).
+#   subset        : ZINC-specific flag (subset=True → ZINC-12k).
 #
 # Note: PascalVOC-SP graphs are large (~480 superpixels) and the full distance-
 # mask cache scales as O(N^2 K). Default max_hops in get_loaders should be
 # lowered when using VOC.
 
-LRGB_DATASETS = {
+GRAPH_DATASETS = {
     "Peptides-func": {
         "output_dim": 10,
         "task_type": "multi_label",
@@ -43,6 +46,7 @@ LRGB_DATASETS = {
         "node_encoder": "atom_categorical",
         "node_feat_dim": 9,
         "metric_name": "macro_ap",
+        "source": "lrgb",
     },
     "Peptides-struct": {
         "output_dim": 11,
@@ -51,6 +55,7 @@ LRGB_DATASETS = {
         "node_encoder": "atom_categorical",
         "node_feat_dim": 9,
         "metric_name": "mae",
+        "source": "lrgb",
     },
     "PascalVOC-SP": {
         "output_dim": 21,
@@ -59,21 +64,129 @@ LRGB_DATASETS = {
         "node_encoder": "linear",
         "node_feat_dim": 14,
         "metric_name": "node_f1_macro",
+        "source": "lrgb",
+    },
+    "MNIST": {
+        "output_dim": "auto",
+        "task_type": "multiclass",
+        "level": "graph",
+        "node_encoder": "linear",
+        "node_feat_dim": "auto",
+        "metric_name": "accuracy",
+        "source": "gnn_benchmark",
+        "pyg_name": "MNIST",
+    },
+    "CIFAR10": {
+        "output_dim": "auto",
+        "task_type": "multiclass",
+        "level": "graph",
+        "node_encoder": "linear",
+        "node_feat_dim": "auto",
+        "metric_name": "accuracy",
+        "source": "gnn_benchmark",
+        "pyg_name": "CIFAR10",
+    },
+    "PATTERN": {
+        "output_dim": "auto",
+        "task_type": "multiclass",
+        "level": "node",
+        "node_encoder": "linear",
+        "node_feat_dim": "auto",
+        "metric_name": "accuracy",
+        "source": "gnn_benchmark",
+        "pyg_name": "PATTERN",
+    },
+    "CLUSTER": {
+        "output_dim": "auto",
+        "task_type": "multiclass",
+        "level": "node",
+        "node_encoder": "linear",
+        "node_feat_dim": "auto",
+        "metric_name": "accuracy",
+        "source": "gnn_benchmark",
+        "pyg_name": "CLUSTER",
+    },
+    "ZINC12k": {
+        "output_dim": "auto",
+        "task_type": "regression",
+        "level": "graph",
+        "node_encoder": "linear",
+        "node_feat_dim": "auto",
+        "metric_name": "mae",
+        "source": "zinc",
+        "pyg_name": "ZINC",
+        "subset": True,
     },
 }
 
+DATASET_ALIASES = {
+    "mnist": "MNIST",
+    "cifar10": "CIFAR10",
+    "pattern": "PATTERN",
+    "cluster": "CLUSTER",
+    "zinc12k": "ZINC12k",
+}
+
+DATASET_CHOICES = sorted(set(GRAPH_DATASETS.keys()) | set(DATASET_ALIASES.keys()))
+
+
+def canonicalize_dataset_name(name: str) -> str:
+    """Return the canonical dataset name (resolving aliases)."""
+    if name in GRAPH_DATASETS:
+        return name
+    key = name.lower()
+    if key in DATASET_ALIASES:
+        return DATASET_ALIASES[key]
+    raise ValueError(
+        f"Unknown dataset '{name}'. Available: {sorted(GRAPH_DATASETS.keys())}."
+    )
+
 
 def get_dataset_info(name):
-    """Return the LRGB registry entry for ``name``.
+    """Return the registry entry for ``name``.
 
     Raises ``ValueError`` if the dataset name is not registered.
     """
-    if name not in LRGB_DATASETS:
-        raise ValueError(
-            f"Unknown LRGB dataset '{name}'. "
-            f"Available: {sorted(LRGB_DATASETS.keys())}.")
+    canonical_name = canonicalize_dataset_name(name)
     # Return a shallow copy so callers can't accidentally mutate the registry.
-    return dict(LRGB_DATASETS[name])
+    info = dict(GRAPH_DATASETS[canonical_name])
+    info["name"] = canonical_name
+    return info
+
+
+def _infer_output_dim(info, dataset):
+    if info.get("output_dim") not in ("auto", None):
+        return info["output_dim"]
+    if hasattr(dataset, "num_classes") and dataset.num_classes not in (None, -1, 0):
+        return int(dataset.num_classes)
+    if hasattr(dataset, "num_targets") and dataset.num_targets not in (None, 0):
+        return int(dataset.num_targets)
+    if hasattr(dataset, "num_tasks") and dataset.num_tasks not in (None, 0):
+        return int(dataset.num_tasks)
+    if hasattr(dataset, "data") and getattr(dataset.data, "y", None) is not None:
+        y = dataset.data.y
+        if y.numel() == 0:
+            return 1
+        if info.get("task_type") == "multiclass":
+            return int(y.max().item() + 1)
+        return int(y.size(-1)) if y.dim() > 1 else 1
+    return info.get("output_dim", 1)
+
+
+def _infer_node_feat_dim(dataset):
+    if hasattr(dataset, "num_node_features") and dataset.num_node_features:
+        return int(dataset.num_node_features)
+    if hasattr(dataset, "num_features") and dataset.num_features:
+        return int(dataset.num_features)
+    if hasattr(dataset, "data") and getattr(dataset.data, "x", None) is not None:
+        return int(dataset.data.x.size(-1))
+    try:
+        sample = dataset[0]
+        if hasattr(sample, "x") and sample.x is not None:
+            return int(sample.x.size(-1))
+    except Exception:
+        pass
+    return None
 
 
 # ================================================================
@@ -234,13 +347,13 @@ class AddLaplacianPE:
 
 def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40,
                 dist_mask_workers=8, use_lap_pe=False, lap_pe_dim=8,
-                dataset_name="Peptides-func"):
-    """Load LRGB train/val/test splits and return loaders + datasets.
+                dataset_name="Peptides-func", return_info=False):
+    """Load train/val/test splits and return loaders + datasets.
 
     Args:
-        dataset_name: which LRGB dataset to load. Must be a key of
-                      ``LRGB_DATASETS`` (e.g. "Peptides-func", "Peptides-struct",
-                      "PascalVOC-SP"). Drives the ``LRGBDataset(name=...)`` call
+        dataset_name: which dataset to load. Must be a key of
+                      ``GRAPH_DATASETS`` (e.g. "Peptides-func", "MNIST",
+                      "ZINC12k"). Drives the underlying PyG dataset selection
                       and templates the dist-mask cache directory.
         use_dist_masks: if True, precompute Floyd-Warshall distance masks and
                         return DataLoaders that yield (pyg_batch, dist_masks, node_masks).
@@ -250,17 +363,37 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
         dist_mask_workers: number of multiprocessing workers for Floyd-Warshall.
     """
     # Validate the dataset name early so callers fail fast on typos.
-    _ = get_dataset_info(dataset_name)
+    info = get_dataset_info(dataset_name)
+    dataset_name = info["name"]
+    source = info.get("source", "lrgb")
+    pyg_name = info.get("pyg_name", dataset_name)
 
     # Optional Laplacian PE transform (computed on every access)
     transform = AddLaplacianPE(k=lap_pe_dim) if use_lap_pe else None
 
-    train_ds = LRGBDataset(root="./data", name=dataset_name, split="train",
-                           transform=transform)
-    val_ds = LRGBDataset(root="./data", name=dataset_name, split="val",
-                         transform=transform)
-    test_ds = LRGBDataset(root="./data", name=dataset_name, split="test",
-                          transform=transform)
+    def _build_dataset(split):
+        if source == "lrgb":
+            return LRGBDataset(root="./data", name=pyg_name, split=split,
+                               transform=transform)
+        if source == "gnn_benchmark":
+            return GNNBenchmarkDataset(root="./data", name=pyg_name, split=split,
+                                       transform=transform)
+        if source == "zinc":
+            return ZINC(root="./data/ZINC", subset=bool(info.get("subset", True)),
+                        split=split, transform=transform)
+        raise ValueError(f"Unknown dataset source '{source}' for {dataset_name}.")
+
+    train_ds = _build_dataset("train")
+    val_ds = _build_dataset("val")
+    test_ds = _build_dataset("test")
+
+    # Fill dynamic fields like output_dim/node_feat_dim when marked as "auto".
+    info = dict(info)
+    info["output_dim"] = _infer_output_dim(info, train_ds)
+    if info.get("node_encoder") == "linear":
+        inferred = _infer_node_feat_dim(train_ds)
+        if info.get("node_feat_dim") in ("auto", None):
+            info["node_feat_dim"] = inferred if inferred is not None else 1
 
     if use_dist_masks:
         cache_dir = f"./data/{dataset_name}/dist_masks"
@@ -282,7 +415,7 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
         # collate_fn handles batching and PyG's Collater cannot handle the
         # numpy arrays returned by DistMaskDataset.
         from torch.utils.data import DataLoader as TorchDataLoader
-        return (
+        result = (
             TorchDataLoader(train_wrapped, batch_size=batch_size, shuffle=True,
                             num_workers=num_workers, collate_fn=collate_fn),
             TorchDataLoader(val_wrapped, batch_size=batch_size, shuffle=False,
@@ -291,13 +424,19 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
                             num_workers=num_workers, collate_fn=collate_fn),
             train_ds, val_ds, test_ds,
         )
+        if return_info:
+            return (*result, info)
+        return result
 
-    return (
+    result = (
         DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers),
         DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers),
         DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers),
         train_ds, val_ds, test_ds,
     )
+    if return_info:
+        return (*result, info)
+    return result
 
 
 class ProxyTargetDataset(torch.utils.data.Dataset):

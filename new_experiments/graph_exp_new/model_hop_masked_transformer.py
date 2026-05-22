@@ -400,6 +400,7 @@ class HopMaskedTransformerModel(nn.Module):
         task_level:        "graph" or "node".
         dataset_name:      passed through to ``build_node_encoder``.
         lap_pe_dim:        Laplacian PE width if used.
+        node_feat_dim:     optional override for linear node encoders.
     """
 
     def __init__(
@@ -418,6 +419,7 @@ class HopMaskedTransformerModel(nn.Module):
         task_level: str = "graph",
         dataset_name: str = "Peptides-func",
         lap_pe_dim: int = 0,
+        node_feat_dim: Optional[int] = None,
         block_diag_out: bool = False,
         dynamic_cross_hop: bool = False,
     ):
@@ -445,6 +447,7 @@ class HopMaskedTransformerModel(nn.Module):
             hidden_dim=hidden_dim,
             lap_pe_dim=lap_pe_dim,
             dataset_name=dataset_name,
+            node_feat_dim=node_feat_dim,
         )
 
         ffn_dim = hidden_dim * ffn_ratio
