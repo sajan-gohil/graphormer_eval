@@ -174,9 +174,9 @@ def _infer_output_dim(info, dataset):
 
 
 def _infer_node_feat_dim(dataset):
-    if hasattr(dataset, "num_node_features") and dataset.num_node_features:
+    if hasattr(dataset, "num_node_features") and dataset.num_node_features is not None:
         return int(dataset.num_node_features)
-    if hasattr(dataset, "num_features") and dataset.num_features:
+    if hasattr(dataset, "num_features") and dataset.num_features is not None:
         return int(dataset.num_features)
     if hasattr(dataset, "data") and getattr(dataset.data, "x", None) is not None:
         return int(dataset.data.x.size(-1))
@@ -379,7 +379,7 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
             return GNNBenchmarkDataset(root="./data", name=pyg_name, split=split,
                                        transform=transform)
         if source == "zinc":
-            return ZINC(root="./data/ZINC", subset=bool(info.get("subset", True)),
+            return ZINC(root="./data/ZINC", subset=bool(info.get("subset", False)),
                         split=split, transform=transform)
         raise ValueError(f"Unknown dataset source '{source}' for {dataset_name}.")
 

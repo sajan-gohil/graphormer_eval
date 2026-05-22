@@ -235,6 +235,11 @@ class Task:
         else:
             raise ValueError(f"Unknown task_type: {self.task_type}")
 
+    def _reshape_multiclass_labels(self, y):
+        if y.dim() > 1:
+            return y.view(-1)
+        return y
+
     # --- Loss --------------------------------------------------------
     def loss(self, logits, y):
         """Compute the task loss with the right dtype/shape coercion.
@@ -250,8 +255,7 @@ class Task:
             return self.loss_fn(logits, y.float())
         if self.task_type == "multiclass":
             y = y.long()
-            if y.dim() > 1:
-                y = y.view(-1)
+            y = self._reshape_multiclass_labels(y)
             return self.loss_fn(logits, y)
         raise ValueError(f"Unknown task_type: {self.task_type}")
 
@@ -269,7 +273,7 @@ class Task:
     def labels_to_numpy(self, y) -> np.ndarray:
         """Convert ground-truth tensors to numpy aligned with ``predict``."""
         if self.task_type == "multiclass":
-            return y.view(-1).detach().cpu().numpy()
+            return self._reshape_multiclass_labels(y).detach().cpu().numpy()
         return y.detach().cpu().numpy()
 
     # --- Final metric -----------------------------------------------
