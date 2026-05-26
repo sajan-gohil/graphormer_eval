@@ -98,12 +98,17 @@ def k_hop_subgraph(
 
 
 CACHED = None
+# LRGB datasets use continuous features
+LRGB_DATASETS = {"peptides-func", "peptides-struct", "pascalvoc-sp", "coco-sp", "pcqm-contact"}
+
 # @lru_cache(maxsize=512)
 def preprocess_item(item, config, keep_features=True, split="train"):
     global CACHED
+    is_lrgb = config.dataset_name.lower() in LRGB_DATASETS if config else False
+    
     if not (config.augment_edges and split == "train") and (
             not config.create_subgraph) and (config.dataset_name
-                                             != "pcqm4mv2") and CACHED is not None:
+                                             != "pcqm4mv2") and not is_lrgb and CACHED is not None:
         return CACHED
 
     requires_backends(preprocess_item, ["cython"])
@@ -114,7 +119,11 @@ def preprocess_item(item, config, keep_features=True, split="train"):
         edge_attr = np.ones((len(item["edge_index"][0]), 1), dtype=np.int64)  # same embedding for all
 
     if keep_features and "x" in item.keys():  # input_nodes
-        node_feature = np.asarray(item["x"], dtype=np.int64)
+        # For LRGB datasets, node features are continuous - keep as float
+        if is_lrgb:
+            node_feature = np.asarray(item["x"], dtype=np.float32)
+        else:
+            node_feature = np.asarray(item["x"], dtype=np.int64)
     else:
         raise Exception("NODE FEATURES NOT FOUND")
         node_feature = np.ones((item["x"].shape[0], 1), dtype=np.int64)  # same embedding for all
@@ -124,6 +133,9 @@ def preprocess_item(item, config, keep_features=True, split="train"):
     input_nodes = node_feature
     if config and config.dataset_name in ["pcqm4mv2"]:
         input_nodes = convert_to_single_emb(node_feature) + 1
+    elif not is_lrgb:
+        # Only shift indices for non-LRGB datasets with integer features
+        pass  # Will be shifted below
 
     num_nodes = item["x"].shape[0]
 
@@ -146,7 +158,11 @@ def preprocess_item(item, config, keep_features=True, split="train"):
     attn_bias = np.zeros([num_nodes + 1, num_nodes + 1], dtype=np.single)  # with graph token
 
     # combine
-    item["input_nodes"] = input_nodes + 1  # we shift all indices by one for padding
+    # For LRGB datasets with continuous features, don't shift
+    if is_lrgb:
+        item["input_nodes"] = input_nodes  # Keep as-is for continuous features
+    else:
+        item["input_nodes"] = input_nodes + 1  # we shift all indices by one for padding
     item["attn_bias"] = attn_bias
     item["attn_edge_type"] = attn_edge_type
     item["spatial_pos"] = shortest_path_result.astype(np.int64) + 1  # we shift all indices by one for padding
@@ -156,13 +172,13 @@ def preprocess_item(item, config, keep_features=True, split="train"):
     if "labels" not in item:
         item["labels"] = item["y"]
 
-    if not (config.augment_edges and split=="train") and config.dataset_name not in ["pcqm4mv2"]:
+    if not (config.augment_edges and split=="train") and config.dataset_name not in ["pcqm4mv2"] and not is_lrgb:
         CACHED = item
     return item
 
 
 class GraphormerDataCollator:
-    def __init__(self, spatial_pos_max=20, on_the_fly_processing=False, config=None, split="train"):
+    def __init__(self, spatial_pos_max=20, on_the_fly_processing=False, config=None, split="train", is_graph_task=False):
         if not is_cython_available():
             raise ImportError("Graphormer preprocessing needs Cython (pyximport)")
         self.config = config
@@ -170,6 +186,7 @@ class GraphormerDataCollator:
         self.on_the_fly_processing = on_the_fly_processing
         self.split = split
         self.cache = None
+        self.is_graph_task = is_graph_task or getattr(config, 'is_graph_task', False)
 
     def sample_subgraph(self, graphs):
         subgraphs = []
@@ -231,12 +248,15 @@ class GraphormerDataCollator:
         max_dist = max(len(i["input_edges"][0][0]) for i in features)
         edge_input_size = len(features[0]["input_edges"][0][0][0])
         batch_size = len(features)
+        
+        # Determine dtype for input_nodes based on feature type (float for LRGB, long otherwise)
+        input_nodes_dtype = torch.float if self.is_graph_task else torch.long
 
         batch["attn_bias"] = torch.zeros(batch_size, max_node_num + 1, max_node_num + 1, dtype=torch.float)
         batch["attn_edge_type"] = torch.zeros(batch_size, max_node_num, max_node_num, edge_feat_size, dtype=torch.long)
         batch["spatial_pos"] = torch.zeros(batch_size, max_node_num, max_node_num, dtype=torch.long)
         batch["in_degree"] = torch.zeros(batch_size, max_node_num, dtype=torch.long)
-        batch["input_nodes"] = torch.zeros(batch_size, max_node_num, node_feat_size, dtype=torch.long)
+        batch["input_nodes"] = torch.zeros(batch_size, max_node_num, node_feat_size, dtype=input_nodes_dtype)
         batch["input_edges"] = torch.zeros(
             batch_size, max_node_num, max_node_num, max_dist, edge_input_size, dtype=torch.long
         )
@@ -292,8 +312,16 @@ class GraphormerDataCollator:
             batch["aug_removed_edges"] = aug_removed_edges if aug_removed_edges else None
             batch["aug_original_edges"] = aug_original_edges if aug_original_edges else None
 
+        # Handle labels based on task type
         sample = features[0]["labels"]
-        if len(sample) == 1:  # one task
+        if self.is_graph_task:
+            # Graph-level task: stack labels [batch_size, num_labels] or [batch_size]
+            labels_list = [np.asarray(i["labels"]) for i in features]
+            if labels_list[0].ndim == 0:  # scalar labels
+                batch["labels"] = torch.tensor([float(l) for l in labels_list])
+            else:  # multi-label or multi-target
+                batch["labels"] = torch.from_numpy(np.stack(labels_list, axis=0)).float()
+        elif len(sample) == 1:  # one task (node-level)
             if isinstance(sample[0], float):  # regression
                 batch["labels"] = torch.from_numpy(np.concatenate([i["labels"] for i in features]))
             else:  # binary classification

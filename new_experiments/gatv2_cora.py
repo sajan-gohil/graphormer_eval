@@ -11,6 +11,7 @@ import numpy as np
 
 
 # Reproducibility
+# -------------------------
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -154,7 +155,9 @@ def evaluate(model, data, mask):
     }
 
 
+# -------------------------
 # Driver
+# -------------------------
 def main(args):
     set_seed()
 
@@ -219,7 +222,9 @@ def main(args):
         )
 
 
+# -------------------------
 # CLI
+# -------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 

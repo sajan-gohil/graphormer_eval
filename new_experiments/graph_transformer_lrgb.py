@@ -10,6 +10,15 @@ from sklearn.metrics import accuracy_score, f1_score
 import argparse
 import random
 import numpy as np
+import sys
+import os
+os.environ["WANDB_MODE"] = "disabled"
+import wandb
+wandb.init(mode="disabled")
+from tqdm import tqdm
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from graph_diffusion import GraphLatentDiffusion
 import math
 
 # Reproducibility
@@ -20,6 +29,28 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)
 
 
+class DiffusionConfig:
+    """Simple config class for diffusion parameters."""
+    def __init__(self, **kwargs):
+        # Diffusion settings
+        self.diffusion_type = kwargs.get("diffusion_type", "x0")  # "x0", "noise_pred", "ddim"
+        self.num_denoising_steps = kwargs.get("num_denoising_steps", 100)
+        self.num_denoiser_layers = kwargs.get("num_denoiser_layers", 3)
+        self.denoiser_type = kwargs.get("denoiser_type", "mha")  # "mha", "gat", "linear"
+        self.reconstruction_scale = kwargs.get("reconstruction_scale", 0.5)
+        self.structure_scale = kwargs.get("structure_scale", 0.5)
+        self.gnn_only = kwargs.get("gnn_only", False)
+        self.detached_denoiser = kwargs.get("detached_denoiser", False)
+        self.mask_random_input_prob = kwargs.get("mask_random_input_prob", 0.0)
+        self.aug_loss_scale = kwargs.get("aug_loss_scale", 0.0)
+        self.log_memory = kwargs.get("log_memory", False)
+        self.experiment_dir = kwargs.get("experiment_dir", "./experiments")
+        
+        # Runtime state
+        self.current_split = "train"
+        self.current_step = 0
+
+# Graph Multi-Head Attention
 # ===================== Diffusion Components =====================
 
 def get_timestep_embedding(timesteps, embedding_dim):
@@ -396,15 +427,28 @@ class GraphTransformerLayer(nn.Module):
 
 # Graph Transformer
 class GraphTransformer(nn.Module):
-    def __init__(self, in_dim, hidden_dim, out_dim, layers, heads, dropout, 
-                 use_diffusion=False, num_diff_steps=10):
+    def __init__(self, in_dim, hidden_dim, out_dim, layers, heads, dropout, use_diffusion=False, diffusion_config=None):
         super().__init__()
         self.input_proj = nn.Linear(in_dim, hidden_dim)
+        self.use_diffusion = use_diffusion
 
         self.layers = nn.ModuleList([
             GraphTransformerLayer(hidden_dim, heads, dropout, use_diffusion, num_diff_steps)
             for _ in range(layers)
         ])
+
+        # Initialize diffusion module if enabled
+        if use_diffusion and diffusion_config is not None:
+            self.diffusion = GraphLatentDiffusion(
+                input_dim=hidden_dim,
+                latent_dim=hidden_dim,
+                num_denoising_steps=diffusion_config.num_denoising_steps,
+                config=diffusion_config
+            )
+            self.diffusion_config = diffusion_config
+        else:
+            self.diffusion = None
+            self.diffusion_config = None
 
         self.output_proj = nn.Linear(hidden_dim, out_dim)
 
@@ -425,20 +469,67 @@ class GraphTransformer(nn.Module):
             else:
                 x = layer(x, edge_index)
 
-        # graph-level pooling
-        pooled = global_mean_pool(x, batch)
-        out = self.output_proj(pooled)
+        # Apply diffusion refinement if enabled
+        diffusion_loss = None
+        if self.use_diffusion and self.diffusion is not None:
+            # Convert flat node features to batched format for diffusion
+            # x: [total_nodes, hidden_dim], batch: [total_nodes]
+            batch_size = batch.max().item() + 1
+            max_nodes = max((batch == i).sum().item() for i in range(batch_size))
+            
+            # Pad and reshape to [B, N, D] for diffusion
+            x_batched = torch.zeros(batch_size, max_nodes, x.size(-1), device=x.device)
+            edge_index_list = []
+            
+            node_offset = 0
+            for i in range(batch_size):
+                mask = (batch == i)
+                num_nodes = mask.sum().item()
+                x_batched[i, :num_nodes] = x[mask]
+                
+                # Extract edge indices for this graph (adjust to local indices)
+                graph_nodes = torch.where(mask)[0]
+                node_map = {old_idx.item(): new_idx for new_idx, old_idx in enumerate(graph_nodes)}
+                
+                # Filter edges belonging to this graph
+                edge_mask = mask[edge_index[0]] & mask[edge_index[1]]
+                graph_edges = edge_index[:, edge_mask]
+                
+                # Remap to local indices
+                local_edges = torch.tensor(
+                    [[node_map[e.item()] for e in graph_edges[0]],
+                     [node_map[e.item()] for e in graph_edges[1]]],
+                    device=x.device, dtype=torch.long
+                )
+                edge_index_list.append(local_edges)
+            
+            # Apply diffusion
+            denoised_x, diffusion_loss = self.diffusion(x_batched, edge_index_list)
+            
+            # Unpack back to flat format
+            x_refined = torch.zeros_like(x)
+            for i in range(batch_size):
+                mask = (batch == i)
+                num_nodes = mask.sum().item()
+                x_refined[mask] = denoised_x[i, :num_nodes]
+            
+            x = x_refined
+
+        # Graph-level pooling
+        x = global_mean_pool(x, batch)
+        logits = self.output_proj(x)
         
-        if return_attn_loss:
-            # Average QKV embeddings across layers as denoised embeddings
-            denoised_embeddings = all_qkv_embeddings  # torch.stack(all_qkv_embeddings, dim=0).mean(dim=0)
-            return out, initial_embeddings, denoised_embeddings, first_layer_embeddings
-        return out
+        if diffusion_loss is not None:
+            return logits, diffusion_loss
+        return logits
 
 
 def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.0, struct_loss_weight=0.0):
     model.train()
+    if hasattr(model, 'diffusion_config') and model.diffusion_config is not None:
+        model.diffusion_config.current_split = "train"
     total_loss = 0
+    total_diffusion_loss = 0
     total_task_loss = 0
     total_attn_loss = 0
     total_struct_loss = 0
@@ -490,11 +581,16 @@ def train_epoch(model, loader, optimizer, device, attn_loss_weight=0.0, struct_l
 @torch.no_grad()
 def evaluate(model, loader, device):
     model.eval()
+    if hasattr(model, 'diffusion_config') and model.diffusion_config is not None:
+        model.diffusion_config.current_split = "eval"
     ys, preds = [], []
 
     for data in loader:
         data = data.to(device)
-        out = model(data.x.float(), data.edge_index, data.batch)
+        output = model(data.x.float(), data.edge_index, data.batch)
+        
+        # Handle tuple output from diffusion model
+        out = output[0] if isinstance(output, tuple) else output
         preds.append(out.cpu())
         ys.append(data.y.cpu())
 
@@ -519,6 +615,23 @@ def main(args):
 
     print(train_dataset[0], flush=True)
 
+    # Setup diffusion config if enabled
+    diffusion_config = None
+    if args.use_diffusion:
+        diffusion_config = DiffusionConfig(
+            diffusion_type=args.diffusion_type,
+            num_denoising_steps=args.num_denoising_steps,
+            num_denoiser_layers=args.num_denoiser_layers,
+            denoiser_type=args.denoiser_type,
+            reconstruction_scale=args.reconstruction_scale,
+            structure_scale=args.structure_scale,
+            gnn_only=args.gnn_only,
+            mask_random_input_prob=args.mask_random_input_prob,
+        )
+        print(f"Diffusion enabled: type={args.diffusion_type}, steps={args.num_denoising_steps}, "
+              f"denoiser={args.denoiser_type}, rec_scale={args.reconstruction_scale}, "
+              f"struct_scale={args.structure_scale}")
+
     model = GraphTransformer(
         in_dim=train_dataset.num_node_features,
         hidden_dim=args.hidden_dim,
@@ -527,9 +640,9 @@ def main(args):
         heads=args.num_heads,
         dropout=args.dropout,
         use_diffusion=args.use_diffusion,
+        diffusion_config=diffusion_config
         num_diff_steps=args.num_diff_steps
     ).to(device)
-
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=5e-4)
 
@@ -548,7 +661,13 @@ def main(args):
             best_val = val_f1
             best_state = model.state_dict()
 
-        if epoch % 10 == 0 or epoch == 1:
+        # if epoch % 10 == 0 or epoch == 1:
+        if args.use_diffusion:
+            print(
+                f"Epoch {epoch:03d} | Loss {loss:.4f} | Diff Loss {diff_loss:.4f} | "
+                f"Val Micro-F1 {val_f1:.4f}"
+            )
+        else:
             print(
                 f"Epoch {epoch:03d} | Loss {loss:.4f} | Task {task_loss:.4f} | "
                 f"Attn {attn_loss:.4f} | Struct {struct_loss:.4f} | Val Micro-F1 {val_f1:.4f}"
@@ -562,12 +681,33 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    # Model arguments
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument("--num_heads", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--lr", type=float, default=3e-4)
+    
+    # Diffusion arguments
+    parser.add_argument("--use_diffusion", action="store_true", help="Enable diffusion refinement")
+    parser.add_argument("--diffusion_type", type=str, default="x0", 
+                        choices=["x0", "noise_pred", "delta"], help="Type of diffusion")
+    parser.add_argument("--num_denoising_steps", type=int, default=100, help="Number of diffusion steps")
+    parser.add_argument("--num_denoiser_layers", type=int, default=3, help="Number of denoiser layers")
+    parser.add_argument("--denoiser_type", type=str, default="mha", 
+                        choices=["mha", "gat", "linear"], help="Denoiser architecture type")
+    parser.add_argument("--reconstruction_scale", type=float, default=0.5, 
+                        help="Weight for reconstruction loss")
+    parser.add_argument("--structure_scale", type=float, default=0.5, 
+                        help="Weight for structure preservation loss")
+    parser.add_argument("--diffusion_weight", type=float, default=0.1, 
+                        help="Weight for diffusion loss in total loss")
+    parser.add_argument("--gnn_only", action="store_true", 
+                        help="Use GNN-only mode (no noise addition)")
+    parser.add_argument("--mask_random_input_prob", type=float, default=0.0, 
+                        help="Probability of masking input for J-invariant training")
+    
     parser.add_argument("--attn_loss_weight", type=float, default=0,
                         help="Weight for attention improvement loss")
     parser.add_argument("--struct_loss_weight", type=float, default=0,
