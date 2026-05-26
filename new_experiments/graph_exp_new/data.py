@@ -1,3 +1,4 @@
+# data.py
 import os
 import pickle
 import numpy as np
@@ -10,6 +11,69 @@ from scipy.sparse.csgraph import floyd_warshall
 from scipy.sparse.linalg import eigsh
 from functools import partial
 from multiprocessing import Pool
+
+
+# ================================================================
+# LRGB DATASET REGISTRY
+# ================================================================
+#
+# Single source of truth for everything that varies between LRGB datasets.
+# Driven entirely by the --dataset CLI flag in the training scripts. Adding a
+# new LRGB dataset means adding one entry here.
+#
+# Fields:
+#   output_dim    : number of output channels for the task head.
+#   task_type     : "multi_label" | "regression" | "multiclass".
+#   level         : "graph" (one prediction per graph) | "node" (one per node).
+#   node_encoder  : "atom_categorical" (peptides-style integer features) |
+#                   "linear" (continuous float features projected via Linear).
+#   node_feat_dim : in_dim hint for the linear node encoder. Ignored for
+#                   "atom_categorical".
+#   metric_name   : "macro_ap" | "mae" | "node_f1_macro".
+#
+# Note: PascalVOC-SP graphs are large (~480 superpixels) and the full distance-
+# mask cache scales as O(N^2 K). Default max_hops in get_loaders should be
+# lowered when using VOC.
+
+LRGB_DATASETS = {
+    "Peptides-func": {
+        "output_dim": 10,
+        "task_type": "multi_label",
+        "level": "graph",
+        "node_encoder": "atom_categorical",
+        "node_feat_dim": 9,
+        "metric_name": "macro_ap",
+    },
+    "Peptides-struct": {
+        "output_dim": 11,
+        "task_type": "regression",
+        "level": "graph",
+        "node_encoder": "atom_categorical",
+        "node_feat_dim": 9,
+        "metric_name": "mae",
+    },
+    "PascalVOC-SP": {
+        "output_dim": 21,
+        "task_type": "multiclass",
+        "level": "node",
+        "node_encoder": "linear",
+        "node_feat_dim": 14,
+        "metric_name": "node_f1_macro",
+    },
+}
+
+
+def get_dataset_info(name):
+    """Return the LRGB registry entry for ``name``.
+
+    Raises ``ValueError`` if the dataset name is not registered.
+    """
+    if name not in LRGB_DATASETS:
+        raise ValueError(
+            f"Unknown LRGB dataset '{name}'. "
+            f"Available: {sorted(LRGB_DATASETS.keys())}.")
+    # Return a shallow copy so callers can't accidentally mutate the registry.
+    return dict(LRGB_DATASETS[name])
 
 
 # ================================================================
@@ -169,27 +233,37 @@ class AddLaplacianPE:
 
 
 def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40,
-                dist_mask_workers=8, use_lap_pe=False, lap_pe_dim=8):
-    """Load Peptides-func train/val/test splits and return loaders + datasets.
+                dist_mask_workers=8, use_lap_pe=False, lap_pe_dim=8,
+                dataset_name="Peptides-func"):
+    """Load LRGB train/val/test splits and return loaders + datasets.
 
     Args:
+        dataset_name: which LRGB dataset to load. Must be a key of
+                      ``LRGB_DATASETS`` (e.g. "Peptides-func", "Peptides-struct",
+                      "PascalVOC-SP"). Drives the ``LRGBDataset(name=...)`` call
+                      and templates the dist-mask cache directory.
         use_dist_masks: if True, precompute Floyd-Warshall distance masks and
                         return DataLoaders that yield (pyg_batch, dist_masks, node_masks).
-        max_hops: maximum number of hop levels for distance masks.
+        max_hops: maximum number of hop levels for distance masks. PascalVOC-SP
+                  graphs are large; consider lowering this (e.g. 12-16) when
+                  loading that dataset.
         dist_mask_workers: number of multiprocessing workers for Floyd-Warshall.
     """
+    # Validate the dataset name early so callers fail fast on typos.
+    _ = get_dataset_info(dataset_name)
+
     # Optional Laplacian PE transform (computed on every access)
     transform = AddLaplacianPE(k=lap_pe_dim) if use_lap_pe else None
 
-    train_ds = LRGBDataset(root="./data", name="Peptides-func", split="train",
+    train_ds = LRGBDataset(root="./data", name=dataset_name, split="train",
                            transform=transform)
-    val_ds = LRGBDataset(root="./data", name="Peptides-func", split="val",
+    val_ds = LRGBDataset(root="./data", name=dataset_name, split="val",
                          transform=transform)
-    test_ds = LRGBDataset(root="./data", name="Peptides-func", split="test",
+    test_ds = LRGBDataset(root="./data", name=dataset_name, split="test",
                           transform=transform)
 
     if use_dist_masks:
-        cache_dir = "./data/Peptides-func/dist_masks"
+        cache_dir = f"./data/{dataset_name}/dist_masks"
         os.makedirs(cache_dir, exist_ok=True)
         train_dm = precompute_distance_masks(
             train_ds, os.path.join(cache_dir, "train.pkl"), max_hops, dist_mask_workers)

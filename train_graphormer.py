@@ -324,10 +324,17 @@ for epoch in range(pre_epoch, pre_epoch+MAX_EPOCHS):
         files = os.listdir(os.path.join(args.experiment_dir, "training_checkpoints"))
         files = [os.path.join(args.experiment_dir, "training_checkpoints", i) for i in files if i.startswith("best_model_")]
         # Sort by modification time, newest last
-        files_sorted = sorted(files, key=os.path.getmtime)
-        to_remove = files_sorted[:-1] if len(files_sorted) > 1 else []
-        for f in to_remove:
-            os.remove(f)
+        try:
+            files_sorted = sorted(files, key=os.path.getmtime)
+            to_remove = files_sorted[:-1] if len(files_sorted) > 1 else []
+            for f in to_remove:
+                os.remove(os.path.join(args.experiment_dir, "training_checkpoints", f))
+        except Exception as e:
+            print("ERROR:", e)
+            pass
+
+    else:
+        epochs_since_improvement += 1
 
     # If both the validation score did not improve AND validation loss did not decrease
     # for EARLY_STOP_PATIENCE_EPOCHS, and we've completed at least MIN_STEPS, stop training.
