@@ -98,7 +98,8 @@ class GraphormerGraphNodeFeature(nn.Module):
         self.num_atoms = config.num_atoms
 
         # self.atom_encoder = nn.Embedding(config.num_atoms + 1, config.hidden_size, padding_idx=config.pad_token_id)
-        self.feature_encoder = nn.Linear(1433, config.hidden_size)
+        node_feat_dim = getattr(config, "node_feat_dim", 1433)
+        self.feature_encoder = nn.Linear(node_feat_dim, config.hidden_size)
         # self.in_degree_encoder = nn.Embedding(
         #     config.num_in_degree, config.hidden_size, padding_idx=config.pad_token_id
         # )

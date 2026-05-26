@@ -178,3 +178,10 @@ hyperparam_analysis
 *.png
 pretrained_model
 *.zip
+start.sh
+experiments
+new_experiments/experiments/
+data/
+datasets/
+temp_experiments/
+citeceer_experiments

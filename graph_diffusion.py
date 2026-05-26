@@ -36,7 +36,7 @@ class GraphLatentDiffusion(nn.Module):
         self.reconstruction_scale = getattr(config, "reconstruction_scale", 0.5)
         self.structure_scale = getattr(config, "structure_scale", 0.5)
         self.timestep_embeddings = nn.Embedding(num_denoising_steps, latent_dim)
-        
+
         if config.diffusion_type == "ddim":
             betas = linear_beta_schedule(num_denoising_steps)
         else:
@@ -64,7 +64,7 @@ class GraphLatentDiffusion(nn.Module):
                                       layer_type=config.denoiser_type,
                                       config=self.config)
         self.diffusion_optimizer = torch.optim.Adam(self.denoiser.parameters(), lr=1e-4)
-
+        
     def add_noise(self, x, t):
         noise = torch.randn_like(x)
         sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
@@ -76,87 +76,6 @@ class GraphLatentDiffusion(nn.Module):
         sqrt_alpha = self.sqrt_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
         sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].unsqueeze(1).unsqueeze(2)
         return (noisy_x - sqrt_one_minus_alpha * noise_pred) / (sqrt_alpha + 1e-12)
-
-    def optimize_diffusion(self, node_embeddings, edge_index_list):
-        """
-        Optimize only the diffusion model over all timesteps for this batch.
-        """
-        B = node_embeddings.size(0)
-        t = torch.tensor([self.num_denoising_steps - 1], device=node_embeddings.device).repeat(B)
-        noisy_x, true_noise = self.add_noise(node_embeddings.detach().clone(), t)
-
-        x_t = noisy_x.clone()
-        losses = []
-        mse = MSELoss()
-
-        for step in reversed(range(self.num_denoising_steps)):
-            print("Stepping =========", step)
-            x_t = x_t.detach()
-            t_step = torch.tensor([step], device=node_embeddings.device).repeat(B)
-            t_emb = self.timestep_embeddings(t_step)#.unsqueeze(1)#.expand(-1, x_t.size(1), -1)
-
-            # noisy_with_t = torch.cat([x_t, t_emb], dim=-1)
-            # noise_pred = self.denoiser(noisy_with_t, edge_index_list)
-            noise_pred = self.denoiser(x_t, t_emb, edge_index_list)
-            loss = mse(true_noise, noise_pred)
-            losses.append(loss)
-
-            # NOT ideal to update denoiser mid single denoising process
-            # If we don't, then we have to accumulate activations across all steps
-            self.diffusion_optimizer.zero_grad()
-            loss.backward(retain_graph=False)
-            torch.nn.utils.clip_grad_norm_(self.denoiser.parameters(), 5.0)  # optional
-            self.diffusion_optimizer.step()
-                # print("====optimized")
-
-            # Update x_t -> x_{t-1} (DDIM-like deterministic step)
-            x0_pred = self.predict_x0_from_noise(x_t, noise_pred, t_step)  # .detach().clone()
-            if step > 0:
-                alpha_prev = self.alphas_cumprod[step - 1]
-                x_t = torch.sqrt(alpha_prev).unsqueeze(0).unsqueeze(-1) * x0_pred + \
-                      torch.sqrt(1 - alpha_prev).unsqueeze(0).unsqueeze(-1) * noise_pred
-            else:
-                x_t = x0_pred.detach()
-
-        # total_loss = torch.stack(losses).mean()
-        # self.diffusion_optimizer.zero_grad()
-        # total_loss.backward()
-        # torch.nn.utils.clip_grad_norm_(self.denoiser.parameters(), 5.0)  # optional
-        # self.diffusion_optimizer.step()
-        self.diffusion_optimizer.zero_grad()
-
-        return x_t  # final denoised embeddings after training
-
-    def sample_diffusion(self, node_embeddings, edge_index_list):
-        """
-        Run deterministic DDIM-like sampling (no optimizer update).
-        """
-        B = node_embeddings.size(0)
-        t = torch.tensor([self.num_denoising_steps - 1], device=node_embeddings.device).repeat(B)
-        noisy_x, _ = self.add_noise(node_embeddings.detach(), t)
-
-        x_t = noisy_x.detach().clone()
-
-        for step in reversed(range(self.num_denoising_steps)):
-            t_step = torch.tensor([step], device=node_embeddings.device).repeat(B)
-            t_emb = self.timestep_embeddings(t_step).unsqueeze(1).expand(-1, x_t.size(1), -1)
-
-            noisy_with_t = torch.cat([x_t, t_emb], dim=-1)
-            # noise_pred = self.denoiser(noisy_with_t, edge_index_list)
-            noise_pred = self.denoiser(x_t, t_emb, edge_index_list)
-
-            x0_pred = self.predict_x0_from_noise(x_t, noise_pred, t_step)
-            if step > 0:
-                alpha_prev = self.alphas_cumprod[step - 1]
-                x_t = torch.sqrt(alpha_prev).unsqueeze(0).unsqueeze(-1) * x0_pred + \
-                      torch.sqrt(1 - alpha_prev).unsqueeze(0).unsqueeze(-1) * noise_pred
-            else:
-                x_t = x0_pred
-            del t_step
-            del t_emb
-            
-
-        return x_t
 
     def attention_improvement_loss(self,
                                    node_embeddings,
@@ -214,6 +133,26 @@ class GraphLatentDiffusion(nn.Module):
         counts[counts == 0] = 1  # avoid division by zero
         return (per_graph_loss / counts).mean()
 
+    def attention_same_class_improvement_loss(self, node_embeddings, denoised_embeddings, labels, edge_index_list):
+        # Normalize embeddings
+        node_emb_normed = F.normalize(node_embeddings, p=2, dim=-1)
+        denoised_emb_normed = F.normalize(denoised_embeddings, p=2, dim=-1)
+        # Flatten [B, N, D] -> [sum(N), D]
+        flat_node = node_emb_normed.reshape(-1, node_emb_normed.size(-1))
+        flat_denoised = denoised_emb_normed.reshape(-1, denoised_emb_normed.size(-1))
+        flat_labels = labels.reshape(-1)
+        # Compute attention scores
+        attn_before = torch.matmul(flat_node, flat_node.T)
+        attn_after = torch.matmul(flat_denoised, flat_denoised.T)
+        # Mask for same class
+        same_class_mask = (flat_labels.unsqueeze(0) == flat_labels.unsqueeze(1))
+        # Average attention to same-class nodes
+        avg_attn_before = attn_before[same_class_mask].mean()
+        avg_attn_after = attn_after[same_class_mask].mean()
+        # Loss: encourage after > before
+        loss = F.relu(avg_attn_before - avg_attn_after)
+        return loss
+
     def calculate_structural_associations(self, flat_node, flat_denoised, all_src,
                                           all_dst):
         with torch.no_grad():
@@ -256,7 +195,7 @@ class GraphLatentDiffusion(nn.Module):
                     timestamp + ".png"))
             plt.clf()
 
-    def forward(self, node_embeddings, edge_index_list, aug_added_edges=None, aug_removed_edges=None, aug_original_edges=None):
+    def forward(self, node_embeddings, edge_index_list, aug_added_edges=None, aug_removed_edges=None, aug_original_edges=None, labels=None):
         B = node_embeddings.shape[0]
         t = torch.randint(0, self.num_denoising_steps, (B,), device=node_embeddings.device)
         if self.config.current_split != "train":
@@ -273,31 +212,30 @@ class GraphLatentDiffusion(nn.Module):
             t_emb = None  # torch.Tensor().to(noisy_embeddings.device)
         else:
             noisy_embeddings, true_noise = self.add_noise(node_embeddings, t)
-
-        #if (t_emb is not None) and (t_emb.numel() != 0):
-        #    noisy_embeddings_with_t = torch.cat([noisy_embeddings, t_emb], dim=-1)
-        #else:
-        #    noisy_embeddings_with_t = noisy_embeddings
        
         reconstruction_loss = 0
-        if self.config.diffusion_type != "ddim":
-            # J-invariant, from https://arxiv.org/pdf/1901.11365
-            if self.config.mask_random_input_prob > 0 and self.config.current_split == "train":
-                B, N, D = noisy_embeddings.shape
-                mask = (torch.rand(B, N, device=noisy_embeddings.device) < self.config.mask_random_input_prob).to(torch.float32)
-                noisy_embeddings = noisy_embeddings * (1 - mask.unsqueeze(-1))   # Keep ones that should not be masked
-                noisy_embeddings += (torch.randn_like(noisy_embeddings) * mask.unsqueeze(-1))  # Replace masked with noise
-            else:
-                mask = torch.ones_like(noisy_embeddings[:,:,0], device=noisy_embeddings.device)  # No masking, all ones
-
-            denoised_embeddings = self.denoiser(noisy_embeddings, t_emb, edge_index_list)
-
-            # --- Log GPU memory and denoiser output size ---
-            if torch.cuda.is_available():
-                wandb.log({"gpu/denoiser_memory_MB": torch.cuda.memory_allocated() / 1024**2,
-                           "step": self.config.current_step})
-            # print(f"Denoiser output shape: {tuple(denoised_embeddings.shape)}, dtype: {denoised_embeddings.dtype}, size: {denoised_embeddings.element_size() * denoised_embeddings.nelement() / 1024**2:.2f} MB")
+        if self.config.diffusion_type == "ddim":
+            raise ValueError("GraphLatentDiffusionDDIM should be used for diffusion_type 'ddim'.")
         
+        # J-invariant, from https://arxiv.org/pdf/1901.11365
+        if self.config.mask_random_input_prob > 0 and self.config.current_split == "train":
+            B, N, D = noisy_embeddings.shape
+            mask = (torch.rand(B, N, device=noisy_embeddings.device) < self.config.mask_random_input_prob).to(torch.float32)
+            noisy_embeddings = noisy_embeddings * (1 - mask.unsqueeze(-1))   # Keep ones that should not be masked
+            noisy_embeddings += (torch.randn_like(noisy_embeddings) * mask.unsqueeze(-1))  # Replace masked with noise
+        else:
+            mask = torch.ones_like(noisy_embeddings[:,:,0], device=noisy_embeddings.device)  # No masking, all ones
+            print("MASK SHAPES: ", noisy_embeddings.shape, mask.shape)
+
+        denoised_embeddings = self.denoiser(noisy_embeddings, t_emb, edge_index_list)
+
+        # --- Log GPU memory and denoiser output size ---
+        if self.config.log_memory and torch.cuda.is_available():
+            wandb.log({"gpu/denoiser_memory_MB": torch.cuda.memory_allocated() / 1024**2,
+                        "step": self.config.current_step})
+        # print(f"Denoiser output shape: {tuple(denoised_embeddings.shape)}, dtype: {denoised_embeddings.dtype}, size: {denoised_embeddings.element_size() * denoised_embeddings.nelement() / 1024**2:.2f} MB")
+        
+
         if self.config.diffusion_type == "x0":
             if self.config.reconstruction_scale > 0 and not self.config.gnn_only:
                 # Calculate loss only for generated masked parts, i.e. ones that were hidden are now generated, loss for them
@@ -338,34 +276,53 @@ class GraphLatentDiffusion(nn.Module):
             denoised_embeddings = (denoised_embeddings - denoised_embeddings.mean())/denoised_embeddings.std()
             # denoised_embeddings = (0.1*node_embeddings) + (0.9*denoised_embeddings)
         
-        elif self.config.diffusion_type == "ddim":
-            if self.config.current_split == "train":
-                _ = self.optimize_diffusion(node_embeddings, edge_index_list)
-            with torch.no_grad():
-                denoised_embeddings = self.sample_diffusion(node_embeddings.detach().clone(), edge_index_list)
-            denoised_embeddings = 1 * denoised_embeddings + 0.0 * node_embeddings
-            reconstruction_loss = 0
-            
-            # --- Log GPU memory and final output size ---
-            if torch.cuda.is_available():
-                # print(f"[GPU] After diffusion output: {torch.cuda.memory_allocated() / 1024**2:.2f} MB (max: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB)")
-                wandb.log({"gpu/diffusion_output_memory_MB": torch.cuda.memory_allocated() / 1024**2,
-                           "step": self.config.current_step})
-            # print(f"Diffusion output shape: {tuple(denoised_embeddings.shape)}, dtype: {denoised_embeddings.dtype}, size: {denoised_embeddings.element_size() * denoised_embeddings.nelement() / 1024**2:.2f} MB")
         self.log_embedding_distribution(node_embeddings, denoised_embeddings)
 
         # Attention improvement loss
         attn_loss = 0
+        same_class_loss = 0
         if self.structure_scale > 0:
             attn_loss = self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index_list)
-
-        # Auxiliary edge attention loss (if augmentation info provided)
-        aux_loss = 0
+            if labels is not None:
+                same_class_loss = self.attention_same_class_improvement_loss(node_embeddings, denoised_embeddings,
+                                                                       labels, edge_index_list)
+                same_class_loss = same_class_loss
         if aug_added_edges is not None and aug_removed_edges is not None and aug_original_edges is not None:
             aux_loss = self.aux_edge_attention_loss(denoised_embeddings, aug_added_edges, aug_removed_edges, aug_original_edges)
-        total_loss = (attn_loss*self.structure_scale) + (reconstruction_loss*self.reconstruction_scale)
-        if aux_loss != 0:
-            total_loss = total_loss + (aux_loss*self.config.aug_loss_scale)  # weight for aux loss
+        total_loss = 0
+        if isinstance(attn_loss, torch.Tensor) and self.structure_scale > 0:
+            total_loss = total_loss + (attn_loss * self.structure_scale)
+
+        # if isinstance(same_class_loss, torch.Tensor) and same_class_loss != 0:
+        #    total_loss = total_loss + same_class_loss
+
+        if isinstance(reconstruction_loss, torch.Tensor) and self.reconstruction_scale > 0:
+            total_loss = total_loss + (reconstruction_loss * self.reconstruction_scale)
+
+        if isinstance(aux_loss, torch.Tensor) and aux_loss != 0:
+            total_loss = total_loss + (aux_loss * self.config.aug_loss_scale)
+            
+        if isinstance(total_loss, int) and total_loss == 0:
+             total_loss = torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
+
+        # Log individual diffusion losses
+        log_payload = {}
+        if isinstance(attn_loss, torch.Tensor):
+            log_payload["loss/diffusion_attention"] = attn_loss.detach() * self.structure_scale
+        if isinstance(same_class_loss, torch.Tensor):
+            log_payload["loss/diffusion_same_class_attention"] = same_class_loss.detach()
+        if isinstance(reconstruction_loss, torch.Tensor):
+            log_payload["loss/diffusion_reconstruction"] = reconstruction_loss.detach()
+        if isinstance(aux_loss, torch.Tensor) and not isinstance(aux_loss, int):
+            log_payload["loss/diffusion_aux"] = aux_loss.detach()
+        if isinstance(total_loss, torch.Tensor):
+            log_payload["loss/diffusion_total"] = total_loss.detach()
+        step_value = getattr(self.config, "current_step", None)
+        if step_value is not None:
+            log_payload["step"] = step_value
+        if log_payload:
+            wandb.log(log_payload)
+
         return denoised_embeddings, total_loss
         # return denoised_embeddings, (attn_loss*self.structure_scale) + (reconstruction_loss*self.reconstruction_scale)
 
@@ -412,6 +369,138 @@ class GraphLatentDiffusion(nn.Module):
                 loss_removed = 0.0
             losses.append(loss_added + loss_removed)
         return sum(losses) / max(1, len(losses))
+
+
+class GraphLatentDiffusionDDIM(GraphLatentDiffusion):
+    """DDIM-only wrapper that forces the base diffusion to run in DDIM mode."""
+
+    def __init__(self, input_dim=768, latent_dim=768, num_denoising_steps=100, config=None):
+        if config is not None:
+            setattr(config, "diffusion_type", "ddim")
+        super().__init__(input_dim=input_dim,
+                         latent_dim=latent_dim,
+                         num_denoising_steps=num_denoising_steps,
+                         config=config)
+
+    def forward(self, node_embeddings, edge_index_list, aug_added_edges=None, aug_removed_edges=None, aug_original_edges=None, labels=None):
+        if self.config is not None:
+            self.config.diffusion_type = "ddim"
+
+        B = node_embeddings.shape[0]
+        t = torch.tensor([self.num_denoising_steps - 1], device=node_embeddings.device).repeat(B)
+        if self.config.current_split != "train":
+            t = torch.ones_like(t) * (self.num_denoising_steps // 2)
+
+        # Train denoiser over all steps when training, then run deterministic sampling
+        if self.config.current_split == "train":
+            _ = self.optimize_diffusion(node_embeddings, edge_index_list)
+        with torch.no_grad():
+            denoised_embeddings = self.sample_diffusion(node_embeddings.detach().clone(), edge_index_list)
+        reconstruction_loss = torch.tensor(0.0, device=node_embeddings.device)
+
+        # Log GPU memory and final output size
+        if self.config.log_memory and torch.cuda.is_available():
+            wandb.log({"gpu/diffusion_output_memory_MB": torch.cuda.memory_allocated() / 1024**2,
+                       "step": getattr(self.config, "current_step", None)})
+
+        # Attention improvement loss
+        attn_loss = 0
+        if self.structure_scale > 0:
+            attn_loss = self.attention_improvement_loss(node_embeddings, denoised_embeddings, edge_index_list)
+            if labels is not None:
+                attn_loss += self.attention_same_class_improvement_loss(node_embeddings, denoised_embeddings,
+                                                                       labels, edge_index_list)
+        # Auxiliary edge attention loss (if augmentation info provided)
+        aux_loss = 0
+        if aug_added_edges is not None and aug_removed_edges is not None and aug_original_edges is not None:
+            aux_loss = self.aux_edge_attention_loss(denoised_embeddings, aug_added_edges, aug_removed_edges, aug_original_edges)
+
+        total_loss = 0
+        if isinstance(attn_loss, torch.Tensor) and self.structure_scale > 0:
+            total_loss = total_loss + (attn_loss * self.structure_scale)
+        if isinstance(reconstruction_loss, torch.Tensor) and self.reconstruction_scale > 0:
+            total_loss = total_loss + (reconstruction_loss * self.reconstruction_scale)
+        if isinstance(aux_loss, torch.Tensor) and aux_loss != 0:
+            total_loss = total_loss + (aux_loss * self.config.aug_loss_scale)
+        if isinstance(total_loss, int) and total_loss == 0:
+            total_loss = torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
+
+        # Log losses
+        log_payload = {}
+        if isinstance(attn_loss, torch.Tensor):
+            log_payload["loss/diffusion_attention"] = attn_loss.detach()
+        if isinstance(reconstruction_loss, torch.Tensor):
+            log_payload["loss/diffusion_reconstruction"] = reconstruction_loss.detach()
+        if isinstance(aux_loss, torch.Tensor) and not isinstance(aux_loss, int):
+            log_payload["loss/diffusion_aux"] = aux_loss.detach()
+        if isinstance(total_loss, torch.Tensor):
+            log_payload["loss/diffusion_total"] = total_loss.detach()
+        step_value = getattr(self.config, "current_step", None)
+        if step_value is not None:
+            log_payload["step"] = step_value
+        if log_payload:
+            wandb.log(log_payload)
+
+        self.log_embedding_distribution(node_embeddings, denoised_embeddings)
+        return denoised_embeddings, total_loss
+
+    def optimize_diffusion(self, node_embeddings, edge_index_list):
+        """Optimize only the diffusion model over all timesteps for this batch."""
+        B = node_embeddings.size(0)
+        t = torch.tensor([self.num_denoising_steps - 1], device=node_embeddings.device).repeat(B)
+        noisy_x, true_noise = self.add_noise(node_embeddings.detach().clone(), t)
+
+        x_t = noisy_x.clone()
+        mse = MSELoss()
+
+        for step in reversed(range(self.num_denoising_steps)):
+            x_t = x_t.detach()
+            t_step = torch.tensor([step], device=node_embeddings.device).repeat(B)
+            t_emb = self.timestep_embeddings(t_step)
+
+            noise_pred = self.denoiser(x_t, t_emb, edge_index_list)
+            loss = mse(true_noise, noise_pred)
+
+            self.diffusion_optimizer.zero_grad()
+            loss.backward(retain_graph=False)
+            torch.nn.utils.clip_grad_norm_(self.denoiser.parameters(), 5.0)
+            self.diffusion_optimizer.step()
+
+            # DDIM-like deterministic update
+            x0_pred = self.predict_x0_from_noise(x_t, noise_pred, t_step)
+            if step > 0:
+                alpha_prev = self.alphas_cumprod[step - 1]
+                x_t = torch.sqrt(alpha_prev).unsqueeze(0).unsqueeze(-1) * x0_pred + \
+                      torch.sqrt(1 - alpha_prev).unsqueeze(0).unsqueeze(-1) * noise_pred
+            else:
+                x_t = x0_pred.detach()
+
+        self.diffusion_optimizer.zero_grad()
+        return x_t
+
+    def sample_diffusion(self, node_embeddings, edge_index_list):
+        """Run deterministic DDIM-like sampling (no optimizer update)."""
+        B = node_embeddings.size(0)
+        t = torch.tensor([self.num_denoising_steps - 1], device=node_embeddings.device).repeat(B)
+        noisy_x, _ = self.add_noise(node_embeddings.detach(), t)
+
+        x_t = noisy_x.detach().clone()
+
+        for step in reversed(range(self.num_denoising_steps)):
+            t_step = torch.tensor([step], device=node_embeddings.device).repeat(B)
+            t_emb = self.timestep_embeddings(t_step).unsqueeze(1).expand(-1, x_t.size(1), -1)
+
+            noise_pred = self.denoiser(x_t, t_emb, edge_index_list)
+
+            x0_pred = self.predict_x0_from_noise(x_t, noise_pred, t_step)
+            if step > 0:
+                alpha_prev = self.alphas_cumprod[step - 1]
+                x_t = torch.sqrt(alpha_prev).unsqueeze(0).unsqueeze(-1) * x0_pred + \
+                      torch.sqrt(1 - alpha_prev).unsqueeze(0).unsqueeze(-1) * noise_pred
+            else:
+                x_t = x0_pred
+
+        return x_t
 
 if __name__ == "__main__":
     from torch_geometric.utils import erdos_renyi_graph
