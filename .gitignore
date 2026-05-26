@@ -186,3 +186,9 @@ data
 datasets
 citeceer_experiments
 temp_experiments
+experiments
+new_experiments/experiments/
+data/
+datasets/
+temp_experiments/
+citeceer_experiments

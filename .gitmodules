@@ -1,0 +1,9 @@
+[submodule "new_experiments/sota_architectures/GraphGPS"]
+	path = new_experiments/sota_architectures/GraphGPS
+	url = https://github.com/sajan-gohil/GraphGPS.git
+[submodule "new_experiments/sota_architectures/Graph-ViT-MLPMixer"]
+	path = new_experiments/sota_architectures/Graph-ViT-MLPMixer
+	url = https://github.com/XiaoxinHe/Graph-ViT-MLPMixer.git
+[submodule "new_experiments/sota_architectures/GRIT"]
+	path = new_experiments/sota_architectures/GRIT
+	url = https://github.com/sajan-gohil/GRIT
