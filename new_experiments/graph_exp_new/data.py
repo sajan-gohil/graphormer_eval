@@ -159,6 +159,14 @@ def get_dataset_info(name):
 def _infer_output_dim(info, dataset):
     if info.get("output_dim") not in ("auto", None):
         return info["output_dim"]
+    # For regression tasks, num_classes is meaningless (e.g. ZINC returns the
+    # count of unique float targets). Infer from target tensor shape instead.
+    if info.get("task_type") == "regression":
+        _ds_data = getattr(dataset, "_data", None) or getattr(dataset, "data", None)
+        if _ds_data is not None and getattr(_ds_data, "y", None) is not None:
+            y = _ds_data.y
+            return int(y.size(-1)) if y.dim() > 1 else 1
+        return 1
     if hasattr(dataset, "num_classes") and dataset.num_classes not in (None, -1, 0):
         return int(dataset.num_classes)
     if hasattr(dataset, "num_targets") and dataset.num_targets not in (None, 0):
