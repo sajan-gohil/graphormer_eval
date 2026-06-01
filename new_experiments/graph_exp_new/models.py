@@ -4,8 +4,7 @@ import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ogb.graphproppred.mol_encoder import AtomEncoder, BondEncoder
-from torch_geometric.utils import to_dense_batch, scatter
+from torch_geometric.utils import to_dense_batch
 from torch_geometric.nn import global_add_pool
 
 from data import get_dataset_info
@@ -16,31 +15,72 @@ FULL_ATOM_FEATURE_DIMS = [119, 5, 12, 12, 10, 6, 6, 2, 2]
 
 
 class NodeEncoder(nn.Module):
-    """Atom + bond-aggregated encoder for peptides-style graphs."""
+    """Peptides-style atom feature encoder with optional Laplacian PE.
 
+    For OGB peptides categorical node features, this matches the official
+    implementation by summing per-feature embeddings. For other datasets,
+    a simple dimension-matching fallback keeps the pipelines usable.
+
+    For non-Peptides LRGB datasets (e.g. PascalVOC-SP) prefer building via
+    :func:`build_node_encoder` — it returns ``LinearNodeEncoder`` with an
+    actual learnable input projection rather than this class's pad/truncate
+    fallback.
+    """
     def __init__(self, hidden_dim=64, lap_pe_dim=0):
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.atom_encoder = AtomEncoder(hidden_dim // 2)
-        self.bond_encoder = BondEncoder(hidden_dim // 2)
-        self.proj = nn.Linear(hidden_dim, hidden_dim)
+        self.num_atom_features = len(FULL_ATOM_FEATURE_DIMS)
+
+        self.atom_feature_embeddings = nn.ModuleList([
+            nn.Embedding(num_embeddings=dim, embedding_dim=hidden_dim)
+            for dim in FULL_ATOM_FEATURE_DIMS
+        ])
+        for emb in self.atom_feature_embeddings:
+            nn.init.normal_(emb.weight, std=0.01)
+
+        self.atom_post = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+        )
+
+        # Non-peptides fallback for continuous or differently-shaped node features.
+        # Keep this parameter-free to avoid lazy-module initialization issues during
+        # parameter counting/optimizer construction before the first forward pass.
+
+        # Optional Laplacian positional encoding
         self.lap_pe_dim = lap_pe_dim
         if lap_pe_dim > 0:
             self.lap_pe_encoder = nn.Linear(lap_pe_dim, hidden_dim)
 
-    def forward(self, x, edge_index, edge_attr, lap_pe=None):
-        h = self.atom_encoder(x)
-        if edge_index is not None and edge_attr is not None:
-            row = edge_index[0]
-            edge_emb = self.bond_encoder(edge_attr)
-            edge_aggr = scatter(edge_emb, row, dim=0, dim_size=h.size(0), reduce="add")
-        else:
-            edge_aggr = h.new_zeros(h.size(0), h.size(1))
-        h = torch.cat([h, edge_aggr], dim=-1)
-        h = self.proj(h)
+    def _encode_categorical_atom_features(self, x):
+        h = 0
+        for i, emb in enumerate(self.atom_feature_embeddings):
+            feat_i = x[:, i].long().clamp(min=0, max=emb.num_embeddings - 1)
+            h = h + emb(feat_i)
+        return self.atom_post(h)
 
+    def forward(self, x, edge_index, edge_attr, lap_pe=None):
+        del edge_index, edge_attr  # Unused in the official peptides-style encoder.
+
+        is_integral = x.dtype in (
+            torch.int8, torch.int16, torch.int32, torch.int64,
+            torch.uint8, torch.bool,
+        )
+        if x.dim() == 2 and x.size(1) == self.num_atom_features and is_integral:
+            h = self._encode_categorical_atom_features(x)
+        else:
+            x_float = x.float()
+            if x_float.size(-1) == self.hidden_dim:
+                h = x_float
+            elif x_float.size(-1) > self.hidden_dim:
+                h = x_float[:, :self.hidden_dim]
+            else:
+                h = F.pad(x_float, (0, self.hidden_dim - x_float.size(-1)))
+
+        # Add Laplacian positional encoding if available
         if self.lap_pe_dim > 0 and lap_pe is not None:
             h = h + self.lap_pe_encoder(lap_pe)
+
         return h
 
 
