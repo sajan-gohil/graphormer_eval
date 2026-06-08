@@ -242,6 +242,7 @@ class Task:
         (batch_or_nodes, num_classes). Some datasets store labels with an
         extra singleton dimension, so flattening keeps loss/metrics aligned.
         """
+        print("METRICS _flatten_label ===================== ", y.dim())
         if y.dim() > 1:
             return y.view(-1)
         return y
@@ -278,8 +279,8 @@ class Task:
 
     def labels_to_numpy(self, y) -> np.ndarray:
         """Convert ground-truth tensors to numpy aligned with ``predict``."""
-        if self.task_type == "multiclass":
-            return self._flatten_labels(y).detach().cpu().numpy()
+        #if self.task_type == "multiclass":
+        #    return self._flatten_labels(y).detach().cpu().numpy()
         return y.detach().cpu().numpy()
 
     # --- Final metric -----------------------------------------------

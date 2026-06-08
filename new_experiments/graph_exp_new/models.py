@@ -146,6 +146,7 @@ def build_node_encoder(hidden_dim, lap_pe_dim=0, dataset_name="Peptides-func",
                 RuntimeWarning,
             )
             in_dim = hidden_dim
+        print("IN DIM NODE ENCODER = ==================== ", in_dim)
         return LinearNodeEncoder(
             in_dim=in_dim,
             hidden_dim=hidden_dim,

@@ -133,9 +133,11 @@ DATASET_CHOICES = sorted(set(GRAPH_DATASETS.keys()) | set(DATASET_ALIASES.keys()
 def canonicalize_dataset_name(name: str) -> str:
     """Return the canonical dataset name (resolving aliases)."""
     if name in GRAPH_DATASETS:
+        print("Returning ================= ", name, flush=True)
         return name
     key = name.lower()
     if key in DATASET_ALIASES:
+        print("Returning ===================", name, DATASET_ALIASES[key])
         return DATASET_ALIASES[key]
     alias_list = sorted(DATASET_ALIASES.keys())
     raise ValueError(
@@ -153,10 +155,12 @@ def get_dataset_info(name):
     # Return a shallow copy so callers can't accidentally mutate the registry.
     info = dict(GRAPH_DATASETS[canonical_name])
     info["name"] = canonical_name
+    print("Returning INFO ======================== ", info)
     return info
 
 
 def _infer_output_dim(info, dataset):
+    print("INFERRING OUTOUT DIM =========== ", info)
     if info.get("output_dim") not in ("auto", None):
         return info["output_dim"]
     # For regression tasks, num_classes is meaningless (e.g. ZINC returns the
@@ -165,8 +169,10 @@ def _infer_output_dim(info, dataset):
         _ds_data = getattr(dataset, "_data", None) or getattr(dataset, "data", None)
         if _ds_data is not None and getattr(_ds_data, "y", None) is not None:
             y = _ds_data.y
+            print("RETURning regression output dim ======================== ", int(y.size(-1)) if y.dim() > 1 else 1)
             return int(y.size(-1)) if y.dim() > 1 else 1
         return 1
+    print("OUT DIM DATASET ==== ", dataset, "num classes", hasattr(dataset, "num_classes"), "targets", hasattr(dataset, "num_targets"), "num tasks",  hasattr(dataset, "num_tasks"))
     if hasattr(dataset, "num_classes") and dataset.num_classes not in (None, -1, 0):
         return int(dataset.num_classes)
     if hasattr(dataset, "num_targets") and dataset.num_targets not in (None, 0):
@@ -176,33 +182,43 @@ def _infer_output_dim(info, dataset):
     if hasattr(dataset, "data") and getattr(dataset.data, "y", None) is not None:
         y = dataset.data.y
         if y.numel() == 0:
+            print("OUT DIM RETURNED = ====== ", 1)
             return 1
         if info.get("task_type") == "multiclass":
             if torch.is_tensor(y):
                 y_flat = y.reshape(-1)
                 y_flat = y_flat[y_flat >= 0]
                 if y_flat.numel() == 0:
+                    print("OUT DIM RETURNED = multiclass task ====== ", 1)
                     return 1
                 y_np = y_flat.cpu().numpy()
             else:
                 y_np = np.asarray(y).reshape(-1)
                 y_np = y_np[y_np >= 0]
+            print("OUT DIM RETURNED = multiclass 2 ====== ", int(np.unique(y_np).size) if y_np.size else 1)
             return int(np.unique(y_np).size) if y_np.size else 1
+        print("OUT DIM RETURNED = not multiclass 2 ====== ", int(y.size(-1)) if y.dim() > 1 else 1)
         return int(y.size(-1)) if y.dim() > 1 else 1
+    print("OUT DIM RETURNED = final ================= ", info.get("output_dim", 1))
     return info.get("output_dim", 1)
 
 
 def _infer_node_feat_dim(dataset):
+    print("INFERRING NODE FEAT DIM ============== ")
     if hasattr(dataset, "num_node_features") and dataset.num_node_features is not None:
+        print(int(dataset.num_node_features))
         return int(dataset.num_node_features)
     if hasattr(dataset, "num_features") and dataset.num_features is not None:
+        print(int(dataset.num_features))
         return int(dataset.num_features)
     if hasattr(dataset, "data") and getattr(dataset.data, "x", None) is not None:
+        print(int(dataset.data.x.size(-1)))
         return int(dataset.data.x.size(-1))
     try:
         # Some datasets disallow direct indexing or have empty splits.
         sample = dataset[0]
         if hasattr(sample, "x") and sample.x is not None:
+            print("Returnign sample === ", int(sample.x.size(-1)))
             return int(sample.x.size(-1))
     except (IndexError, AttributeError, TypeError):
         pass
@@ -390,7 +406,7 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
 
     # Optional Laplacian PE transform (computed on every access)
     transform = AddLaplacianPE(k=lap_pe_dim) if use_lap_pe else None
-
+    print("TRANSFORMS ========== ", transform)
     def _build_dataset(split):
         if source == "lrgb":
             return LRGBDataset(root="./data", name=pyg_name, split=split,
@@ -410,6 +426,7 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
     # Fill dynamic fields like output_dim/node_feat_dim when marked as "auto".
     info = dict(info)
     info["output_dim"] = _infer_output_dim(info, train_ds)
+    print("INFO NODE ENCODER  ============================= ", info.get("node_encoder"), info.get("node_feat_dim"))
     if info.get("node_encoder") == "linear":
         inferred = _infer_node_feat_dim(train_ds)
         if info.get("node_feat_dim") in ("auto", None):
