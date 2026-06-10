@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 {'dataset': 'Peptides-func', 'max_hops': 40, 'use_lap_pe': False, 'lap_pe_dim': 8, 'hidden_dim': 640, 'num_heads': 40, 'ffn_ratio': 4, 'num_layers': 1, 'dropout': 0.2, 'graph_pool': 'sum', 'hop_mode': 'window', 'hop_window': 1, 'num_global_heads': 0, 'lr': 0.001, 'lr_min': 1e-06, 'weight_decay': 0.0003, 'batch_size': 64, 'max_epochs': 200, 'patience': 40, 'warmup_ratio': 0.05, 'grad_clip': 1.0, 'num_workers': 4, 'dist_mask_workers': 8, 'device': None, 'save_dir': 'checkpoints_hop_masked_4', 'seed': 0}
+=======
+{'dataset': 'Peptides-func', 'max_hops': 40, 'use_lap_pe': False, 'lap_pe_dim': 8, 'hidden_dim': 640, 'num_heads': 40, 'ffn_ratio': 4, 'num_layers': 1, 'dropout': 0.2, 'graph_pool': 'sum', 'hop_mode': 'window', 'hop_window': 1, 'num_global_heads': 0, 'lr': 0.001, 'lr_min': 1e-06, 'weight_decay': 0.0003, 'batch_size': 64, 'max_epochs': 200, 'patience': 40, 'reduce_lr_patience': 20, 'warmup_ratio': 0.05, 'grad_clip': 1.0, 'num_workers': 4, 'dist_mask_workers': 8, 'device': None, 'save_dir': 'checkpoints_hop_masked_4', 'seed': 0}
+>>>>>>> 9d6fc1ebb799bda0d98fd7b1ba4a5767c5ee2837
 Unknown args =  []
 [Peptides-func] task=multi_label level=graph metric=macro_ap (higher_is_better=True)
   Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
@@ -46,6 +50,7 @@ Head -> hop set assignment:
   head 38: [0, 37, 38, 39]
   head 39: [0, 38, 39]
 trainable params: 5.863M
+<<<<<<< HEAD
 epoch 000 | 113.3s | train loss 0.3759 AP 0.2084 | val loss 0.3052 AP 0.3450 | test loss 0.3049 AP 0.3499 | best val 0.3450 (epoch 0, test 0.34993703585787167)
 epoch 001 | 113.0s | train loss 0.2960 AP 0.3553 | val loss 0.2787 AP 0.4083 | test loss 0.2777 AP 0.4023 | best val 0.4083 (epoch 1, test 0.4023131677063973)
 epoch 002 | 113.8s | train loss 0.2791 AP 0.3932 | val loss 0.2679 AP 0.4416 | test loss 0.2691 AP 0.4266 | best val 0.4416 (epoch 2, test 0.4265859989571411)
@@ -163,3 +168,5 @@ epoch 113 | 101.7s | train loss 0.0448 AP 0.9609 | val loss 0.3444 AP 0.6730 | t
 epoch 114 | 100.2s | train loss 0.0416 AP 0.9662 | val loss 0.3327 AP 0.6768 | test loss 0.3267 AP 0.6989 | best val 0.6873 (epoch 74, test 0.685103407249356)
 early stopping at epoch 114 (no val improvement in 40 epochs)
 BEST: val AP 0.6873 | test AP 0.6851 (epoch 74)
+=======
+>>>>>>> 9d6fc1ebb799bda0d98fd7b1ba4a5767c5ee2837
