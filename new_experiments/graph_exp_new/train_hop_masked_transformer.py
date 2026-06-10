@@ -38,7 +38,7 @@ torch.set_float32_matmul_precision("high")
 
 from data import get_loaders
 from metrics import build_task
-from model_hop_masked_transformer_temp import HopMaskedTransformerModel
+from model_hop_masked_transformer import HopMaskedTransformerModel
 from optim_utils import build_grouped_optimizer_and_scheduler
 
 
