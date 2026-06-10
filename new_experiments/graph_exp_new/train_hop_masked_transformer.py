@@ -7,7 +7,8 @@ the empirical observation that approaches collapsing the K hop axis
 (LRU, proxy-bottleneck routing, GNN-pooling) underperform the simple
 concat baseline.
 
-Datasets: Peptides-func, Peptides-struct, PascalVOC-SP.
+Datasets: Peptides-func, Peptides-struct, PascalVOC-SP, MNIST, CIFAR10,
+PATTERN, CLUSTER, ZINC12k.
 
 Examples:
     # Default: contiguous partition of hops [1..K-1] across heads.
@@ -36,7 +37,7 @@ import numpy as np
 import torch
 # torch.set_float32_matmul_precision("high")
 
-from data import get_loaders
+from data import DATASET_CHOICES, get_loaders
 from metrics import build_task
 from model_hop_masked_transformer import HopMaskedTransformerModel
 from optim_utils import build_grouped_optimizer_and_scheduler
@@ -47,7 +48,7 @@ def build_parser():
 
     # Dataset
     p.add_argument("--dataset", type=str, default="Peptides-func",
-                   choices=["Peptides-func", "Peptides-struct", "PascalVOC-SP"])
+                   choices=DATASET_CHOICES)
     p.add_argument("--max_hops", type=int, default=40,
                    help="K — total hop levels in the precomputed dist_masks. "
                         "Use ~12 for PascalVOC-SP.")
@@ -162,13 +163,7 @@ def main():
     np.random.seed(args.seed)
 
     os.makedirs(args.save_dir, exist_ok=True)
-    task = build_task(args.dataset)
-
-    print(f"[{args.dataset}] task={task.task_type} level={task.level} "
-          f"metric={task.metric_name} (higher_is_better={task.higher_is_better})",
-          flush=True)
-
-    train_loader, val_loader, test_loader, _, _, _ = get_loaders(
+    train_loader, val_loader, test_loader, _, _, _, dataset_info = get_loaders(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         use_dist_masks=True,
@@ -177,7 +172,15 @@ def main():
         use_lap_pe=args.use_lap_pe,
         lap_pe_dim=args.lap_pe_dim,
         dataset_name=args.dataset,
+        return_info=True,
     )
+    dataset_name = dataset_info["name"]
+
+    task = build_task(dataset_name, dataset_info=dataset_info)
+
+    print(f"[{dataset_name}] task={task.task_type} level={task.level} "
+          f"metric={task.metric_name} (higher_is_better={task.higher_is_better})",
+          flush=True)
 
     model = HopMaskedTransformerModel(
         hidden_dim=args.hidden_dim,
@@ -192,7 +195,8 @@ def main():
         output_dim=task.output_dim,
         graph_pool=args.graph_pool,
         task_level=task.level,
-        dataset_name=args.dataset,
+        dataset_name=dataset_name,
+        node_feat_dim=dataset_info.get("node_feat_dim"),
         lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
         block_diag_out=args.block_diag_out,
         dynamic_cross_hop=args.dynamic_cross_hop,
@@ -301,7 +305,7 @@ def main():
             best_test = te_metric
             best_epoch = epoch
             epochs_since_improve = 0
-            ckpt_path = os.path.join(args.save_dir, f"best_{args.dataset}.pt")
+            ckpt_path = os.path.join(args.save_dir, f"best_{dataset_name}.pt")
             torch.save(
                 {
                     "model": model.state_dict(),

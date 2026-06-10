@@ -58,7 +58,7 @@ def build_parser():
 
     # Dataset
     p.add_argument("--dataset", type=str, default="Peptides-func",
-                   choices=["Peptides-func", "Peptides-struct", "PascalVOC-SP"])
+                   choices=["Peptides-func", "Peptides-struct", "PascalVOC-SP", "mnist", "pattern", "cifar10", "cluster", "zinc12k"])
     p.add_argument("--max_hops", type=int, default=40)
     p.add_argument("--use_lap_pe", action="store_true", default=False)
     p.add_argument("--lap_pe_dim", type=int, default=8)
@@ -115,17 +115,17 @@ def suggest_hparams(trial: optuna.Trial) -> dict:
     # num_heads must divide hidden_dim.  We suggest both and constrain
     # below; invalid combos (head/dim mismatch) are caught and pruned.
     hp["hidden_dim"] = trial.suggest_categorical(
-        "hidden_dim", [128, 256, 320, 384, 512, 640])
+        "hidden_dim", [40, 80, 160, 320, 640])
     hp["num_heads"] = trial.suggest_categorical(
-        "num_heads", [4, 8, 16, 20, 32, 40])
-    hp["ffn_ratio"] = trial.suggest_categorical("ffn_ratio", [2, 4])
-    hp["num_layers"] = trial.suggest_int("num_layers", 1, 6)
+        "num_heads", [4, 8, 16, 20, 40])
+    hp["ffn_ratio"] = trial.suggest_categorical("ffn_ratio", [1, 2, 3])
+    hp["num_layers"] = trial.suggest_int("num_layers", 1, 3)
     hp["dropout"] = trial.suggest_float("dropout", 0.05, 0.4, step=0.05)
 
     # ---- Hop-to-head assignment --------------------------------------
     hp["hop_mode"] = trial.suggest_categorical(
         "hop_mode", ["contiguous", "window"])
-    hp["hop_window"] = trial.suggest_int("hop_window", 1, 5)
+    hp["hop_window"] = trial.suggest_int("hop_window", 1, 7)
     hp["num_global_heads"] = trial.suggest_int("num_global_heads", 0, 4)
 
     # ---- Pooling / task head -----------------------------------------
@@ -209,6 +209,7 @@ def make_objective(args, train_loader, val_loader, task):
             task_level=task.level,
             dataset_name=args.dataset,
             lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
+            node_feat_dim=task.node_feat_dim,
         ).to(args.device)
 
     def objective(trial: optuna.Trial) -> float:
@@ -387,12 +388,10 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    task = build_task(args.dataset)
-    print(f"[{args.dataset}] task={task.task_type}  metric={task.metric_name} "
-          f"(higher_is_better={task.higher_is_better})")
-
     # ---- Load data (full) then subsample train -----------------------
-    train_loader, val_loader, _, _, _, _ = get_loaders(
+    # Use return_info=True so that "auto" fields (output_dim, node_feat_dim)
+    # are resolved from the actual dataset before we build the Task.
+    train_loader, val_loader, _, _, _, _, resolved_info = get_loaders(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         use_dist_masks=True,
@@ -401,7 +400,12 @@ def main():
         use_lap_pe=args.use_lap_pe,
         lap_pe_dim=args.lap_pe_dim,
         dataset_name=args.dataset,
+        return_info=True,
     )
+
+    task = build_task(args.dataset, dataset_info=resolved_info)
+    print(f"[{args.dataset}] task={task.task_type}  metric={task.metric_name} "
+          f"(higher_is_better={task.higher_is_better})")
 
     if args.train_fraction < 1.0:
         orig_len = len(train_loader.dataset)
