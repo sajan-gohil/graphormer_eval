@@ -35,7 +35,7 @@ import os
 import time
 import numpy as np
 import torch
-# torch.set_float32_matmul_precision("high")
+torch.set_float32_matmul_precision("high")
 
 from data import DATASET_CHOICES, get_loaders
 from metrics import build_task
@@ -54,6 +54,18 @@ def build_parser():
                         "Use ~12 for PascalVOC-SP.")
     p.add_argument("--use_lap_pe", action="store_true", default=False)
     p.add_argument("--lap_pe_dim", type=int, default=8)
+    p.add_argument("--mask_type", type=str, default="shortest_path",
+                   choices=["shortest_path", "adj_power"],
+                   help="How hop masks are built. 'shortest_path' (default) "
+                        "uses the precomputed distance shells. 'adj_power' "
+                        "rebuilds masks from powers of the adjacency: slot k = "
+                        "(A^k > 0), reconstructing A from the distance-1 shell. "
+                        "Pair with --adj_self_loops to use (A+I)^k.")
+    p.add_argument("--adj_self_loops", action="store_true", default=False,
+                   help="Only with --mask_type adj_power: use (A+I)^k instead "
+                        "of A^k. (A+I)^k means 'reachable in <= k steps' "
+                        "(monotone, no parity striping on near-bipartite "
+                        "graphs); A^k is exact-length-k walks.")
 
     # Model
     p.add_argument("--hidden_dim", type=int, default=128)
@@ -63,7 +75,19 @@ def build_parser():
     p.add_argument("--num_layers", type=int, default=4)
     p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--graph_pool", type=str, default="sum",
-                   choices=["sum", "mean"])
+                   choices=["sum", "mean", "attention"],
+                   help="Graph-level readout. 'attention' uses a learnable "
+                        "query attending over nodes (Set-Transformer PMA).")
+    p.add_argument("--norm_type", type=str, default="layer",
+                   choices=["layer", "rms", "graph"],
+                   help="Normalization in transformer layers. 'layer' "
+                        "(default) = LayerNorm; 'rms' = RMSNorm; 'graph' = "
+                        "masked GraphNorm (per-graph statistics).")
+    p.add_argument("--v_head_dim", type=int, default=None,
+                   help="Value head dim. Default None = equals QK head dim "
+                        "(hidden_dim // num_heads, original behaviour). Set "
+                        "larger to decouple value capacity from QK "
+                        "(asymmetric attention).")
     p.add_argument("--block_diag_out", action="store_true", default=False,
                    help="Use block-diagonal out_proj in MHA (no cross-head "
                         "mixing inside attention).")
@@ -200,6 +224,10 @@ def main():
         lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
         block_diag_out=args.block_diag_out,
         dynamic_cross_hop=args.dynamic_cross_hop,
+        norm_type=args.norm_type,
+        v_head_dim=args.v_head_dim,
+        mask_type=args.mask_type,
+        adj_self_loops=args.adj_self_loops,
     ).to(args.device)
 
     # Print the head -> hop-set assignment so it's logged for reproducibility.
@@ -347,3 +375,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

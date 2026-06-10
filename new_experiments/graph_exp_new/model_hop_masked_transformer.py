@@ -166,30 +166,127 @@ def build_head_hop_sets(
 # Block-diagonal linear: per-head projection with no cross-head mixing.
 # ---------------------------------------------------------------------------
 class BlockDiagLinear(nn.Module):
-    """Block-diagonal linear: each head's Dh-dim slice is projected
-    independently. Equivalent to H parallel (Dh -> Dh) Linears, stored
-    as a single (H, Dh, Dh) weight tensor for batched einsum.
+    """Block-diagonal linear: each head's slice is projected independently.
+    Equivalent to H parallel (in_dim -> out_dim) Linears, stored as a single
+    (H, in_dim, out_dim) weight tensor for batched einsum.
 
     Preserves per-head identity end-to-end through the output projection,
     so the dedicated cross-hop mixer is the only place where hop channels
     interact.
+
+    ``out_dim`` defaults to ``in_dim`` (square, original behaviour). When the
+    value head dim differs from the QK head dim (asymmetric V), this maps each
+    head's value slab (in_dim = v_head_dim) back to the QK head dim
+    (out_dim = head_dim) so the concatenated output stays at hidden_dim.
     """
 
-    def __init__(self, num_heads: int, head_dim: int):
+    def __init__(self, num_heads: int, in_dim: int, out_dim: Optional[int] = None):
         super().__init__()
+        out_dim = in_dim if out_dim is None else out_dim
         self.num_heads = num_heads
-        self.head_dim = head_dim
-        self.weight = nn.Parameter(torch.empty(num_heads, head_dim, head_dim))
-        self.bias = nn.Parameter(torch.zeros(num_heads, head_dim))
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.weight = nn.Parameter(torch.empty(num_heads, in_dim, out_dim))
+        self.bias = nn.Parameter(torch.zeros(num_heads, out_dim))
         for h in range(num_heads):
             nn.init.kaiming_uniform_(self.weight[h], a=math.sqrt(5))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, N, d = x.shape
-        H, Dh = self.num_heads, self.head_dim
-        x = x.view(B, N, H, Dh)
+        B, N, _ = x.shape
+        H = self.num_heads
+        x = x.view(B, N, H, self.in_dim)
         out = torch.einsum("bnhd,hde->bnhe", x, self.weight) + self.bias
-        return out.reshape(B, N, d)
+        return out.reshape(B, N, H * self.out_dim)
+
+
+# ---------------------------------------------------------------------------
+# Normalization layers. All share a (x, node_mask) signature so the layer can
+# call them uniformly; only GraphNorm uses node_mask.
+# ---------------------------------------------------------------------------
+class LayerNormWrap(nn.Module):
+    """nn.LayerNorm with a (x, node_mask) signature (node_mask ignored)."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x: torch.Tensor, node_mask: Optional[torch.Tensor] = None):
+        return self.norm(x)
+
+
+class RMSNorm(nn.Module):
+    """Root-mean-square layer norm (LayerNorm without mean-centering)."""
+
+    def __init__(self, dim: int, eps: float = 1e-8):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor, node_mask: Optional[torch.Tensor] = None):
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
+        return x / rms * self.weight
+
+
+class GraphNorm(nn.Module):
+    """Masked GraphNorm over the dense (B, N, d) node tensor.
+
+    Subtracts a learnable fraction (alpha) of the per-graph feature mean, then
+    normalises by the per-graph std, with affine (gamma, beta). Statistics are
+    computed over the real nodes of each graph only (using node_mask), so
+    padding does not contaminate the mean/variance.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-5):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.ones(dim))
+        self.gamma = nn.Parameter(torch.ones(dim))
+        self.beta = nn.Parameter(torch.zeros(dim))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor, node_mask: Optional[torch.Tensor] = None):
+        if node_mask is None:
+            m = x.new_ones(x.shape[0], x.shape[1], 1)
+        else:
+            m = node_mask.unsqueeze(-1).to(x.dtype)          # (B, N, 1)
+        cnt = m.sum(dim=1, keepdim=True).clamp_min(1.0)       # (B, 1, 1)
+        mean = (x * m).sum(dim=1, keepdim=True) / cnt         # (B, 1, d)
+        out = x - self.alpha * mean
+        var = ((out * m) ** 2).sum(dim=1, keepdim=True) / cnt  # (B, 1, d)
+        out = out / torch.sqrt(var + self.eps)
+        out = self.gamma * out + self.beta
+        return out * m
+
+
+def build_norm(norm_type: str, dim: int) -> nn.Module:
+    if norm_type == "layer":
+        return LayerNormWrap(dim)
+    if norm_type == "rms":
+        return RMSNorm(dim)
+    if norm_type == "graph":
+        return GraphNorm(dim)
+    raise ValueError(f"Unknown norm_type: {norm_type}")
+
+
+# ---------------------------------------------------------------------------
+# Attention-based graph readout (Set-Transformer PMA with a single seed query).
+# ---------------------------------------------------------------------------
+class AttentionReadout(nn.Module):
+    """Pool a set of node embeddings into one graph vector via a learnable
+    query attending over the (masked) nodes. Replaces sum/mean pooling."""
+
+    def __init__(self, hidden_dim: int, num_heads: int, dropout: float = 0.0):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 1, hidden_dim) * hidden_dim ** -0.5)
+        self.attn = nn.MultiheadAttention(
+            hidden_dim, num_heads, dropout=dropout, batch_first=True
+        )
+
+    def forward(self, x: torch.Tensor, node_mask: torch.Tensor) -> torch.Tensor:
+        """x: (B, N, d); node_mask: (B, N) bool True=real -> (B, d)."""
+        B = x.shape[0]
+        q = self.query.expand(B, 1, -1)
+        out, _ = self.attn(q, x, x, key_padding_mask=~node_mask)
+        return out.squeeze(1)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +354,7 @@ class HopMaskedMHA(nn.Module):
     """
 
     def __init__(self, hidden_dim: int, num_heads: int, dropout: float = 0.0,
-                 block_diag_out: bool = False):
+                 block_diag_out: bool = False, v_head_dim: Optional[int] = None):
         super().__init__()
         if hidden_dim % num_heads != 0:
             raise ValueError(
@@ -266,14 +363,19 @@ class HopMaskedMHA(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
+        # Value head dim defaults to the QK head dim (symmetric, original).
+        self.v_head_dim = self.head_dim if v_head_dim is None else v_head_dim
+        self.v_dim = num_heads * self.v_head_dim
         self.block_diag_out = block_diag_out
         self.q_proj = nn.Linear(hidden_dim, hidden_dim)
         self.k_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.v_proj = nn.Linear(hidden_dim, self.v_dim)
         if block_diag_out:
-            self.out_proj = BlockDiagLinear(num_heads, self.head_dim)
+            # Per-head value slab (v_head_dim) -> QK head dim, so the
+            # concatenated output returns to hidden_dim with no cross-head mix.
+            self.out_proj = BlockDiagLinear(num_heads, self.v_head_dim, self.head_dim)
         else:
-            self.out_proj = nn.Linear(hidden_dim, hidden_dim)
+            self.out_proj = nn.Linear(self.v_dim, hidden_dim)
         self.attn_drop = nn.Dropout(dropout)
 
     def forward(
@@ -283,11 +385,11 @@ class HopMaskedMHA(nn.Module):
         node_mask: torch.Tensor,      # (B, N) bool — True for real nodes
     ) -> torch.Tensor:
         B, N, d = x.shape
-        H, Dh = self.num_heads, self.head_dim
+        H, Dh, Dv = self.num_heads, self.head_dim, self.v_head_dim
 
         q = self.q_proj(x).view(B, N, H, Dh).transpose(1, 2)   # (B, H, N, Dh)
         k = self.k_proj(x).view(B, N, H, Dh).transpose(1, 2)
-        v = self.v_proj(x).view(B, N, H, Dh).transpose(1, 2)
+        v = self.v_proj(x).view(B, N, H, Dv).transpose(1, 2)   # (B, H, N, Dv)
 
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(Dh)  # (B, H, N, N)
 
@@ -306,9 +408,9 @@ class HopMaskedMHA(nn.Module):
         attn = torch.nan_to_num(attn, nan=0.0)
         attn = self.attn_drop(attn)
 
-        out = torch.matmul(attn, v)                       # (B, H, N, Dh)
-        out = out.transpose(1, 2).reshape(B, N, d)        # (B, N, d)
-        return self.out_proj(out)
+        out = torch.matmul(attn, v)                       # (B, H, N, Dv)
+        out = out.transpose(1, 2).reshape(B, N, self.v_dim)  # (B, N, H*Dv)
+        return self.out_proj(out)                         # (B, N, d)
 
 
 # ---------------------------------------------------------------------------
@@ -342,18 +444,21 @@ class HopMaskedTransformerLayer(nn.Module):
         dropout: float = 0.1,
         block_diag_out: bool = False,
         dynamic_cross_hop: bool = False,
+        norm_type: str = "layer",
+        v_head_dim: Optional[int] = None,
     ):
         super().__init__()
-        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm1 = build_norm(norm_type, hidden_dim)
         self.attn = HopMaskedMHA(
-            hidden_dim, num_heads, dropout, block_diag_out=block_diag_out
+            hidden_dim, num_heads, dropout, block_diag_out=block_diag_out,
+            v_head_dim=v_head_dim,
         )
         self.drop1 = nn.Dropout(dropout)
 
         self.use_cross_hop = dynamic_cross_hop
         if dynamic_cross_hop:
             head_dim = hidden_dim // num_heads
-            self.norm_ch = nn.LayerNorm(hidden_dim)
+            self.norm_ch = build_norm(norm_type, hidden_dim)
             self.cross_hop = DynamicCrossHopMixer(
                 num_heads=num_heads,
                 head_dim=head_dim,
@@ -361,7 +466,7 @@ class HopMaskedTransformerLayer(nn.Module):
             )
             self.drop_ch = nn.Dropout(dropout)
 
-        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.norm2 = build_norm(norm_type, hidden_dim)
         self.ffn = nn.Sequential(
             nn.Linear(hidden_dim, ffn_dim),
             nn.GELU(),
@@ -371,10 +476,10 @@ class HopMaskedTransformerLayer(nn.Module):
         self.drop2 = nn.Dropout(dropout)
 
     def forward(self, x, per_head_mask, node_mask):
-        x = x + self.drop1(self.attn(self.norm1(x), per_head_mask, node_mask))
+        x = x + self.drop1(self.attn(self.norm1(x, node_mask), per_head_mask, node_mask))
         if self.use_cross_hop:
-            x = x + self.drop_ch(self.cross_hop(self.norm_ch(x)))
-        x = x + self.drop2(self.ffn(self.norm2(x)))
+            x = x + self.drop_ch(self.cross_hop(self.norm_ch(x, node_mask)))
+        x = x + self.drop2(self.ffn(self.norm2(x, node_mask)))
         return x
 
 
@@ -422,6 +527,10 @@ class HopMaskedTransformerModel(nn.Module):
         node_feat_dim: Optional[int] = None,
         block_diag_out: bool = False,
         dynamic_cross_hop: bool = False,
+        norm_type: str = "layer",
+        v_head_dim: Optional[int] = None,
+        mask_type: str = "shortest_path",
+        adj_self_loops: bool = False,
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -433,6 +542,8 @@ class HopMaskedTransformerModel(nn.Module):
         self.max_hops = max_hops
         self.task_level = task_level
         self.graph_pool = graph_pool
+        self.mask_type = mask_type
+        self.adj_self_loops = adj_self_loops
 
         self.head_hop_sets = build_head_hop_sets(
             max_hops=max_hops,
@@ -442,6 +553,10 @@ class HopMaskedTransformerModel(nn.Module):
             include_self=True,
             num_global_heads=num_global_heads,
         )
+        # Largest hop index any head references — used to bound the number of
+        # adjacency powers computed at runtime when mask_type="adj_power".
+        used = [k for s in self.head_hop_sets if s is not None for k in s]
+        self._max_hop_index = max(used) if used else 0
 
         self.encoder = build_node_encoder(
             hidden_dim=hidden_dim,
@@ -456,9 +571,15 @@ class HopMaskedTransformerModel(nn.Module):
                 hidden_dim, num_heads, ffn_dim, dropout,
                 block_diag_out=block_diag_out,
                 dynamic_cross_hop=dynamic_cross_hop,
+                norm_type=norm_type,
+                v_head_dim=v_head_dim,
             )
             for _ in range(num_layers)
         ])
+
+        self.readout = None
+        if graph_pool == "attention":
+            self.readout = AttentionReadout(hidden_dim, num_heads, dropout=dropout)
 
         self.head = nn.Sequential(
             nn.LayerNorm(hidden_dim),
@@ -471,6 +592,40 @@ class HopMaskedTransformerModel(nn.Module):
     # ----------------------------------------------------------------
     # Build the (B, H, N, N) boolean per-head mask once per forward.
     # ----------------------------------------------------------------
+    def _build_adj_power_masks(self, dist_masks: torch.Tensor) -> torch.Tensor:
+        """Build hop masks from powers of the adjacency matrix instead of
+        shortest-path shells.
+
+        The distance-1 shell (``dist_masks[:, 1]``) is exactly the binary
+        adjacency A. With ``adj_self_loops=False`` slot k is ``(A^k > 0)``
+        (walks of length *exactly* k — note the parity striping on
+        near-bipartite graphs). With ``adj_self_loops=True`` slot k is
+        ``((A + I)^k > 0)`` (reachable in <= k steps — monotone, no parity
+        gaps). Slot 0 is the identity (self), matching the shortest-path
+        convention. Returns a bool tensor of the same (B, K, N, N) shape so
+        the rest of the pipeline is unchanged.
+
+        Powers are accumulated in binarised form (boolean matmul each step),
+        which both avoids float overflow and preserves exact-walk-existence.
+        """
+        B, K, N, _ = dist_masks.shape
+        out = dist_masks.new_zeros(B, K, N, N, dtype=torch.bool)
+        eye = torch.eye(N, device=dist_masks.device, dtype=torch.bool)
+        out[:, 0] = eye.unsqueeze(0)                       # slot 0 = self
+        if K <= 1:
+            return out
+
+        A = dist_masks[:, 1] > 0                           # (B, N, N) bool
+        base = (A | eye.unsqueeze(0)) if self.adj_self_loops else A
+        base_f = base.float()
+        k_max = min(K - 1, self._max_hop_index)
+        cur = base                                         # represents base^1
+        for k in range(1, k_max + 1):
+            out[:, k] = cur
+            if k < k_max:
+                cur = torch.bmm(cur.float(), base_f) > 0   # base^(k+1), binarised
+        return out
+
     def _build_per_head_mask(self, dist_masks: torch.Tensor) -> torch.Tensor:
         """Return (B, H, N, N) bool — True where head h is allowed to attend.
 
@@ -504,7 +659,12 @@ class HopMaskedTransformerModel(nn.Module):
         dense_x, dense_mask = self.encode_dense(batch)
         nm = node_masks if node_masks is not None else dense_mask
 
-        per_head_mask = self._build_per_head_mask(dist_masks)  # (B, H, N, N) bool
+        mask_source = (
+            self._build_adj_power_masks(dist_masks)
+            if self.mask_type == "adj_power"
+            else dist_masks
+        )
+        per_head_mask = self._build_per_head_mask(mask_source)  # (B, H, N, N) bool
 
         x = dense_x
         for layer in self.layers:
@@ -516,6 +676,10 @@ class HopMaskedTransformerModel(nn.Module):
             return self.head(node_emb), node_emb
 
         # Graph-level pooling.
+        if self.graph_pool == "attention":
+            pooled = self.readout(x, nm)                   # (B, d), masked
+            return self.head(pooled), node_emb
+
         B = dense_x.shape[0]
         batch_vec_dense = (
             torch.arange(B, device=dense_x.device)
@@ -527,3 +691,4 @@ class HopMaskedTransformerModel(nn.Module):
         else:
             pooled = global_add_pool(node_emb, batch_vec_dense)
         return self.head(pooled), node_emb
+
