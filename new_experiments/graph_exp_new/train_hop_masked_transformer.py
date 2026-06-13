@@ -291,8 +291,9 @@ def main():
         print("Alternating hop mode:", flush=True)
         for i, hop_sets in enumerate(model.per_layer_hop_sets):
             label = "even" if i % 2 == 0 else "odd"
-            hops = hop_sets[0]  # all restricted heads share the same set
-            print(f"  layer {i} ({label}): hops {hops}", flush=True)
+            print(f"  layer {i} ({label}):", flush=True)
+            for h, s in enumerate(hop_sets):
+                print(f"    head {h}: {'GLOBAL' if s is None else s}", flush=True)
     if args.num_post_gat_layers > 0:
         print(f"Post-transformer GATv2: {args.num_post_gat_layers} layer(s), "
               f"{args.num_gat_heads} heads", flush=True)
