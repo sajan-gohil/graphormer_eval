@@ -100,16 +100,26 @@ def build_parser():
                         "participates in every attention head.  For graph-"
                         "level tasks its final embedding is used as the "
                         "graph representation (replaces pooling).")
+    p.add_argument("--num_post_gat_layers", type=int, default=0,
+                   help="Number of GATv2Conv layers applied after the "
+                        "transformer stack, before the task head.  "
+                        "0 = disabled (default).")
+    p.add_argument("--num_gat_heads", type=int, default=4,
+                   help="Number of attention heads in each post-transformer "
+                        "GATv2 layer.  Must divide hidden_dim.")
 
     # Hop-to-head assignment
     p.add_argument("--hop_mode", type=str, default="contiguous",
-                   choices=["contiguous", "window", "single", "interleaved"],
+                   choices=["contiguous", "window", "single", "interleaved",
+                            "alternating"],
                    help="How to assign hops to heads. contiguous = partition "
                         "[1..K-1] into num_heads chunks; window = evenly-spaced "
                         "centres with hop_window half-width; single = exactly "
                         "one hop per head (requires num_heads == K-1); "
                         "interleaved = each head covers every hop_window-th hop "
-                        "starting from an evenly-spaced centre k.")
+                        "starting from an evenly-spaced centre k; "
+                        "alternating = even-indexed layers get even hops, "
+                        "odd-indexed layers get odd hops.")
     p.add_argument("--hop_window", type=int, default=1,
                    help="Half-window for 'window' mode (head covers "
                         "[c-w, c+w]).")
@@ -261,6 +271,8 @@ def main():
         balance_coeff=args.balance_coeff,
         entropy_coeff=args.entropy_coeff,
         use_virtual_node=args.use_virtual_node,
+        num_post_gat_layers=args.num_post_gat_layers,
+        num_gat_heads=args.num_gat_heads,
     ).to(args.device)
 
     # Print the head -> hop-set assignment so it's logged for reproducibility.
@@ -275,6 +287,15 @@ def main():
     if args.use_virtual_node:
         print("Virtual node: ENABLED (learnable embedding, visible to all heads)",
               flush=True)
+    if args.hop_mode == "alternating":
+        print("Alternating hop mode:", flush=True)
+        for i, hop_sets in enumerate(model.per_layer_hop_sets):
+            label = "even" if i % 2 == 0 else "odd"
+            hops = hop_sets[0]  # all restricted heads share the same set
+            print(f"  layer {i} ({label}): hops {hops}", flush=True)
+    if args.num_post_gat_layers > 0:
+        print(f"Post-transformer GATv2: {args.num_post_gat_layers} layer(s), "
+              f"{args.num_gat_heads} heads", flush=True)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"trainable params: {n_params/1e6:.3f}M", flush=True)

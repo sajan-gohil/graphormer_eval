@@ -42,7 +42,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.utils import to_dense_batch
-from torch_geometric.nn import global_add_pool, global_mean_pool
+from torch_geometric.nn import global_add_pool, global_mean_pool, GATv2Conv
 
 from models import build_node_encoder
 
@@ -77,7 +77,8 @@ def build_head_hop_sets(
     Args:
         max_hops:           K — total number of hop levels available.
         num_heads:          H — total attention heads.
-        mode:               "contiguous" | "window" | "single" | "interleaved".
+        mode:               "contiguous" | "window" | "single" | "interleaved"
+                        | "alternating".
         window:             half-window for "window" mode; stride for
                             "interleaved" mode.
         include_self:       if True, hop 0 is added to every restricted head
@@ -153,6 +154,17 @@ def build_head_hop_sets(
                     break
                 n += 1
             sets.append(sorted(hops))
+    elif mode == "alternating":
+        # All restricted heads get all hops of a given parity.
+        # Even-indexed layers use even hops [0, 2, 4, ...], odd-indexed
+        # layers use odd hops [1, 3, 5, ...].  Since build_head_hop_sets
+        # produces a *single* list, the model calls this function twice
+        # (once for even parity, once for odd) and assigns per-layer.
+        # Here we produce a single shared set that the caller picks from.
+        # By convention: "alternating" returns even-parity hops.
+        # The model swaps to odd at odd-indexed layers.
+        even_hops = [k for k in range(0, K) if k % 2 == 0]
+        sets = [even_hops] * H_restricted
     else:
         raise ValueError(f"Unknown hop assignment mode: {mode}")
 
@@ -160,6 +172,29 @@ def build_head_hop_sets(
         sets = [sorted(set([0] + s)) for s in sets]
 
     return sets + [None] * num_global_heads
+
+
+def _build_alternating_hop_sets(
+    max_hops: int,
+    num_heads: int,
+    include_self: bool = True,
+    num_global_heads: int = 0,
+) -> Tuple[List[Optional[List[int]]], List[Optional[List[int]]]]:
+    """Build two hop-set lists for the 'alternating' mode.
+
+    Returns:
+        (even_sets, odd_sets) — one for even-indexed layers, one for odd.
+        Each list has length ``num_heads``.
+    """
+    K = max_hops
+    H_restricted = num_heads - num_global_heads
+    even_hops = [k for k in range(0, K) if k % 2 == 0]  # [0, 2, 4, ...]
+    odd_hops  = [k for k in range(0, K) if k % 2 == 1]  # [1, 3, 5, ...]
+    if include_self and 0 not in odd_hops:
+        odd_hops = sorted([0] + odd_hops)
+    even_sets = [even_hops] * H_restricted + [None] * num_global_heads
+    odd_sets  = [odd_hops]  * H_restricted + [None] * num_global_heads
+    return even_sets, odd_sets
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +730,61 @@ class HopMaskedTransformerLayer(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Post-transformer GATv2 block (optional).
+# ---------------------------------------------------------------------------
+class PostGATv2Block(nn.Module):
+    """A GATv2 layer applied on the *sparse* PyG graph after the dense
+    transformer stack.  Converts the dense (B, N, d) representation back
+    to sparse per-node features, runs one or more GATv2Conv layers with
+    residual connections, and returns per-node embeddings.
+
+    This re-introduces explicit edge information that the hop-masked
+    transformer only sees implicitly through distance masks.
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_gat_heads: int = 4,
+        num_gat_layers: int = 1,
+        dropout: float = 0.1,
+        edge_dim: Optional[int] = None,
+    ):
+        super().__init__()
+        assert hidden_dim % num_gat_heads == 0, (
+            f"hidden_dim={hidden_dim} must be divisible by num_gat_heads={num_gat_heads}"
+        )
+        self.num_gat_layers = num_gat_layers
+        self.convs = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        for _ in range(num_gat_layers):
+            self.convs.append(
+                GATv2Conv(
+                    in_channels=hidden_dim,
+                    out_channels=hidden_dim // num_gat_heads,
+                    heads=num_gat_heads,
+                    dropout=dropout,
+                    edge_dim=edge_dim,
+                    concat=True,          # output = heads * out_channels = hidden_dim
+                )
+            )
+            self.norms.append(nn.LayerNorm(hidden_dim))
+        self.drop = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        x: torch.Tensor,                # (total_nodes, d)  sparse
+        edge_index: torch.Tensor,       # (2, E)
+        edge_attr: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        for conv, norm in zip(self.convs, self.norms):
+            out = conv(x, edge_index, edge_attr=edge_attr)
+            out = self.drop(F.elu(out))
+            x = norm(x + out)           # residual + norm
+        return x
+
+
+# ---------------------------------------------------------------------------
 # Top-level model.
 # ---------------------------------------------------------------------------
 class HopMaskedTransformerModel(nn.Module):
@@ -748,6 +838,8 @@ class HopMaskedTransformerModel(nn.Module):
         balance_coeff: float = 0.01,
         entropy_coeff: float = 0.01,
         use_virtual_node: bool = False,
+        num_post_gat_layers: int = 0,
+        num_gat_heads: int = 4,
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -765,18 +857,41 @@ class HopMaskedTransformerModel(nn.Module):
         self.balance_coeff = balance_coeff
         self.entropy_coeff = entropy_coeff
         self.use_virtual_node = use_virtual_node
+        self.use_alternating = (hop_mode == "alternating")
 
-        self.head_hop_sets = build_head_hop_sets(
-            max_hops=max_hops,
-            num_heads=num_heads,
-            mode=hop_mode,
-            window=hop_window,
-            include_self=True,
-            num_global_heads=num_global_heads,
-        )
+        # ----- Per-layer hop sets (alternating mode) or shared -----
+        if self.use_alternating:
+            even_sets, odd_sets = _build_alternating_hop_sets(
+                max_hops=max_hops,
+                num_heads=num_heads,
+                include_self=True,
+                num_global_heads=num_global_heads,
+            )
+            # Build per-layer list: layer 0 → even, layer 1 → odd, ...
+            self.per_layer_hop_sets = [
+                even_sets if (i % 2 == 0) else odd_sets
+                for i in range(num_layers)
+            ]
+            self.head_hop_sets = even_sets  # for logging / compat
+        else:
+            self.head_hop_sets = build_head_hop_sets(
+                max_hops=max_hops,
+                num_heads=num_heads,
+                mode=hop_mode,
+                window=hop_window,
+                include_self=True,
+                num_global_heads=num_global_heads,
+            )
+            self.per_layer_hop_sets = [self.head_hop_sets] * num_layers
+
         # Largest hop index any head references — used to bound the number of
         # adjacency powers computed at runtime when mask_type="adj_power".
-        used = [k for s in self.head_hop_sets if s is not None for k in s]
+        used = [
+            k
+            for hop_sets in self.per_layer_hop_sets
+            for s in hop_sets if s is not None
+            for k in s
+        ]
         self._max_hop_index = max(used) if used else 0
 
         self.encoder = build_node_encoder(
@@ -817,6 +932,16 @@ class HopMaskedTransformerModel(nn.Module):
         if use_virtual_node:
             self.vn_embed = nn.Parameter(
                 torch.randn(1, 1, hidden_dim) * hidden_dim ** -0.5
+            )
+
+        # Optional post-transformer GATv2 block.
+        self.post_gat = None
+        if num_post_gat_layers > 0:
+            self.post_gat = PostGATv2Block(
+                hidden_dim=hidden_dim,
+                num_gat_heads=num_gat_heads,
+                num_gat_layers=num_post_gat_layers,
+                dropout=dropout,
             )
 
     # ----------------------------------------------------------------
@@ -870,17 +995,26 @@ class HopMaskedTransformerModel(nn.Module):
                 cur_f = torch.bmm(cur_f, base_f)          # base^(k+1), keep as float
         return out
 
-    def _build_per_head_mask(self, dist_masks: torch.Tensor) -> torch.Tensor:
+    def _build_per_head_mask(
+        self,
+        dist_masks: torch.Tensor,
+        hop_sets: Optional[List[Optional[List[int]]]] = None,
+    ) -> torch.Tensor:
         """Return (B, H, N, N) bool — True where head h is allowed to attend.
 
         For an unrestricted head (hop_set is None) all entries are True.
         For a restricted head, an entry is True iff the shortest-path
         distance falls in the head's hop set (capped at the runtime K).
+
+        If ``hop_sets`` is provided it overrides ``self.head_hop_sets``
+        (used for per-layer alternating assignment).
         """
         B, K_runtime, N, _ = dist_masks.shape
         H = self.num_heads
+        if hop_sets is None:
+            hop_sets = self.head_hop_sets
         out = dist_masks.new_zeros(B, H, N, N, dtype=torch.bool)
-        for h, hop_set in enumerate(self.head_hop_sets):
+        for h, hop_set in enumerate(hop_sets):
             if hop_set is None:
                 out[:, h] = True
                 continue
@@ -954,9 +1088,12 @@ class HopMaskedTransformerModel(nn.Module):
                     )
                 aux_loss = aux_loss / len(all_gate_weights)
         else:
-            # Deterministic hop-mask path (original behaviour).
-            per_head_mask = self._build_per_head_mask(mask_source)  # (B, H, N, N) bool
-            for layer in self.layers:
+            # Deterministic hop-mask path.
+            # Build per-layer masks (differ only in alternating mode).
+            for layer_idx, layer in enumerate(self.layers):
+                per_head_mask = self._build_per_head_mask(
+                    mask_source, self.per_layer_hop_sets[layer_idx],
+                )
                 x = layer(x, per_head_mask, nm)
             aux_loss = x.new_tensor(0.0)
 
@@ -967,6 +1104,12 @@ class HopMaskedTransformerModel(nn.Module):
         else:
             vn_out = None
             node_emb = x[nm]
+
+        # ── Optional post-transformer GATv2 on the sparse graph ───────
+        if self.post_gat is not None:
+            node_emb = self.post_gat(
+                node_emb, batch.edge_index, edge_attr=batch.edge_attr,
+            )
 
         if self.task_level == "node":
             return self.head(node_emb), node_emb, aux_loss
