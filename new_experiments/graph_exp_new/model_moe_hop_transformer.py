@@ -117,7 +117,8 @@ class HopGate(nn.Module):
             sparse_logits.scatter_(-1, topk_idx, topk_vals)
             weights = F.softmax(sparse_logits, dim=-1)
         else:
-            weights = F.softmax(logits, dim=-1)
+            # weights = F.softmax(logits, dim=-1)
+            weights = F.sigmoid(logits)
 
         return weights, logits   # (B, H, K), (B, H, K)
 

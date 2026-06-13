@@ -196,7 +196,7 @@ class BlockDiagLinear(nn.Module):
         H = self.num_heads
         x = x.view(B, N, H, self.in_dim)
         out = torch.einsum("bnhd,hde->bnhe", x, self.weight) + self.bias
-        return out.reshape(B, N, H * self.out_dim)
+        return out.reshape(B, N, H * self.out_dim) #+ x.view(B, N, H * self.out_dim)
 
 
 # ---------------------------------------------------------------------------
@@ -593,37 +593,51 @@ class HopMaskedTransformerModel(nn.Module):
     # Build the (B, H, N, N) boolean per-head mask once per forward.
     # ----------------------------------------------------------------
     def _build_adj_power_masks(self, dist_masks: torch.Tensor) -> torch.Tensor:
-        """Build hop masks from powers of the adjacency matrix instead of
-        shortest-path shells.
+        """Build hop masks from powers of the adjacency matrix.
 
-        The distance-1 shell (``dist_masks[:, 1]``) is exactly the binary
-        adjacency A. With ``adj_self_loops=False`` slot k is ``(A^k > 0)``
-        (walks of length *exactly* k — note the parity striping on
-        near-bipartite graphs). With ``adj_self_loops=True`` slot k is
-        ``((A + I)^k > 0)`` (reachable in <= k steps — monotone, no parity
-        gaps). Slot 0 is the identity (self), matching the shortest-path
-        convention. Returns a bool tensor of the same (B, K, N, N) shape so
-        the rest of the pipeline is unchanged.
-
-        Powers are accumulated in binarised form (boolean matmul each step),
-        which both avoids float overflow and preserves exact-walk-existence.
+        Returns a *float* (B, K, N, N) tensor instead of bool:
+        - slot 0  : identity (self), score = 1.0
+        - slot k  : 1.0  for pairs whose shortest path = k  (first reachable hop)
+                    1/w  for pairs already reachable at k' < k, where w is the
+                        number of distinct walks of length k between them.
+        Penalising by walk count suppresses high-multiplicity longer-range
+        connections while preserving the exact-shortest-path signal at score 1.
         """
         B, K, N, _ = dist_masks.shape
-        out = dist_masks.new_zeros(B, K, N, N, dtype=torch.bool)
         eye = torch.eye(N, device=dist_masks.device, dtype=torch.bool)
-        out[:, 0] = eye.unsqueeze(0)                       # slot 0 = self
+
+        # ── float output (non-binary scores) ──────────────────────────────────
+        out = dist_masks.new_zeros(B, K, N, N, dtype=torch.float32)
+        out[:, 0] = eye.float().unsqueeze(0)               # slot 0 = self, score 1
         if K <= 1:
             return out
 
-        A = dist_masks[:, 1] > 0                           # (B, N, N) bool
+        A = dist_masks[:, 1] > 0                      # (B, N, N) bool
         base = (A | eye.unsqueeze(0)) if self.adj_self_loops else A
         base_f = base.float()
         k_max = min(K - 1, self._max_hop_index)
-        cur = base                                         # represents base^1
+
+        # cur_f  : float walk-count matrix  =  base^k  (NOT binarised)
+        # seen   : cumulative bool mask of all (i,j) pairs already assigned a score.
+        #          Pre-seeded with the identity so slot-0 self-edges are "used up".
+        cur_f = base_f.clone()
+        seen = eye.unsqueeze(0).expand(B, -1, -1).clone()  # (B, N, N) bool
+        reach_count = eye.unsqueeze(0).expand(B, -1, -1).float()
         for k in range(1, k_max + 1):
-            out[:, k] = cur
+            cur_bool = cur_f > 0
+            reach_count = reach_count + cur_bool.float()
+            new_mask = cur_bool & ~seen   # shortest-path hop for this pair → 1.0
+            old_mask = cur_bool &  seen   # already connected at prior hop  → 1/w
+            scores = torch.zeros(B, N, N, device=dist_masks.device, dtype=torch.float32)
+            scores[cur_bool] =  1.0 / reach_count[cur_bool]
+            scores[new_mask] = 1.0
+            # Sentinel-fill positions we won't read to avoid ÷0, then index in
+            #safe_f = cur_f.masked_fill(~old_mask, 1.0)
+            #scores[old_mask] = (1.0 / safe_f)[old_mask]
+            out[:, k] = scores
+            seen = seen | cur_bool                         # mark these pairs as seen
             if k < k_max:
-                cur = torch.bmm(cur.float(), base_f) > 0   # base^(k+1), binarised
+                cur_f = torch.bmm(cur_f, base_f)          # base^(k+1), keep as float
         return out
 
     def _build_per_head_mask(self, dist_masks: torch.Tensor) -> torch.Tensor:
