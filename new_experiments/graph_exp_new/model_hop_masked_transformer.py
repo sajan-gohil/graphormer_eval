@@ -192,8 +192,8 @@ def _build_alternating_hop_sets(
     odd_hops  = [k for k in range(0, K) if k % 2 == 1]  # [1, 3, 5, ...]
     if include_self and 0 not in odd_hops:
         odd_hops = sorted([0] + odd_hops)
-    even_sets = [even_hops] * H_restricted + [None] * num_global_heads
-    odd_sets  = [odd_hops]  * H_restricted + [None] * num_global_heads
+    even_sets = [[0, i] for i in even_hops[1:H_restricted+1]] + [None] * num_global_heads
+    odd_sets  = [[0, i] for i in odd_hops[1:H_restricted+1]]  + [None] * num_global_heads
     return even_sets, odd_sets
 
 
