@@ -112,6 +112,27 @@ def build_parser():
                    help="Last N heads are unrestricted (free global "
                         "attention) rather than hop-masked.")
 
+    # MoE gating (optional, replaces deterministic hop assignment)
+    p.add_argument("--use_moe_gating", action="store_true", default=False,
+                   help="Replace deterministic hop-to-head assignment with a "
+                        "learned MoE gating network. Each head dynamically "
+                        "selects which hop masks to attend through.")
+    p.add_argument("--top_k", type=int, default=0,
+                   help="Sparse gating: each head keeps only top-k hops. "
+                        "0 = dense (full softmax over all K hops). "
+                        "Only used when --use_moe_gating is set.")
+    p.add_argument("--gate_noise", type=float, default=0.1,
+                   help="Gaussian noise std added to gate logits during "
+                        "training to encourage exploration. "
+                        "Only used when --use_moe_gating is set.")
+    p.add_argument("--balance_coeff", type=float, default=0.01,
+                   help="Weight for Switch-style load-balancing aux loss. "
+                        "Only used when --use_moe_gating is set.")
+    p.add_argument("--entropy_coeff", type=float, default=0.01,
+                   help="Weight for entropy regularisation aux loss "
+                        "(encourages diffuse gate distributions). "
+                        "Only used when --use_moe_gating is set.")
+
     # Training
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--lr_min", type=float, default=1e-6)
@@ -160,8 +181,9 @@ def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
         if is_train:
             optimizer.zero_grad()
         with torch.set_grad_enabled(is_train):
-            logits, _ = model(pyg_batch, dist_masks, node_masks)
-            loss = task.loss(logits, pyg_batch.y)
+            logits, _, aux_loss = model(pyg_batch, dist_masks, node_masks)
+            task_loss = task.loss(logits, pyg_batch.y)
+            loss = task_loss + aux_loss
 
         if is_train:
             loss.backward()
@@ -171,7 +193,7 @@ def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
             if scheduler is not None:
                 scheduler.step()
 
-        losses.append(loss.item())
+        losses.append(task_loss.item())
         preds_acc.append(task.predict(logits))
         labels_acc.append(task.labels_to_numpy(pyg_batch.y))
 
@@ -228,12 +250,22 @@ def main():
         v_head_dim=args.v_head_dim,
         mask_type=args.mask_type,
         adj_self_loops=args.adj_self_loops,
+        use_moe_gating=args.use_moe_gating,
+        top_k=args.top_k,
+        gate_noise=args.gate_noise,
+        balance_coeff=args.balance_coeff,
+        entropy_coeff=args.entropy_coeff,
     ).to(args.device)
 
     # Print the head -> hop-set assignment so it's logged for reproducibility.
-    print("Head -> hop set assignment:", flush=True)
-    for h, s in enumerate(model.head_hop_sets):
-        print(f"  head {h}: {'GLOBAL (no hop mask)' if s is None else s}", flush=True)
+    if args.use_moe_gating:
+        print(f"MoE gating config: top_k={args.top_k}, gate_noise={args.gate_noise}, "
+              f"balance_coeff={args.balance_coeff}, entropy_coeff={args.entropy_coeff}",
+              flush=True)
+    else:
+        print("Head -> hop set assignment:", flush=True)
+        for h, s in enumerate(model.head_hop_sets):
+            print(f"  head {h}: {'GLOBAL (no hop mask)' if s is None else s}", flush=True)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"trainable params: {n_params/1e6:.3f}M", flush=True)

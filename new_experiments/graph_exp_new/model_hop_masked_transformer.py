@@ -36,7 +36,7 @@ Datasets: Peptides-func, Peptides-struct, PascalVOC-SP.
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -414,6 +414,185 @@ class HopMaskedMHA(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# MoE (Mixture-of-Experts) hop gating — optional learned hop selection.
+# ---------------------------------------------------------------------------
+class HopGate(nn.Module):
+    """Per-head gating network that produces soft weights over K hop masks.
+
+    The gate is conditioned on a graph-level summary vector (mean-pool of
+    node embeddings).
+
+    Args:
+        hidden_dim:  model hidden dimension (input to gate).
+        max_hops:    K — number of hop levels.
+        num_heads:   H — one gate distribution per head.
+        top_k:       if > 0, only the top-k hops per head receive non-zero
+                     weight (sparse gating à la Switch/Expert-Choice).
+                     0 means dense (full softmax over all K hops).
+        gate_noise:  if > 0, add Gaussian noise to logits before softmax
+                     during training (encourages exploration).
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        max_hops: int,
+        num_heads: int,
+        top_k: int = 0,
+        gate_noise: float = 0.1,
+    ):
+        super().__init__()
+        self.max_hops = max_hops
+        self.num_heads = num_heads
+        self.top_k = top_k
+        self.gate_noise = gate_noise
+
+        # Small 2-layer MLP: hidden_dim -> H * K logits.
+        self.gate_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, num_heads * max_hops),
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,           # (B, N, d)
+        node_mask: torch.Tensor,    # (B, N) bool
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return soft gate weights (B, H, K) and raw logits for aux loss."""
+        # Graph-level summary: masked mean-pool.
+        mask_f = node_mask.float().unsqueeze(-1)                   # (B, N, 1)
+        pooled = (x * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)  # (B, d)
+
+        logits = self.gate_mlp(pooled)                             # (B, H*K)
+        logits = logits.view(-1, self.num_heads, self.max_hops)    # (B, H, K)
+
+        # Optional noise during training.
+        if self.training and self.gate_noise > 0:
+            noise = torch.randn_like(logits) * self.gate_noise
+            logits = logits + noise
+
+        if self.top_k > 0 and self.top_k < self.max_hops:
+            # Sparse gating: keep only top-k logits, set rest to -inf.
+            topk_vals, topk_idx = logits.topk(self.top_k, dim=-1)
+            sparse_logits = torch.full_like(logits, _NEG_INF)
+            sparse_logits.scatter_(-1, topk_idx, topk_vals)
+            weights = F.softmax(sparse_logits, dim=-1)
+        else:
+            # weights = F.softmax(logits, dim=-1)
+            weights = F.sigmoid(logits)
+
+        return weights, logits   # (B, H, K), (B, H, K)
+
+
+def compute_gate_aux_loss(
+    gate_weights: torch.Tensor,     # (B, H, K)
+    balance_coeff: float = 0.01,
+    entropy_coeff: float = 0.01,
+) -> torch.Tensor:
+    """Compute load-balancing + entropy regularisation.
+
+    Load-balancing (Switch-style):
+        L_bal = K * sum_k( f_k * P_k )
+        where f_k = fraction of heads choosing hop k as argmax,
+              P_k = mean gate weight for hop k across heads.
+
+    Entropy bonus (negative, to maximise):
+        L_ent = -mean( H(g_h) )  over all heads and batch elements.
+    """
+    B, H, K = gate_weights.shape
+    loss = gate_weights.new_tensor(0.0)
+
+    if balance_coeff > 0:
+        # f_k: fraction of (batch, head) pairs where hop k is argmax.
+        assignments = gate_weights.argmax(dim=-1)                  # (B, H)
+        counts = torch.zeros(B, K, device=gate_weights.device)
+        for k in range(K):
+            counts[:, k] = (assignments == k).float().sum(dim=-1)  # (B,)
+        f_k = counts / H                                          # (B, K)
+        P_k = gate_weights.mean(dim=1)                             # (B, K)
+        load_balance = K * (f_k * P_k).sum(dim=-1).mean()
+        loss = loss + balance_coeff * load_balance
+
+    if entropy_coeff > 0:
+        # Entropy of each gate distribution.
+        log_w = torch.log(gate_weights + 1e-8)
+        entropy = -(gate_weights * log_w).sum(dim=-1).mean()       # scalar
+        loss = loss - entropy_coeff * entropy  # negative = encourage higher entropy
+
+    return loss
+
+
+class MoEHopMaskedMHA(nn.Module):
+    """Multi-head self-attention where each head's hop mask is a *learned
+    soft mixture* over all K distance masks, gated per input graph.
+
+    Instead of a hard Boolean per-head mask, we compute:
+        soft_mask[b, h, :, :] = sum_k gate_weights[b, h, k] * dist_masks[b, k]
+    and use it as an additive bias to the attention logits.
+    """
+
+    def __init__(self, hidden_dim: int, num_heads: int, dropout: float = 0.0):
+        super().__init__()
+        if hidden_dim % num_heads != 0:
+            raise ValueError(
+                f"hidden_dim={hidden_dim} must be divisible by num_heads={num_heads}"
+            )
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.out_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.attn_drop = nn.Dropout(dropout)
+
+        # Learnable temperature for the soft mask (per head).
+        self.mask_temperature = nn.Parameter(torch.ones(1, num_heads, 1, 1))
+
+    def forward(
+        self,
+        x: torch.Tensor,              # (B, N, d)
+        gate_weights: torch.Tensor,    # (B, H, K)
+        dist_masks: torch.Tensor,      # (B, K, N, N) float — hop distance masks
+        node_mask: torch.Tensor,       # (B, N) bool — True for real nodes
+    ) -> torch.Tensor:
+        B, N, d = x.shape
+        H, Dh = self.num_heads, self.head_dim
+
+        q = self.q_proj(x).view(B, N, H, Dh).transpose(1, 2)   # (B, H, N, Dh)
+        k = self.k_proj(x).view(B, N, H, Dh).transpose(1, 2)
+        v = self.v_proj(x).view(B, N, H, Dh).transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(Dh)  # (B, H, N, N)
+
+        # Build soft mask from gated mixture of distance masks.
+        # gate_weights: (B, H, K) — dist_masks: (B, K, N, N)
+        # soft_mask: (B, H, N, N) = einsum('bhk, bkij -> bhij')
+        soft_mask = torch.einsum('bhk,bkij->bhij', gate_weights, dist_masks.float())
+
+        # Apply soft mask as a multiplicative bias via temperature-scaled log.
+        # Positions with soft_mask ≈ 0 will get large negative bias → masked out.
+        # Positions with soft_mask ≈ 1 will be largely unaffected.
+        mask_bias = torch.log(soft_mask.clamp(min=1e-6)) * self.mask_temperature
+        scores = scores + mask_bias
+
+        # Padding masks (real-node check).
+        key_pad = (~node_mask).unsqueeze(1).unsqueeze(2)      # (B, 1, 1, N)
+        query_pad = (~node_mask).unsqueeze(1).unsqueeze(-1)   # (B, 1, N, 1)
+        scores = scores.masked_fill(key_pad, _NEG_INF)
+        scores = scores.masked_fill(query_pad, _NEG_INF)
+
+        attn = F.softmax(scores, dim=-1)
+        attn = torch.nan_to_num(attn, nan=0.0)
+        attn = self.attn_drop(attn)
+
+        out = torch.matmul(attn, v)                       # (B, H, N, Dh)
+        out = out.transpose(1, 2).reshape(B, N, d)        # (B, N, d)
+        return self.out_proj(out)
+
+
+# ---------------------------------------------------------------------------
 # Pre-norm transformer encoder layer with hop-masked self-attention.
 # ---------------------------------------------------------------------------
 class HopMaskedTransformerLayer(nn.Module):
@@ -434,6 +613,11 @@ class HopMaskedTransformerLayer(nn.Module):
     the "within-hop" mixer, the cross-hop attention is the "across-hop"
     mixer (dynamic, node-conditioned), and the FFN remains the pointwise
     channel mixer.
+
+    With ``use_moe_gating=True`` the deterministic hop-masked MHA is replaced
+    by a MoE-gated variant where each head *learns* which hop masks to attend
+    through via a soft gating network.  The gate weights are returned for
+    auxiliary-loss computation upstream.
     """
 
     def __init__(
@@ -446,13 +630,23 @@ class HopMaskedTransformerLayer(nn.Module):
         dynamic_cross_hop: bool = False,
         norm_type: str = "layer",
         v_head_dim: Optional[int] = None,
+        use_moe_gating: bool = False,
+        max_hops: int = 40,
+        top_k: int = 0,
+        gate_noise: float = 0.1,
     ):
         super().__init__()
+        self.use_moe_gating = use_moe_gating
         self.norm1 = build_norm(norm_type, hidden_dim)
-        self.attn = HopMaskedMHA(
-            hidden_dim, num_heads, dropout, block_diag_out=block_diag_out,
-            v_head_dim=v_head_dim,
-        )
+
+        if use_moe_gating:
+            self.gate = HopGate(hidden_dim, max_hops, num_heads, top_k, gate_noise)
+            self.attn = MoEHopMaskedMHA(hidden_dim, num_heads, dropout)
+        else:
+            self.attn = HopMaskedMHA(
+                hidden_dim, num_heads, dropout, block_diag_out=block_diag_out,
+                v_head_dim=v_head_dim,
+            )
         self.drop1 = nn.Dropout(dropout)
 
         self.use_cross_hop = dynamic_cross_hop
@@ -475,12 +669,29 @@ class HopMaskedTransformerLayer(nn.Module):
         )
         self.drop2 = nn.Dropout(dropout)
 
-    def forward(self, x, per_head_mask, node_mask):
-        x = x + self.drop1(self.attn(self.norm1(x, node_mask), per_head_mask, node_mask))
+    def forward(self, x, per_head_mask_or_dist_masks, node_mask):
+        """Forward pass.
+
+        When ``use_moe_gating=False``:
+            per_head_mask_or_dist_masks is (B, H, N, N) bool per-head mask.
+            Returns: x  (B, N, d)
+
+        When ``use_moe_gating=True``:
+            per_head_mask_or_dist_masks is (B, K, N, N) float dist_masks.
+            Returns: (x, gate_weights)  where gate_weights is (B, H, K)
+        """
+        normed = self.norm1(x, node_mask)
+        if self.use_moe_gating:
+            gate_weights, _ = self.gate(normed, node_mask)
+            attn_out = self.attn(normed, gate_weights, per_head_mask_or_dist_masks, node_mask)
+            x = x + self.drop1(attn_out)
+        else:
+            x = x + self.drop1(self.attn(normed, per_head_mask_or_dist_masks, node_mask))
+            gate_weights = None
         if self.use_cross_hop:
             x = x + self.drop_ch(self.cross_hop(self.norm_ch(x, node_mask)))
         x = x + self.drop2(self.ffn(self.norm2(x, node_mask)))
-        return x
+        return (x, gate_weights) if self.use_moe_gating else x
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +742,11 @@ class HopMaskedTransformerModel(nn.Module):
         v_head_dim: Optional[int] = None,
         mask_type: str = "shortest_path",
         adj_self_loops: bool = False,
+        use_moe_gating: bool = False,
+        top_k: int = 0,
+        gate_noise: float = 0.1,
+        balance_coeff: float = 0.01,
+        entropy_coeff: float = 0.01,
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -544,6 +760,9 @@ class HopMaskedTransformerModel(nn.Module):
         self.graph_pool = graph_pool
         self.mask_type = mask_type
         self.adj_self_loops = adj_self_loops
+        self.use_moe_gating = use_moe_gating
+        self.balance_coeff = balance_coeff
+        self.entropy_coeff = entropy_coeff
 
         self.head_hop_sets = build_head_hop_sets(
             max_hops=max_hops,
@@ -573,6 +792,10 @@ class HopMaskedTransformerModel(nn.Module):
                 dynamic_cross_hop=dynamic_cross_hop,
                 norm_type=norm_type,
                 v_head_dim=v_head_dim,
+                use_moe_gating=use_moe_gating,
+                max_hops=max_hops,
+                top_k=top_k,
+                gate_noise=gate_noise,
             )
             for _ in range(num_layers)
         ])
@@ -678,21 +901,40 @@ class HopMaskedTransformerModel(nn.Module):
             if self.mask_type == "adj_power"
             else dist_masks
         )
-        per_head_mask = self._build_per_head_mask(mask_source)  # (B, H, N, N) bool
 
         x = dense_x
-        for layer in self.layers:
-            x = layer(x, per_head_mask, nm)
+        all_gate_weights = []
+
+        if self.use_moe_gating:
+            # MoE path: pass dist_masks directly to each layer's gating.
+            for layer in self.layers:
+                x, gate_weights = layer(x, mask_source, nm)
+                all_gate_weights.append(gate_weights)
+
+            # Compute auxiliary gate loss across all layers.
+            aux_loss = x.new_tensor(0.0)
+            if self.balance_coeff > 0 or self.entropy_coeff > 0:
+                for gw in all_gate_weights:
+                    aux_loss = aux_loss + compute_gate_aux_loss(
+                        gw, self.balance_coeff, self.entropy_coeff,
+                    )
+                aux_loss = aux_loss / len(all_gate_weights)
+        else:
+            # Deterministic hop-mask path (original behaviour).
+            per_head_mask = self._build_per_head_mask(mask_source)  # (B, H, N, N) bool
+            for layer in self.layers:
+                x = layer(x, per_head_mask, nm)
+            aux_loss = x.new_tensor(0.0)
 
         node_emb = x[nm]
 
         if self.task_level == "node":
-            return self.head(node_emb), node_emb
+            return self.head(node_emb), node_emb, aux_loss
 
         # Graph-level pooling.
         if self.graph_pool == "attention":
             pooled = self.readout(x, nm)                   # (B, d), masked
-            return self.head(pooled), node_emb
+            return self.head(pooled), node_emb, aux_loss
 
         B = dense_x.shape[0]
         batch_vec_dense = (
@@ -704,5 +946,5 @@ class HopMaskedTransformerModel(nn.Module):
             pooled = global_mean_pool(node_emb, batch_vec_dense)
         else:
             pooled = global_add_pool(node_emb, batch_vec_dense)
-        return self.head(pooled), node_emb
+        return self.head(pooled), node_emb, aux_loss
 
