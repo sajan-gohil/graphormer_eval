@@ -747,6 +747,7 @@ class HopMaskedTransformerModel(nn.Module):
         gate_noise: float = 0.1,
         balance_coeff: float = 0.01,
         entropy_coeff: float = 0.01,
+        use_virtual_node: bool = False,
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -763,6 +764,7 @@ class HopMaskedTransformerModel(nn.Module):
         self.use_moe_gating = use_moe_gating
         self.balance_coeff = balance_coeff
         self.entropy_coeff = entropy_coeff
+        self.use_virtual_node = use_virtual_node
 
         self.head_hop_sets = build_head_hop_sets(
             max_hops=max_hops,
@@ -811,6 +813,11 @@ class HopMaskedTransformerModel(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim),
         )
+
+        if use_virtual_node:
+            self.vn_embed = nn.Parameter(
+                torch.randn(1, 1, hidden_dim) * hidden_dim ** -0.5
+            )
 
     # ----------------------------------------------------------------
     # Build the (B, H, N, N) boolean per-head mask once per forward.
@@ -887,6 +894,25 @@ class HopMaskedTransformerModel(nn.Module):
             out[:, h] = stacked
         return out
 
+    # ----------------------------------------------------------------
+    # Virtual-node mask augmentation.
+    # ----------------------------------------------------------------
+    def _augment_dist_masks_vn(self, mask_source: torch.Tensor) -> torch.Tensor:
+        """Add a virtual-node row and column to (B, K, N, N) mask tensor.
+
+        The virtual node is placed at position 0.  Its row and column are set
+        to 1.0 in **every** hop slot so that it is visible to every attention
+        head regardless of its hop assignment.
+
+        Returns: (B, K, N+1, N+1) tensor (same dtype as input).
+        """
+        B, K, N, _ = mask_source.shape
+        aug = mask_source.new_zeros(B, K, N + 1, N + 1)
+        aug[:, :, 1:, 1:] = mask_source          # original N×N block
+        aug[:, :, 0, :] = 1                       # vn attends to everyone
+        aug[:, :, :, 0] = 1                       # everyone attends to vn
+        return aug
+
     def encode_dense(self, batch):
         lap_pe = getattr(batch, "lap_pe", None)
         h = self.encoder(batch.x, batch.edge_index, batch.edge_attr, lap_pe=lap_pe)
@@ -901,6 +927,14 @@ class HopMaskedTransformerModel(nn.Module):
             if self.mask_type == "adj_power"
             else dist_masks
         )
+
+        # ── Virtual node: prepend learnable embedding, augment masks ──
+        if self.use_virtual_node:
+            B, N, d = dense_x.shape
+            vn = self.vn_embed.expand(B, 1, d)
+            dense_x = torch.cat([vn, dense_x], dim=1)        # (B, N+1, d)
+            nm = torch.cat([nm.new_ones(B, 1), nm], dim=1)   # (B, N+1)
+            mask_source = self._augment_dist_masks_vn(mask_source)
 
         x = dense_x
         all_gate_weights = []
@@ -926,25 +960,32 @@ class HopMaskedTransformerModel(nn.Module):
                 x = layer(x, per_head_mask, nm)
             aux_loss = x.new_tensor(0.0)
 
-        node_emb = x[nm]
+        # ── Extract outputs ───────────────────────────────────────────
+        if self.use_virtual_node:
+            vn_out = x[:, 0, :]                                # (B, d)
+            node_emb = x[:, 1:, :][nm[:, 1:]]                 # real nodes only
+        else:
+            vn_out = None
+            node_emb = x[nm]
 
         if self.task_level == "node":
             return self.head(node_emb), node_emb, aux_loss
 
         # Graph-level pooling.
-        if self.graph_pool == "attention":
+        if self.use_virtual_node:
+            pooled = vn_out
+        elif self.graph_pool == "attention":
             pooled = self.readout(x, nm)                   # (B, d), masked
-            return self.head(pooled), node_emb, aux_loss
-
-        B = dense_x.shape[0]
-        batch_vec_dense = (
-            torch.arange(B, device=dense_x.device)
-            .unsqueeze(1)
-            .expand_as(nm)[nm]
-        )
-        if self.graph_pool == "mean":
-            pooled = global_mean_pool(node_emb, batch_vec_dense)
         else:
-            pooled = global_add_pool(node_emb, batch_vec_dense)
+            B = dense_x.shape[0]
+            batch_vec_dense = (
+                torch.arange(B, device=dense_x.device)
+                .unsqueeze(1)
+                .expand_as(nm)[nm]
+            )
+            if self.graph_pool == "mean":
+                pooled = global_mean_pool(node_emb, batch_vec_dense)
+            else:
+                pooled = global_add_pool(node_emb, batch_vec_dense)
         return self.head(pooled), node_emb, aux_loss
 

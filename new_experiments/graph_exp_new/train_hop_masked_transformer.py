@@ -95,6 +95,11 @@ def build_parser():
                    help="Insert a dynamic cross-hop attention sublayer "
                         "between MHA and FFN. Best paired with "
                         "--block_diag_out.")
+    p.add_argument("--use_virtual_node", action="store_true", default=False,
+                   help="Prepend a learnable virtual-node embedding that "
+                        "participates in every attention head.  For graph-"
+                        "level tasks its final embedding is used as the "
+                        "graph representation (replaces pooling).")
 
     # Hop-to-head assignment
     p.add_argument("--hop_mode", type=str, default="contiguous",
@@ -255,6 +260,7 @@ def main():
         gate_noise=args.gate_noise,
         balance_coeff=args.balance_coeff,
         entropy_coeff=args.entropy_coeff,
+        use_virtual_node=args.use_virtual_node,
     ).to(args.device)
 
     # Print the head -> hop-set assignment so it's logged for reproducibility.
@@ -266,6 +272,9 @@ def main():
         print("Head -> hop set assignment:", flush=True)
         for h, s in enumerate(model.head_hop_sets):
             print(f"  head {h}: {'GLOBAL (no hop mask)' if s is None else s}", flush=True)
+    if args.use_virtual_node:
+        print("Virtual node: ENABLED (learnable embedding, visible to all heads)",
+              flush=True)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"trainable params: {n_params/1e6:.3f}M", flush=True)
