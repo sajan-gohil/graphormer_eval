@@ -1,0 +1,60 @@
+============================================================
+Phase 1: Extract Attention Targets
+  model_path=checkpoints_staged/stage1_best.pt
+  proxy_opt_steps=500
+  num_proxies=64
+  proxy_mmd_lambda=1.0
+  num_cross_layers=1
+  use_proxy_self_attn=False
+  distill_layers=all
+============================================================
+  Loaded 28 pretrained keys, cross-attn layers randomly initialized
+  Extracting attention from layers: [0]
+  [1/43] 256 graphs | base_loss=0.6203 opt_loss=0.0630 mmd=0.308963
+  [10/43] 2560 graphs | base_loss=0.6208 opt_loss=0.0652 mmd=0.276483
+  [20/43] 5120 graphs | base_loss=0.6205 opt_loss=0.0663 mmd=0.276800
+  [30/43] 7680 graphs | base_loss=0.6203 opt_loss=0.0654 mmd=0.280602
+  [40/43] 10240 graphs | base_loss=0.6204 opt_loss=0.0647 mmd=0.281043
+
+Extraction done. 10873 graphs saved to checkpoints_attn_distill/attn_targets.pkl
+  Avg base_loss=0.6202  opt_loss=0.0646
+
+Sanity check: attention difference (teacher vs vanilla)...
+Traceback (most recent call last):
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/exp_attn_distillation_2.py", line 980, in <module>
+    main()
+    ~~~~^^
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/exp_attn_distillation_2.py", line 974, in main
+    run_extraction(args)
+    ~~~~~~~~~~~~~~^^^^^^
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/exp_attn_distillation_2.py", line 602, in run_extraction
+    diff = (t_attn - v_attn).abs().mean().item()
+            ~~~~~~~^~~~~~~~
+RuntimeError: The size of tensor a (153) must match the size of tensor b (62) at non-singleton dimension 2
+============================================================
+Phase 2: Train with Attention Distillation
+  distill_weight=1.0
+  temperature=1.0
+  distill_layers=[0]
+  targets from: checkpoints_attn_distill/attn_targets.pkl
+============================================================
+  AttnTargetDataset: 10873 graphs with targets
+
+Baseline (pretrained, no distillation):
+  val_AP=0.6142  test_AP=0.5944
+  Student trainable params: 3,770,378
+Traceback (most recent call last):
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/exp_attn_distillation_2.py", line 980, in <module>
+    main()
+    ~~~~^^
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/exp_attn_distillation_2.py", line 976, in main
+    run_training(args)
+    ~~~~~~~~~~~~^^^^^^
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/exp_attn_distillation_2.py", line 833, in run_training
+    distill_loss = attention_distillation_loss(
+        student_attns_filtered, teacher_attns_padded,
+        attn_masks, temperature=args.temperature)
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/exp_attn_distillation_2.py", line 719, in attention_distillation_loss
+    kl = t_soft * (torch.log(t_soft + 1e-10) - torch.log(s_soft + 1e-10))
+                   ~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~
+RuntimeError: The size of tensor a (399) must match the size of tensor b (404) at non-singleton dimension 3

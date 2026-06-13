@@ -1,0 +1,170 @@
+{'dataset': 'Peptides-func', 'max_hops': 40, 'use_lap_pe': True, 'lap_pe_dim': 8, 'hidden_dim': 320, 'num_heads': 40, 'ffn_ratio': 4, 'num_layers': 1, 'dropout': 0.2, 'graph_pool': 'sum', 'hop_mode': 'single', 'hop_window': 0, 'num_global_heads': 1, 'lr': 0.001, 'lr_min': 1e-07, 'weight_decay': 0.0003, 'batch_size': 32, 'max_epochs': 200, 'patience': 40, 'reduce_lr_patience': 10, 'warmup_ratio': 0.05, 'grad_clip': 1.0, 'num_workers': 4, 'dist_mask_workers': 8, 'device': None, 'save_dir': 'checkpoints_hop_masked_func_best_lape', 'seed': 0, 'checkpoint': None}
+Unknown args =  []
+[Peptides-func] task=multi_label level=graph metric=macro_ap (higher_is_better=True)
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/train.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/val.pkl
+  Loading cached distance masks from ./data/Peptides-func/dist_masks/test.pkl
+Head -> hop set assignment:
+  head 0: [0, 1]
+  head 1: [0, 2]
+  head 2: [0, 3]
+  head 3: [0, 4]
+  head 4: [0, 5]
+  head 5: [0, 6]
+  head 6: [0, 7]
+  head 7: [0, 8]
+  head 8: [0, 9]
+  head 9: [0, 10]
+  head 10: [0, 11]
+  head 11: [0, 12]
+  head 12: [0, 13]
+  head 13: [0, 14]
+  head 14: [0, 15]
+  head 15: [0, 16]
+  head 16: [0, 17]
+  head 17: [0, 18]
+  head 18: [0, 19]
+  head 19: [0, 20]
+  head 20: [0, 21]
+  head 21: [0, 22]
+  head 22: [0, 23]
+  head 23: [0, 24]
+  head 24: [0, 25]
+  head 25: [0, 26]
+  head 26: [0, 27]
+  head 27: [0, 28]
+  head 28: [0, 29]
+  head 29: [0, 30]
+  head 30: [0, 31]
+  head 31: [0, 32]
+  head 32: [0, 33]
+  head 33: [0, 34]
+  head 34: [0, 35]
+  head 35: [0, 36]
+  head 36: [0, 37]
+  head 37: [0, 38]
+  head 38: [0, 39]
+  head 39: GLOBAL (no hop mask)
+trainable params: 1.501M
+ReduceLROnPlateau: mode=max, patience=10, factor=0.5, min_lr=1e-07
+epoch 000 | 138.1s | train loss 0.4038 AP 0.1851 | val loss 0.3321 AP 0.2707 | test loss 0.3321 AP 0.2711 | best val 0.2707 (epoch 0, test 0.27105977741591236)
+epoch 001 | 131.3s | train loss 0.3275 AP 0.2620 | val loss 0.3327 AP 0.3060 | test loss 0.3323 AP 0.3066 | best val 0.3060 (epoch 1, test 0.3065662524937915)
+epoch 002 | 150.1s | train loss 0.3146 AP 0.3012 | val loss 0.3175 AP 0.3493 | test loss 0.3162 AP 0.3482 | best val 0.3493 (epoch 2, test 0.3481662774546549)
+epoch 003 | 153.6s | train loss 0.2964 AP 0.3480 | val loss 0.3075 AP 0.3930 | test loss 0.3102 AP 0.3797 | best val 0.3930 (epoch 3, test 0.3796686183512453)
+epoch 004 | 153.5s | train loss 0.2860 AP 0.3746 | val loss 0.2747 AP 0.4332 | test loss 0.2795 AP 0.4192 | best val 0.4332 (epoch 4, test 0.41917741823763566)
+epoch 005 | 141.2s | train loss 0.2774 AP 0.4002 | val loss 0.2689 AP 0.4440 | test loss 0.2729 AP 0.4345 | best val 0.4440 (epoch 5, test 0.43450565890257487)
+epoch 006 | 131.6s | train loss 0.2700 AP 0.4192 | val loss 0.2656 AP 0.4544 | test loss 0.2677 AP 0.4541 | best val 0.4544 (epoch 6, test 0.4541035254064547)
+epoch 007 | 150.5s | train loss 0.2629 AP 0.4401 | val loss 0.2581 AP 0.4723 | test loss 0.2643 AP 0.4647 | best val 0.4723 (epoch 7, test 0.4646665967313524)
+epoch 008 | 151.6s | train loss 0.2580 AP 0.4523 | val loss 0.2548 AP 0.4821 | test loss 0.2613 AP 0.4674 | best val 0.4821 (epoch 8, test 0.4673604094813668)
+epoch 009 | 153.9s | train loss 0.2544 AP 0.4657 | val loss 0.2523 AP 0.5019 | test loss 0.2582 AP 0.4798 | best val 0.5019 (epoch 9, test 0.4797682757664311)
+epoch 010 | 147.7s | train loss 0.2485 AP 0.4793 | val loss 0.2336 AP 0.5389 | test loss 0.2414 AP 0.5065 | best val 0.5389 (epoch 10, test 0.5065199143539536)
+epoch 011 | 124.7s | train loss 0.2425 AP 0.5003 | val loss 0.2296 AP 0.5487 | test loss 0.2361 AP 0.5234 | best val 0.5487 (epoch 11, test 0.5234209773075733)
+epoch 012 | 126.2s | train loss 0.2369 AP 0.5124 | val loss 0.2300 AP 0.5412 | test loss 0.2378 AP 0.5165 | best val 0.5487 (epoch 11, test 0.5234209773075733)
+epoch 013 | 127.4s | train loss 0.2302 AP 0.5396 | val loss 0.2385 AP 0.5563 | test loss 0.2473 AP 0.5329 | best val 0.5563 (epoch 13, test 0.5328673610425607)
+epoch 014 | 125.1s | train loss 0.2260 AP 0.5462 | val loss 0.2320 AP 0.5736 | test loss 0.2400 AP 0.5308 | best val 0.5736 (epoch 14, test 0.53075252998046)
+epoch 015 | 125.7s | train loss 0.2218 AP 0.5592 | val loss 0.2219 AP 0.5758 | test loss 0.2311 AP 0.5423 | best val 0.5758 (epoch 15, test 0.5423369416721352)
+epoch 016 | 125.5s | train loss 0.2190 AP 0.5616 | val loss 0.2314 AP 0.5847 | test loss 0.2427 AP 0.5558 | best val 0.5847 (epoch 16, test 0.5558295046075048)
+epoch 017 | 130.8s | train loss 0.2162 AP 0.5734 | val loss 0.2165 AP 0.5885 | test loss 0.2237 AP 0.5652 | best val 0.5885 (epoch 17, test 0.565217352067043)
+epoch 018 | 129.8s | train loss 0.2094 AP 0.5940 | val loss 0.2160 AP 0.6058 | test loss 0.2240 AP 0.5876 | best val 0.6058 (epoch 18, test 0.5875718559058145)
+epoch 019 | 130.3s | train loss 0.2027 AP 0.6108 | val loss 0.2179 AP 0.6023 | test loss 0.2281 AP 0.5743 | best val 0.6058 (epoch 18, test 0.5875718559058145)
+epoch 020 | 130.5s | train loss 0.2021 AP 0.6152 | val loss 0.2151 AP 0.6153 | test loss 0.2271 AP 0.5806 | best val 0.6153 (epoch 20, test 0.5805506268928794)
+epoch 021 | 131.0s | train loss 0.1952 AP 0.6318 | val loss 0.2265 AP 0.6100 | test loss 0.2353 AP 0.5791 | best val 0.6153 (epoch 20, test 0.5805506268928794)
+epoch 022 | 129.5s | train loss 0.1935 AP 0.6386 | val loss 0.2159 AP 0.6287 | test loss 0.2273 AP 0.5915 | best val 0.6287 (epoch 22, test 0.5915412193303273)
+epoch 023 | 130.7s | train loss 0.1884 AP 0.6500 | val loss 0.2127 AP 0.6321 | test loss 0.2234 AP 0.6107 | best val 0.6321 (epoch 23, test 0.6106949067278199)
+epoch 024 | 129.6s | train loss 0.1849 AP 0.6600 | val loss 0.2184 AP 0.6177 | test loss 0.2274 AP 0.6085 | best val 0.6321 (epoch 23, test 0.6106949067278199)
+epoch 025 | 128.7s | train loss 0.1829 AP 0.6656 | val loss 0.2037 AP 0.6428 | test loss 0.2152 AP 0.6275 | best val 0.6428 (epoch 25, test 0.6274732898796058)
+epoch 026 | 130.4s | train loss 0.1773 AP 0.6827 | val loss 0.2181 AP 0.6301 | test loss 0.2265 AP 0.6132 | best val 0.6428 (epoch 25, test 0.6274732898796058)
+epoch 027 | 135.1s | train loss 0.1731 AP 0.6899 | val loss 0.2026 AP 0.6443 | test loss 0.2139 AP 0.6333 | best val 0.6443 (epoch 27, test 0.6333031667049049)
+epoch 028 | 134.2s | train loss 0.1684 AP 0.7024 | val loss 0.2002 AP 0.6700 | test loss 0.2148 AP 0.6360 | best val 0.6700 (epoch 28, test 0.6360292033044282)
+epoch 029 | 132.6s | train loss 0.1665 AP 0.7049 | val loss 0.1988 AP 0.6642 | test loss 0.2151 AP 0.6237 | best val 0.6700 (epoch 28, test 0.6360292033044282)
+epoch 030 | 127.8s | train loss 0.1642 AP 0.7157 | val loss 0.2037 AP 0.6755 | test loss 0.2210 AP 0.6391 | best val 0.6755 (epoch 30, test 0.6390621794733887)
+epoch 031 | 128.2s | train loss 0.1601 AP 0.7228 | val loss 0.2200 AP 0.6615 | test loss 0.2383 AP 0.6372 | best val 0.6755 (epoch 30, test 0.6390621794733887)
+epoch 032 | 126.3s | train loss 0.1557 AP 0.7324 | val loss 0.2145 AP 0.6765 | test loss 0.2340 AP 0.6427 | best val 0.6765 (epoch 32, test 0.6426695320001115)
+epoch 033 | 128.2s | train loss 0.1534 AP 0.7385 | val loss 0.2110 AP 0.6721 | test loss 0.2256 AP 0.6386 | best val 0.6765 (epoch 32, test 0.6426695320001115)
+epoch 034 | 125.9s | train loss 0.1490 AP 0.7451 | val loss 0.2007 AP 0.6791 | test loss 0.2141 AP 0.6492 | best val 0.6791 (epoch 34, test 0.6492117287176955)
+epoch 035 | 127.5s | train loss 0.1465 AP 0.7557 | val loss 0.1960 AP 0.6693 | test loss 0.2075 AP 0.6522 | best val 0.6791 (epoch 34, test 0.6492117287176955)
+epoch 036 | 129.4s | train loss 0.1421 AP 0.7632 | val loss 0.2129 AP 0.6756 | test loss 0.2264 AP 0.6572 | best val 0.6791 (epoch 34, test 0.6492117287176955)
+epoch 037 | 126.8s | train loss 0.1372 AP 0.7763 | val loss 0.2212 AP 0.6684 | test loss 0.2294 AP 0.6562 | best val 0.6791 (epoch 34, test 0.6492117287176955)
+epoch 038 | 129.0s | train loss 0.1351 AP 0.7777 | val loss 0.2084 AP 0.6691 | test loss 0.2204 AP 0.6528 | best val 0.6791 (epoch 34, test 0.6492117287176955)
+epoch 039 | 129.4s | train loss 0.1343 AP 0.7809 | val loss 0.2059 AP 0.6753 | test loss 0.2206 AP 0.6476 | best val 0.6791 (epoch 34, test 0.6492117287176955)
+epoch 040 | 128.9s | train loss 0.1318 AP 0.7847 | val loss 0.2281 AP 0.6732 | test loss 0.2339 AP 0.6558 | best val 0.6791 (epoch 34, test 0.6492117287176955)
+epoch 041 | 128.7s | train loss 0.1281 AP 0.7947 | val loss 0.2174 AP 0.6829 | test loss 0.2337 AP 0.6609 | best val 0.6829 (epoch 41, test 0.6609410981400576)
+epoch 042 | 126.9s | train loss 0.1257 AP 0.7955 | val loss 0.2039 AP 0.6923 | test loss 0.2171 AP 0.6758 | best val 0.6923 (epoch 42, test 0.6758193074408501)
+epoch 043 | 128.4s | train loss 0.1222 AP 0.8061 | val loss 0.2170 AP 0.6823 | test loss 0.2297 AP 0.6601 | best val 0.6923 (epoch 42, test 0.6758193074408501)
+epoch 044 | 128.9s | train loss 0.1195 AP 0.8116 | val loss 0.2231 AP 0.6758 | test loss 0.2412 AP 0.6619 | best val 0.6923 (epoch 42, test 0.6758193074408501)
+epoch 045 | 127.9s | train loss 0.1188 AP 0.8141 | val loss 0.2107 AP 0.6786 | test loss 0.2244 AP 0.6525 | best val 0.6923 (epoch 42, test 0.6758193074408501)
+epoch 046 | 127.6s | train loss 0.1139 AP 0.8252 | val loss 0.2054 AP 0.6712 | test loss 0.2268 AP 0.6536 | best val 0.6923 (epoch 42, test 0.6758193074408501)
+epoch 047 | 127.4s | train loss 0.1120 AP 0.8299 | val loss 0.2304 AP 0.6954 | test loss 0.2536 AP 0.6637 | best val 0.6954 (epoch 47, test 0.6636786851270543)
+epoch 048 | 127.9s | train loss 0.1100 AP 0.8301 | val loss 0.2556 AP 0.6749 | test loss 0.2718 AP 0.6611 | best val 0.6954 (epoch 47, test 0.6636786851270543)
+epoch 049 | 130.2s | train loss 0.1072 AP 0.8399 | val loss 0.2424 AP 0.6907 | test loss 0.2645 AP 0.6761 | best val 0.6954 (epoch 47, test 0.6636786851270543)
+epoch 050 | 129.6s | train loss 0.1044 AP 0.8402 | val loss 0.2252 AP 0.6866 | test loss 0.2434 AP 0.6611 | best val 0.6954 (epoch 47, test 0.6636786851270543)
+epoch 051 | 128.1s | train loss 0.1043 AP 0.8404 | val loss 0.2364 AP 0.6811 | test loss 0.2492 AP 0.6764 | best val 0.6954 (epoch 47, test 0.6636786851270543)
+epoch 052 | 130.8s | train loss 0.1028 AP 0.8470 | val loss 0.2549 AP 0.6912 | test loss 0.2624 AP 0.6849 | best val 0.6954 (epoch 47, test 0.6636786851270543)
+epoch 053 | 130.8s | train loss 0.1008 AP 0.8530 | val loss 0.2355 AP 0.6926 | test loss 0.2477 AP 0.6755 | best val 0.6954 (epoch 47, test 0.6636786851270543)
+epoch 054 | 128.5s | train loss 0.0986 AP 0.8545 | val loss 0.2392 AP 0.6894 | test loss 0.2546 AP 0.6785 | best val 0.6954 (epoch 47, test 0.6636786851270543)
+epoch 055 | 130.2s | train loss 0.0979 AP 0.8596 | val loss 0.2191 AP 0.6784 | test loss 0.2379 AP 0.6657 | best val 0.6954 (epoch 47, test 0.6636786851270543)
+epoch 056 | 130.0s | train loss 0.0949 AP 0.8653 | val loss 0.2119 AP 0.7011 | test loss 0.2307 AP 0.6687 | best val 0.7011 (epoch 56, test 0.6687058711106193)
+epoch 057 | 129.7s | train loss 0.0954 AP 0.8637 | val loss 0.2340 AP 0.6848 | test loss 0.2510 AP 0.6677 | best val 0.7011 (epoch 56, test 0.6687058711106193)
+epoch 058 | 129.9s | train loss 0.0940 AP 0.8671 | val loss 0.2377 AP 0.6821 | test loss 0.2550 AP 0.6804 | best val 0.7011 (epoch 56, test 0.6687058711106193)
+epoch 059 | 129.9s | train loss 0.0902 AP 0.8741 | val loss 0.2554 AP 0.6766 | test loss 0.2680 AP 0.6657 | best val 0.7011 (epoch 56, test 0.6687058711106193)
+epoch 060 | 128.7s | train loss 0.0878 AP 0.8785 | val loss 0.2862 AP 0.6738 | test loss 0.2998 AP 0.6682 | best val 0.7011 (epoch 56, test 0.6687058711106193)
+epoch 061 | 127.6s | train loss 0.0881 AP 0.8760 | val loss 0.2430 AP 0.6869 | test loss 0.2506 AP 0.6699 | best val 0.7011 (epoch 56, test 0.6687058711106193)
+epoch 062 | 128.1s | train loss 0.0841 AP 0.8854 | val loss 0.2586 AP 0.6960 | test loss 0.2658 AP 0.6801 | best val 0.7011 (epoch 56, test 0.6687058711106193)
+epoch 063 | 127.6s | train loss 0.0842 AP 0.8827 | val loss 0.2416 AP 0.7069 | test loss 0.2576 AP 0.6906 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 064 | 128.3s | train loss 0.0827 AP 0.8880 | val loss 0.2443 AP 0.6901 | test loss 0.2623 AP 0.6898 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 065 | 127.7s | train loss 0.0808 AP 0.8918 | val loss 0.2502 AP 0.6909 | test loss 0.2604 AP 0.6839 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 066 | 128.7s | train loss 0.0786 AP 0.8974 | val loss 0.2796 AP 0.6987 | test loss 0.2964 AP 0.6830 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 067 | 128.7s | train loss 0.0799 AP 0.8966 | val loss 0.2771 AP 0.6799 | test loss 0.2877 AP 0.6812 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 068 | 131.5s | train loss 0.0783 AP 0.8951 | val loss 0.2633 AP 0.6921 | test loss 0.2782 AP 0.6727 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 069 | 131.3s | train loss 0.0767 AP 0.8991 | val loss 0.2721 AP 0.6888 | test loss 0.2853 AP 0.6729 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 070 | 132.3s | train loss 0.0734 AP 0.9097 | val loss 0.2798 AP 0.6895 | test loss 0.2835 AP 0.6817 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 071 | 128.7s | train loss 0.0755 AP 0.9055 | val loss 0.2582 AP 0.6945 | test loss 0.2687 AP 0.6844 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 072 | 127.3s | train loss 0.0733 AP 0.9047 | val loss 0.2987 AP 0.6972 | test loss 0.3015 AP 0.6878 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 073 | 126.7s | train loss 0.0717 AP 0.9120 | val loss 0.2920 AP 0.6893 | test loss 0.2910 AP 0.6783 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 074 | 126.7s | train loss 0.0691 AP 0.9155 | val loss 0.2770 AP 0.6899 | test loss 0.2864 AP 0.6806 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 075 | 125.5s | train loss 0.0709 AP 0.9151 | val loss 0.2723 AP 0.7036 | test loss 0.2880 AP 0.6916 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 076 | 127.5s | train loss 0.0666 AP 0.9205 | val loss 0.2926 AP 0.7046 | test loss 0.3131 AP 0.6929 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 077 | 127.8s | train loss 0.0694 AP 0.9182 | val loss 0.2960 AP 0.6837 | test loss 0.3013 AP 0.6838 | best val 0.7069 (epoch 63, test 0.690572582060942)
+epoch 078 | 128.9s | train loss 0.0668 AP 0.9220 | val loss 0.2617 AP 0.7089 | test loss 0.2788 AP 0.6983 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 079 | 127.5s | train loss 0.0646 AP 0.9249 | val loss 0.2956 AP 0.6949 | test loss 0.3101 AP 0.6950 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 080 | 127.5s | train loss 0.0622 AP 0.9303 | val loss 0.3221 AP 0.6943 | test loss 0.3320 AP 0.6963 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 081 | 128.6s | train loss 0.0627 AP 0.9289 | val loss 0.2995 AP 0.6874 | test loss 0.3103 AP 0.6820 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 082 | 128.3s | train loss 0.0633 AP 0.9263 | val loss 0.2962 AP 0.6964 | test loss 0.3045 AP 0.6955 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 083 | 128.3s | train loss 0.0618 AP 0.9309 | val loss 0.3126 AP 0.6881 | test loss 0.3187 AP 0.6886 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 084 | 128.0s | train loss 0.0619 AP 0.9312 | val loss 0.3223 AP 0.6956 | test loss 0.3377 AP 0.6992 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 085 | 128.7s | train loss 0.0588 AP 0.9376 | val loss 0.3157 AP 0.6957 | test loss 0.3230 AP 0.7036 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 086 | 127.9s | train loss 0.0587 AP 0.9388 | val loss 0.3081 AP 0.6987 | test loss 0.3216 AP 0.6916 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 087 | 127.6s | train loss 0.0577 AP 0.9376 | val loss 0.3068 AP 0.6967 | test loss 0.3235 AP 0.6971 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 088 | 127.5s | train loss 0.0565 AP 0.9402 | val loss 0.3082 AP 0.7010 | test loss 0.3164 AP 0.6945 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 089 | 125.7s | train loss 0.0562 AP 0.9401 | val loss 0.3171 AP 0.6912 | test loss 0.3275 AP 0.6883 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 090 | 126.0s | train loss 0.0543 AP 0.9462 | val loss 0.3109 AP 0.7002 | test loss 0.3254 AP 0.6952 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 091 | 126.1s | train loss 0.0544 AP 0.9435 | val loss 0.3289 AP 0.6948 | test loss 0.3444 AP 0.6914 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 092 | 125.6s | train loss 0.0535 AP 0.9434 | val loss 0.3219 AP 0.6908 | test loss 0.3244 AP 0.6974 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 093 | 126.3s | train loss 0.0527 AP 0.9484 | val loss 0.2890 AP 0.6845 | test loss 0.2893 AP 0.6949 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 094 | 125.8s | train loss 0.0511 AP 0.9509 | val loss 0.3470 AP 0.6747 | test loss 0.3614 AP 0.6818 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 095 | 124.6s | train loss 0.0515 AP 0.9495 | val loss 0.3148 AP 0.6846 | test loss 0.3164 AP 0.6918 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 096 | 126.5s | train loss 0.0500 AP 0.9525 | val loss 0.3168 AP 0.6828 | test loss 0.3229 AP 0.6832 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 097 | 130.1s | train loss 0.0494 AP 0.9529 | val loss 0.3370 AP 0.6808 | test loss 0.3318 AP 0.6894 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 098 | 130.3s | train loss 0.0505 AP 0.9506 | val loss 0.3672 AP 0.6834 | test loss 0.3794 AP 0.6900 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 099 | 130.5s | train loss 0.0486 AP 0.9550 | val loss 0.3375 AP 0.6847 | test loss 0.3328 AP 0.6943 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 100 | 127.6s | train loss 0.0480 AP 0.9530 | val loss 0.3625 AP 0.6857 | test loss 0.3783 AP 0.6930 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 101 | 127.8s | train loss 0.0475 AP 0.9534 | val loss 0.3575 AP 0.6899 | test loss 0.3630 AP 0.6920 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 102 | 128.2s | train loss 0.0469 AP 0.9589 | val loss 0.3291 AP 0.6931 | test loss 0.3343 AP 0.7072 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 103 | 129.9s | train loss 0.0448 AP 0.9587 | val loss 0.3201 AP 0.6959 | test loss 0.3393 AP 0.6916 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 104 | 129.1s | train loss 0.0440 AP 0.9634 | val loss 0.3495 AP 0.6953 | test loss 0.3622 AP 0.6950 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 105 | 119.8s | train loss 0.0438 AP 0.9599 | val loss 0.3624 AP 0.6900 | test loss 0.3835 AP 0.6921 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 106 | 139.4s | train loss 0.0442 AP 0.9614 | val loss 0.3441 AP 0.6958 | test loss 0.3642 AP 0.6887 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 107 | 141.7s | train loss 0.0419 AP 0.9646 | val loss 0.3735 AP 0.7056 | test loss 0.3906 AP 0.7027 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 108 | 145.4s | train loss 0.0416 AP 0.9665 | val loss 0.3506 AP 0.6869 | test loss 0.3560 AP 0.6969 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 109 | 139.0s | train loss 0.0408 AP 0.9657 | val loss 0.3693 AP 0.6888 | test loss 0.3678 AP 0.6945 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 110 | 138.4s | train loss 0.0408 AP 0.9671 | val loss 0.3653 AP 0.6936 | test loss 0.3801 AP 0.6961 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 111 | 135.1s | train loss 0.0390 AP 0.9695 | val loss 0.3673 AP 0.6903 | test loss 0.3793 AP 0.6941 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 112 | 137.4s | train loss 0.0388 AP 0.9700 | val loss 0.3831 AP 0.6891 | test loss 0.3909 AP 0.7021 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 113 | 137.4s | train loss 0.0382 AP 0.9678 | val loss 0.3539 AP 0.6950 | test loss 0.3577 AP 0.7047 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 114 | 139.8s | train loss 0.0393 AP 0.9671 | val loss 0.3921 AP 0.6822 | test loss 0.3990 AP 0.6882 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 115 | 139.2s | train loss 0.0367 AP 0.9722 | val loss 0.4144 AP 0.6786 | test loss 0.4253 AP 0.6929 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 116 | 138.4s | train loss 0.0372 AP 0.9727 | val loss 0.3716 AP 0.6902 | test loss 0.3750 AP 0.7022 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 117 | 139.0s | train loss 0.0354 AP 0.9720 | val loss 0.3847 AP 0.6943 | test loss 0.3802 AP 0.7002 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+epoch 118 | 138.2s | train loss 0.0355 AP 0.9749 | val loss 0.4338 AP 0.6940 | test loss 0.4395 AP 0.7038 | best val 0.7089 (epoch 78, test 0.6983092699650434)
+early stopping at epoch 118 (no val improvement in 40 epochs)
+BEST: val AP 0.7089 | test AP 0.6983 (epoch 78)

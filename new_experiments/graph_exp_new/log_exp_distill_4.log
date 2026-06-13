@@ -1,0 +1,152 @@
+============================================================
+Phase 1: Extract Attention Targets
+  model_path=checkpoints_staged/stage1_best.pt
+  proxy_opt_steps=150
+  num_proxies=64
+  proxy_mmd_lambda=2.0
+  num_cross_layers=1
+  use_proxy_self_attn=False
+  distill_layers=all
+============================================================
+  Loaded 28 pretrained keys, cross-attn layers randomly initialized
+  Extracting attention from layers: [0]
+  [1/43] 256 graphs | base_loss=0.6201 opt_loss=0.0778 mmd=0.189523
+  [10/43] 2560 graphs | base_loss=0.6194 opt_loss=0.0793 mmd=0.176566
+  [20/43] 5120 graphs | base_loss=0.6206 opt_loss=0.0783 mmd=0.183604
+  [30/43] 7680 graphs | base_loss=0.6206 opt_loss=0.0780 mmd=0.183711
+  [40/43] 10240 graphs | base_loss=0.6202 opt_loss=0.0776 mmd=0.182218
+
+Extraction done. 10873 graphs saved to checkpoints_attn_distill/attn_targets.pkl
+  Avg base_loss=0.6202  opt_loss=0.0778
+
+Sanity check: attention difference (teacher vs vanilla)...
+Traceback (most recent call last):
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/exp_attn_distillation_2.py", line 832, in <module>
+    main()
+    ~~~~^^
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/exp_attn_distillation_2.py", line 826, in main
+    run_extraction(args)
+    ~~~~~~~~~~~~~~^^^^^^
+  File "/home1/sajan_rg/graphormer_eval/new_experiments/graph_exp_new/exp_attn_distillation_2.py", line 453, in run_extraction
+    diff = (t_attn - v_attn).abs().mean().item()
+            ~~~~~~~^~~~~~~~
+RuntimeError: The size of tensor a (402) must match the size of tensor b (394) at non-singleton dimension 2
+============================================================
+Phase 2: Train with Attention Distillation
+  distill_weight=1.0
+  temperature=2.0
+  distill_layers=[0]
+  targets from: checkpoints_attn_distill/attn_targets.pkl
+============================================================
+  AttnTargetDataset: 10873 graphs with targets
+
+Baseline (pretrained, no distillation):
+  val_AP=0.6142  test_AP=0.5944
+  Student trainable params: 3,770,378
+Epoch   1/100 [28.3s] | task=0.3125 distill=0.8789 | train_AP=0.3476 val_AP=0.4562 test_AP=0.4466
+  -> New best val_AP=0.4562 (test=0.4466)
+Epoch   2/100 [27.7s] | task=0.2600 distill=0.5478 | train_AP=0.4533 val_AP=0.4938 test_AP=0.4770
+  -> New best val_AP=0.4938 (test=0.4770)
+Epoch   3/100 [27.1s] | task=0.2501 distill=0.5356 | train_AP=0.4835 val_AP=0.5215 test_AP=0.4993
+  -> New best val_AP=0.5215 (test=0.4993)
+Epoch   4/100 [27.5s] | task=0.2426 distill=0.5184 | train_AP=0.5038 val_AP=0.5191 test_AP=0.4974
+Epoch   5/100 [27.5s] | task=0.2396 distill=0.5127 | train_AP=0.5213 val_AP=0.5331 test_AP=0.5038
+  -> New best val_AP=0.5331 (test=0.5038)
+Epoch   6/100 [28.1s] | task=0.2349 distill=0.5348 | train_AP=0.5305 val_AP=0.5309 test_AP=0.5073
+Epoch   7/100 [27.9s] | task=0.2302 distill=0.4910 | train_AP=0.5518 val_AP=0.5278 test_AP=0.5179
+Epoch   8/100 [27.0s] | task=0.2254 distill=0.5173 | train_AP=0.5661 val_AP=0.5216 test_AP=0.4965
+Epoch   9/100 [27.5s] | task=0.2240 distill=0.4913 | train_AP=0.5755 val_AP=0.5581 test_AP=0.5387
+  -> New best val_AP=0.5581 (test=0.5387)
+Epoch  10/100 [26.8s] | task=0.2146 distill=0.5037 | train_AP=0.5969 val_AP=0.5704 test_AP=0.5393
+  -> New best val_AP=0.5704 (test=0.5393)
+Epoch  11/100 [27.7s] | task=0.2093 distill=0.4830 | train_AP=0.6130 val_AP=0.5829 test_AP=0.5566
+  -> New best val_AP=0.5829 (test=0.5566)
+Epoch  12/100 [27.4s] | task=0.2067 distill=0.4703 | train_AP=0.6174 val_AP=0.5725 test_AP=0.5587
+Epoch  13/100 [27.0s] | task=0.2046 distill=0.4713 | train_AP=0.6248 val_AP=0.5830 test_AP=0.5547
+  -> New best val_AP=0.5830 (test=0.5547)
+Epoch  14/100 [27.9s] | task=0.1990 distill=0.4971 | train_AP=0.6433 val_AP=0.5892 test_AP=0.5627
+  -> New best val_AP=0.5892 (test=0.5627)
+Epoch  15/100 [27.6s] | task=0.1970 distill=0.4947 | train_AP=0.6527 val_AP=0.5869 test_AP=0.5690
+Epoch  16/100 [27.1s] | task=0.1945 distill=0.4841 | train_AP=0.6581 val_AP=0.6020 test_AP=0.5783
+  -> New best val_AP=0.6020 (test=0.5783)
+Epoch  17/100 [28.3s] | task=0.1868 distill=0.4677 | train_AP=0.6779 val_AP=0.5747 test_AP=0.5653
+Epoch  18/100 [28.0s] | task=0.1849 distill=0.4677 | train_AP=0.6817 val_AP=0.5979 test_AP=0.5746
+Epoch  19/100 [28.1s] | task=0.1817 distill=0.4623 | train_AP=0.6984 val_AP=0.5873 test_AP=0.5675
+Epoch  20/100 [28.2s] | task=0.1751 distill=0.4746 | train_AP=0.7118 val_AP=0.6098 test_AP=0.5886
+  -> New best val_AP=0.6098 (test=0.5886)
+Epoch  21/100 [27.6s] | task=0.1728 distill=0.4674 | train_AP=0.7187 val_AP=0.6081 test_AP=0.5961
+Epoch  22/100 [26.9s] | task=0.1713 distill=0.4659 | train_AP=0.7244 val_AP=0.6183 test_AP=0.5957
+  -> New best val_AP=0.6183 (test=0.5957)
+Epoch  23/100 [27.7s] | task=0.1648 distill=0.4571 | train_AP=0.7428 val_AP=0.6090 test_AP=0.5853
+Epoch  24/100 [27.4s] | task=0.1615 distill=0.4642 | train_AP=0.7479 val_AP=0.6163 test_AP=0.5958
+Epoch  25/100 [27.5s] | task=0.1608 distill=0.4683 | train_AP=0.7524 val_AP=0.6113 test_AP=0.5922
+Epoch  26/100 [27.1s] | task=0.1552 distill=0.4565 | train_AP=0.7611 val_AP=0.6276 test_AP=0.5992
+  -> New best val_AP=0.6276 (test=0.5992)
+Epoch  27/100 [27.5s] | task=0.1494 distill=0.4534 | train_AP=0.7768 val_AP=0.6229 test_AP=0.5995
+Epoch  28/100 [27.9s] | task=0.1467 distill=0.4470 | train_AP=0.7881 val_AP=0.6299 test_AP=0.6085
+  -> New best val_AP=0.6299 (test=0.6085)
+Epoch  29/100 [27.3s] | task=0.1436 distill=0.4416 | train_AP=0.7942 val_AP=0.6280 test_AP=0.6129
+Epoch  30/100 [27.7s] | task=0.1406 distill=0.4415 | train_AP=0.7983 val_AP=0.6333 test_AP=0.6135
+  -> New best val_AP=0.6333 (test=0.6135)
+Epoch  31/100 [26.9s] | task=0.1363 distill=0.4410 | train_AP=0.8104 val_AP=0.6351 test_AP=0.6052
+  -> New best val_AP=0.6351 (test=0.6052)
+Epoch  32/100 [27.0s] | task=0.1304 distill=0.4366 | train_AP=0.8215 val_AP=0.6233 test_AP=0.5980
+Epoch  33/100 [27.0s] | task=0.1266 distill=0.4392 | train_AP=0.8307 val_AP=0.6315 test_AP=0.6148
+Epoch  34/100 [28.0s] | task=0.1219 distill=0.4344 | train_AP=0.8415 val_AP=0.6405 test_AP=0.6150
+  -> New best val_AP=0.6405 (test=0.6150)
+Epoch  35/100 [27.7s] | task=0.1190 distill=0.4348 | train_AP=0.8525 val_AP=0.6315 test_AP=0.6240
+Epoch  36/100 [27.0s] | task=0.1163 distill=0.4286 | train_AP=0.8560 val_AP=0.6278 test_AP=0.6117
+Epoch  37/100 [28.3s] | task=0.1147 distill=0.4288 | train_AP=0.8587 val_AP=0.6382 test_AP=0.6173
+Epoch  38/100 [28.3s] | task=0.1096 distill=0.4329 | train_AP=0.8692 val_AP=0.6395 test_AP=0.6194
+Epoch  39/100 [27.5s] | task=0.1046 distill=0.4322 | train_AP=0.8811 val_AP=0.6402 test_AP=0.6258
+Epoch  40/100 [27.6s] | task=0.1035 distill=0.4282 | train_AP=0.8798 val_AP=0.6461 test_AP=0.6259
+  -> New best val_AP=0.6461 (test=0.6259)
+Epoch  41/100 [27.5s] | task=0.0993 distill=0.4205 | train_AP=0.8902 val_AP=0.6513 test_AP=0.6240
+  -> New best val_AP=0.6513 (test=0.6240)
+Epoch  42/100 [27.2s] | task=0.0964 distill=0.4250 | train_AP=0.8964 val_AP=0.6461 test_AP=0.6215
+Epoch  43/100 [27.1s] | task=0.0947 distill=0.4373 | train_AP=0.8982 val_AP=0.6417 test_AP=0.6239
+Epoch  44/100 [27.1s] | task=0.0910 distill=0.4368 | train_AP=0.9068 val_AP=0.6469 test_AP=0.6183
+Epoch  45/100 [27.9s] | task=0.0880 distill=0.4297 | train_AP=0.9129 val_AP=0.6487 test_AP=0.6315
+Epoch  46/100 [28.1s] | task=0.0842 distill=0.4227 | train_AP=0.9154 val_AP=0.6524 test_AP=0.6336
+  -> New best val_AP=0.6524 (test=0.6336)
+Epoch  47/100 [27.3s] | task=0.0809 distill=0.4241 | train_AP=0.9237 val_AP=0.6505 test_AP=0.6315
+Epoch  48/100 [27.4s] | task=0.0792 distill=0.4363 | train_AP=0.9236 val_AP=0.6466 test_AP=0.6265
+Epoch  49/100 [27.7s] | task=0.0765 distill=0.4368 | train_AP=0.9325 val_AP=0.6488 test_AP=0.6287
+Epoch  50/100 [27.6s] | task=0.0767 distill=0.4298 | train_AP=0.9299 val_AP=0.6479 test_AP=0.6371
+Epoch  51/100 [27.6s] | task=0.0727 distill=0.4282 | train_AP=0.9356 val_AP=0.6446 test_AP=0.6302
+Epoch  52/100 [27.9s] | task=0.0704 distill=0.4286 | train_AP=0.9400 val_AP=0.6465 test_AP=0.6326
+Epoch  53/100 [27.8s] | task=0.0687 distill=0.4283 | train_AP=0.9436 val_AP=0.6560 test_AP=0.6297
+  -> New best val_AP=0.6560 (test=0.6297)
+Epoch  54/100 [26.9s] | task=0.0673 distill=0.4270 | train_AP=0.9449 val_AP=0.6527 test_AP=0.6268
+Epoch  55/100 [28.0s] | task=0.0632 distill=0.4263 | train_AP=0.9502 val_AP=0.6483 test_AP=0.6294
+Epoch  56/100 [27.5s] | task=0.0616 distill=0.4257 | train_AP=0.9532 val_AP=0.6499 test_AP=0.6259
+Epoch  57/100 [27.8s] | task=0.0603 distill=0.4249 | train_AP=0.9541 val_AP=0.6544 test_AP=0.6334
+Epoch  58/100 [27.5s] | task=0.0578 distill=0.4268 | train_AP=0.9585 val_AP=0.6450 test_AP=0.6321
+Epoch  59/100 [27.2s] | task=0.0568 distill=0.4318 | train_AP=0.9585 val_AP=0.6456 test_AP=0.6312
+Epoch  60/100 [27.1s] | task=0.0543 distill=0.4284 | train_AP=0.9612 val_AP=0.6449 test_AP=0.6325
+Epoch  61/100 [27.3s] | task=0.0537 distill=0.4269 | train_AP=0.9612 val_AP=0.6438 test_AP=0.6309
+Epoch  62/100 [27.2s] | task=0.0516 distill=0.4271 | train_AP=0.9639 val_AP=0.6495 test_AP=0.6348
+Epoch  63/100 [28.0s] | task=0.0515 distill=0.4270 | train_AP=0.9652 val_AP=0.6500 test_AP=0.6353
+Epoch  64/100 [27.5s] | task=0.0496 distill=0.4206 | train_AP=0.9677 val_AP=0.6496 test_AP=0.6423
+Epoch  65/100 [28.0s] | task=0.0476 distill=0.4240 | train_AP=0.9695 val_AP=0.6483 test_AP=0.6405
+Epoch  66/100 [27.7s] | task=0.0464 distill=0.4293 | train_AP=0.9695 val_AP=0.6452 test_AP=0.6372
+Epoch  67/100 [28.0s] | task=0.0454 distill=0.4211 | train_AP=0.9721 val_AP=0.6452 test_AP=0.6379
+Epoch  68/100 [27.9s] | task=0.0453 distill=0.4278 | train_AP=0.9733 val_AP=0.6491 test_AP=0.6382
+Epoch  69/100 [27.5s] | task=0.0440 distill=0.4247 | train_AP=0.9744 val_AP=0.6499 test_AP=0.6409
+Epoch  70/100 [27.3s] | task=0.0422 distill=0.4229 | train_AP=0.9743 val_AP=0.6500 test_AP=0.6402
+Epoch  71/100 [28.2s] | task=0.0412 distill=0.4212 | train_AP=0.9749 val_AP=0.6503 test_AP=0.6440
+Epoch  72/100 [28.2s] | task=0.0400 distill=0.4236 | train_AP=0.9781 val_AP=0.6506 test_AP=0.6407
+Epoch  73/100 [27.4s] | task=0.0398 distill=0.4258 | train_AP=0.9785 val_AP=0.6510 test_AP=0.6415
+Epoch  74/100 [27.8s] | task=0.0388 distill=0.4253 | train_AP=0.9793 val_AP=0.6480 test_AP=0.6417
+Epoch  75/100 [27.2s] | task=0.0378 distill=0.4222 | train_AP=0.9806 val_AP=0.6455 test_AP=0.6427
+Epoch  76/100 [27.1s] | task=0.0371 distill=0.4197 | train_AP=0.9818 val_AP=0.6442 test_AP=0.6406
+Epoch  77/100 [27.7s] | task=0.0370 distill=0.4195 | train_AP=0.9810 val_AP=0.6509 test_AP=0.6428
+Epoch  78/100 [27.8s] | task=0.0357 distill=0.4180 | train_AP=0.9827 val_AP=0.6510 test_AP=0.6416
+Epoch  79/100 [28.4s] | task=0.0357 distill=0.4196 | train_AP=0.9832 val_AP=0.6497 test_AP=0.6394
+Epoch  80/100 [27.2s] | task=0.0353 distill=0.4203 | train_AP=0.9825 val_AP=0.6521 test_AP=0.6441
+Epoch  81/100 [27.8s] | task=0.0345 distill=0.4197 | train_AP=0.9831 val_AP=0.6504 test_AP=0.6426
+Epoch  82/100 [28.2s] | task=0.0343 distill=0.4232 | train_AP=0.9838 val_AP=0.6504 test_AP=0.6418
+Epoch  83/100 [28.4s] | task=0.0339 distill=0.4205 | train_AP=0.9848 val_AP=0.6512 test_AP=0.6429
+Early stopping at epoch 83.
+
+Done. Baseline val_AP=0.6142 | Best distilled val_AP=0.6560 at epoch 53
