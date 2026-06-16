@@ -326,6 +326,16 @@ def make_objective(args, train_loader, val_loader, task):
                        if p.requires_grad)
         trial.set_user_attr("n_params", n_params)
 
+        # ---- Param-count gate ----------------------------------------
+        MAX_PARAMS = 525_000
+        if n_params > MAX_PARAMS:
+            print(f"  [trial {trial.number}] SKIPPED — "
+                  f"{n_params:,} params > {MAX_PARAMS:,} limit. "
+                  f"params: {hp}")
+            del model
+            torch.cuda.empty_cache()
+            raise optuna.TrialPruned(f"Model too large ({n_params:,} params)")
+
         # Start with the original batch size; halve on OOM.
         cur_batch_size = args.batch_size
         cur_train_loader = train_loader
@@ -547,27 +557,52 @@ def main():
         load_if_exists=True,
     )
 
-    n_existing = len(study.trials)
-    if n_existing > 0:
+    # Count only *completed* trials so that param-pruned trials do not
+    # reduce the number of real experiments.
+    n_existing_complete = len([t for t in study.trials
+                               if t.state == optuna.trial.TrialState.COMPLETE])
+    n_existing_all = len(study.trials)
+    if n_existing_all > 0:
         # Offset the seed so the sampler's initial random exploration
         # produces fresh configs instead of repeating old ones.
-        study.sampler = TPESampler(seed=args.seed + n_existing)
+        study.sampler = TPESampler(seed=args.seed + n_existing_all)
         print(f"Resuming study '{args.study_name}' — "
-              f"{n_existing} existing trials found.")
+              f"{n_existing_all} total trials found "
+              f"({n_existing_complete} completed).")
 
-    n_remaining = max(0, args.n_trials - n_existing)
+    n_remaining = max(0, args.n_trials - n_existing_complete)
     if n_remaining == 0:
-        print(f"Already have {n_existing} >= {args.n_trials} trials. "
+        print(f"Already have {n_existing_complete} >= {args.n_trials} "
+              f"completed trials. "
               f"Nothing to do (increase --n_trials to run more).")
     else:
-        print(f"Will run {n_remaining} new trials "
-              f"(target total: {args.n_trials}, existing: {n_existing}).")
+        print(f"Will run until {n_remaining} more trials complete "
+              f"(target total: {args.n_trials} completed, "
+              f"existing completed: {n_existing_complete}).")
+        print("Note: trials exceeding 525k params are pruned immediately "
+              "and do not count toward the target.")
 
     # ---- Run search --------------------------------------------------
+    # Use a callback-based stop so that param-pruned trials (which Optuna
+    # marks as PRUNED, not COMPLETE) do not eat into the completed quota.
     objective = make_objective(args, train_loader, val_loader, task)
     if n_remaining > 0:
-        study.optimize(objective, n_trials=n_remaining,
-                       n_jobs=args.n_jobs, show_progress_bar=True)
+        _n_complete_target = n_existing_complete + n_remaining
+
+        def _stop_when_enough_complete(study: optuna.Study,
+                                       trial: optuna.trial.FrozenTrial) -> None:
+            n_done = len([t for t in study.trials
+                          if t.state == optuna.trial.TrialState.COMPLETE])
+            if n_done >= _n_complete_target:
+                study.stop()
+
+        study.optimize(
+            objective,
+            n_trials=None,          # run until the callback stops us
+            n_jobs=args.n_jobs,
+            show_progress_bar=True,
+            callbacks=[_stop_when_enough_complete],
+        )
 
     # ---- Report ------------------------------------------------------
     print("\n" + "=" * 72)
