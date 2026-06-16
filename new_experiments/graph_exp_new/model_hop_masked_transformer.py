@@ -512,10 +512,12 @@ class HopGate(nn.Module):
             topk_vals, topk_idx = logits.topk(self.top_k, dim=-1)
             sparse_logits = torch.full_like(logits, _NEG_INF)
             sparse_logits.scatter_(-1, topk_idx, topk_vals)
+            sparse_logits[..., 0] = logits[..., 0]
             weights = F.softmax(sparse_logits, dim=-1)
         else:
-            # weights = F.softmax(logits, dim=-1)
-            weights = F.sigmoid(logits)
+            weights = F.softmax(logits, dim=-1)
+            # weights = weights * (weights > 0.015 + (1/self.num_heads))
+            # weights = F.sigmoid(logits)
 
         return weights, logits   # (B, H, K), (B, H, K)
 
@@ -1107,9 +1109,7 @@ class HopMaskedTransformerModel(nn.Module):
 
         # ── Optional post-transformer GATv2 on the sparse graph ───────
         if self.post_gat is not None:
-            node_emb = self.post_gat(
-                node_emb, batch.edge_index, edge_attr=batch.edge_attr,
-            )
+            node_emb = self.post_gat(node_emb, batch.edge_index)
 
         if self.task_level == "node":
             return self.head(node_emb), node_emb, aux_loss
