@@ -59,6 +59,9 @@ def build_parser():
     # Dataset
     p.add_argument("--dataset", type=str, default="Peptides-func",
                    choices=["Peptides-func", "Peptides-struct", "PascalVOC-SP", "mnist", "pattern", "cifar10", "cluster", "zinc12k"])
+    p.add_argument("--mask_type", type=str, default="shortest_path",
+                   choices=["shortest_path", "adj_power"])
+    p.add_argument("--adj_self_loops", action="store_true", default=False)
     p.add_argument("--max_hops", type=int, default=40)
     p.add_argument("--use_lap_pe", action="store_true", default=False)
     p.add_argument("--lap_pe_dim", type=int, default=8)
@@ -78,7 +81,7 @@ def build_parser():
     p.add_argument("--study_name", type=str,
                    default="hop_masked_hparam_search")
     p.add_argument("--storage", type=str,
-                   default="sqlite:///optuna_hop_masked.db",
+                   default="sqlite:///optuna_hop_masked_new.db",
                    help="Optuna storage URL (default: SQLite for persistence "
                         "across restarts).")
     p.add_argument("--output_json", type=str,
@@ -87,6 +90,8 @@ def build_parser():
     p.add_argument("--pruning", action="store_true", default=True,
                    help="Enable Optuna median pruner (default: on).")
     p.add_argument("--no_pruning", action="store_false", dest="pruning")
+    p.add_argument("--n_jobs", type=int, default=3,
+                   help="Max parallel Optuna trials (default: 3).")
 
     # Misc
     p.add_argument("--device", type=str, default=None)
@@ -100,6 +105,17 @@ def build_parser():
 # Search space definition
 # ===================================================================
 
+# Valid (num_heads, hidden_dim) pairs — hidden_dim is always divisible
+# by num_heads.  Organised as {num_heads: [hidden_dim choices]}.
+_HEAD_DIM_TABLE = {
+    4:  [40, 80, 160, 320, 640],
+    8:  [40, 80, 160, 320, 640],
+    16: [80, 160, 320, 640],
+    20: [40, 80, 160, 320, 640],
+    40: [40, 80, 160, 320, 640],
+}
+_ALL_HIDDEN_DIMS = sorted({d for dims in _HEAD_DIM_TABLE.values() for d in dims})
+
 def suggest_hparams(trial: optuna.Trial) -> dict:
     """Define the Bayesian search space for the hop-masked transformer.
 
@@ -107,35 +123,105 @@ def suggest_hparams(trial: optuna.Trial) -> dict:
     The ranges are centred around the user's baseline config:
         --max_hops 40 --num_heads 40 --num_layers 1
         --hop_mode window --hop_window 1 --hidden_dim 640
+
+    hidden_dim is guaranteed to be divisible by num_heads via
+    ``_HEAD_DIM_TABLE``.
     """
 
     hp = {}
 
     # ---- Architecture core -------------------------------------------
-    # num_heads must divide hidden_dim.  We suggest both and constrain
-    # below; invalid combos (head/dim mismatch) are caught and pruned.
-    hp["hidden_dim"] = trial.suggest_categorical(
-        "hidden_dim", [40, 80, 160, 320, 640])
+    # Pick num_heads first, then choose hidden_dim from the compatible
+    # list so that hidden_dim % num_heads == 0 is always satisfied.
     hp["num_heads"] = trial.suggest_categorical(
-        "num_heads", [4, 8, 16, 20, 40])
-    hp["ffn_ratio"] = trial.suggest_categorical("ffn_ratio", [1, 2, 3])
-    hp["num_layers"] = trial.suggest_int("num_layers", 1, 3)
+        "num_heads", list(_HEAD_DIM_TABLE.keys())
+    )
+    _raw_hidden = trial.suggest_categorical("hidden_dim", _ALL_HIDDEN_DIMS)
+    # Enforce compatibility with num_heads AFTER sampling
+    _valid = _HEAD_DIM_TABLE[hp["num_heads"]]
+    hp["hidden_dim"] = min(_valid, key=lambda x: abs(x - _raw_hidden))
+    hp["ffn_ratio"] = trial.suggest_categorical("ffn_ratio", [1, 2, 3, 4])
+    hp["num_layers"] = trial.suggest_int("num_layers", 1, 4)
     hp["dropout"] = trial.suggest_float("dropout", 0.05, 0.4, step=0.05)
+
+    # ---- Normalization -----------------------------------------------
+    hp["norm_type"] = trial.suggest_categorical(
+        "norm_type", ["layer", "rms", "graph"])
+
+    # ---- Value head dim (asymmetric attention) -----------------------
+    use_asym_v = trial.suggest_categorical("use_asym_v", [False, True])
+    if use_asym_v:
+        qk_head_dim = hp["hidden_dim"] // hp["num_heads"]
+        v_dim_multiplier = trial.suggest_categorical("v_head_dim_multiplier", [0.5, 2, 4])
+        hp["v_head_dim"] = int(qk_head_dim * v_dim_multiplier)
+    else:
+        hp["v_head_dim"] = None
+
+    # ---- Block-diagonal output projection ----------------------------
+    hp["block_diag_out"] = trial.suggest_categorical(
+        "block_diag_out", [False, True])
+
+    # ---- Dynamic cross-hop attention sublayer ------------------------
+    hp["dynamic_cross_hop"] = trial.suggest_categorical(
+        "dynamic_cross_hop", [False, True])
+
+    # ---- Virtual node ------------------------------------------------
+    hp["use_virtual_node"] = trial.suggest_categorical(
+        "use_virtual_node", [False, True])
+
+    # ---- Post-transformer GATv2 layers -------------------------------
+    hp["num_post_gat_layers"] = trial.suggest_int(
+        "num_post_gat_layers", 0, 3)
+    if hp["num_post_gat_layers"] > 0:
+        # num_gat_heads must divide hidden_dim
+        gat_head_choices = [h for h in [2, 4, 8]
+                           if hp["hidden_dim"] % h == 0]
+        if not gat_head_choices:
+            gat_head_choices = [1]
+        hp["num_gat_heads"] = trial.suggest_categorical(
+            "num_gat_heads", gat_head_choices)
+    else:
+        hp["num_gat_heads"] = 4  # default, won't be used
 
     # ---- Hop-to-head assignment --------------------------------------
     hp["hop_mode"] = trial.suggest_categorical(
-        "hop_mode", ["contiguous", "window"])
+        "hop_mode", ["contiguous", "window", "single", "interleaved",
+                     "alternating"])
     hp["hop_window"] = trial.suggest_int("hop_window", 1, 7)
     hp["num_global_heads"] = trial.suggest_int("num_global_heads", 0, 4)
 
+    # ---- MoE gating (replaces deterministic hop assignment) -----------
+    hp["use_moe_gating"] = trial.suggest_categorical(
+        "use_moe_gating", [False, True])
+    if hp["use_moe_gating"]:
+        hp["top_k"] = trial.suggest_int("top_k", 0, 8)
+        hp["gate_noise"] = trial.suggest_float(
+            "gate_noise", 0.0, 0.3, step=0.05)
+        hp["balance_coeff"] = trial.suggest_float(
+            "balance_coeff", 1e-3, 0.1, log=True)
+        hp["entropy_coeff"] = trial.suggest_float(
+            "entropy_coeff", 1e-3, 0.1, log=True)
+    else:
+        hp["top_k"] = 0
+        hp["gate_noise"] = 0.1
+        hp["balance_coeff"] = 0.01
+        hp["entropy_coeff"] = 0.01
+
     # ---- Pooling / task head -----------------------------------------
     hp["graph_pool"] = trial.suggest_categorical(
-        "graph_pool", ["sum", "mean"])
+        "graph_pool", ["sum", "mean", "attention"])
 
     # ---- Training ----------------------------------------------------
     hp["lr"] = trial.suggest_float("lr", 3e-4, 3e-3, log=True)
+    hp["lr_min"] = trial.suggest_float("lr_min", 1e-7, 1e-5, log=True)
     hp["weight_decay"] = trial.suggest_float(
         "weight_decay", 1e-5, 1e-2, log=True)
+    hp["warmup_ratio"] = trial.suggest_float(
+        "warmup_ratio", 0.02, 0.10, step=0.01)
+    hp["grad_clip"] = trial.suggest_float(
+        "grad_clip", 0.5, 5.0, step=0.5)
+    hp["reduce_lr_patience"] = trial.suggest_int(
+        "reduce_lr_patience", 5, 15)
 
     return hp
 
@@ -160,8 +246,9 @@ def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
         if is_train:
             optimizer.zero_grad()
         with torch.set_grad_enabled(is_train):
-            logits, _ = model(pyg_batch, dist_masks, node_masks)
-            loss = task.loss(logits, pyg_batch.y)
+            logits, _, aux_loss = model(pyg_batch, dist_masks, node_masks)
+            task_loss = task.loss(logits, pyg_batch.y)
+            loss = task_loss + aux_loss
 
         if is_train:
             loss.backward()
@@ -172,7 +259,7 @@ def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
             if scheduler is not None:
                 scheduler.step()
 
-        losses.append(loss.item())
+        losses.append(task_loss.item())
         preds_acc.append(task.predict(logits))
         labels_acc.append(task.labels_to_numpy(pyg_batch.y))
 
@@ -210,6 +297,20 @@ def make_objective(args, train_loader, val_loader, task):
             dataset_name=args.dataset,
             lap_pe_dim=args.lap_pe_dim if args.use_lap_pe else 0,
             node_feat_dim=task.node_feat_dim,
+            block_diag_out=hp["block_diag_out"],
+            dynamic_cross_hop=hp["dynamic_cross_hop"],
+            norm_type=hp["norm_type"],
+            v_head_dim=hp["v_head_dim"],
+            mask_type=args.mask_type,
+            adj_self_loops=args.adj_self_loops,
+            use_moe_gating=hp["use_moe_gating"],
+            top_k=hp["top_k"],
+            gate_noise=hp["gate_noise"],
+            balance_coeff=hp["balance_coeff"],
+            entropy_coeff=hp["entropy_coeff"],
+            use_virtual_node=hp["use_virtual_node"],
+            num_post_gat_layers=hp["num_post_gat_layers"],
+            num_gat_heads=hp["num_gat_heads"],
         ).to(args.device)
 
     def objective(trial: optuna.Trial) -> float:
@@ -228,6 +329,16 @@ def make_objective(args, train_loader, val_loader, task):
                        if p.requires_grad)
         trial.set_user_attr("n_params", n_params)
 
+        # ---- Param-count gate ----------------------------------------
+        MAX_PARAMS = 525_000
+        if n_params > MAX_PARAMS:
+            print(f"  [trial {trial.number}] SKIPPED — "
+                  f"{n_params:,} params > {MAX_PARAMS:,} limit. "
+                  f"params: {hp}")
+            del model
+            torch.cuda.empty_cache()
+            raise optuna.TrialPruned(f"Model too large ({n_params:,} params)")
+
         # Start with the original batch size; halve on OOM.
         cur_batch_size = args.batch_size
         cur_train_loader = train_loader
@@ -238,10 +349,19 @@ def make_objective(args, train_loader, val_loader, task):
             optimizer, scheduler = build_grouped_optimizer_and_scheduler(
                 named_parameters=list(model.named_parameters()),
                 lr_max=hp["lr"],
-                lr_min=1e-6,
+                lr_min=hp["lr_min"],
                 weight_decay=hp["weight_decay"],
                 total_steps=total_steps,
-                warmup_ratio=0.05,
+                warmup_ratio=hp["warmup_ratio"],
+            )
+
+            plateau_mode = "max" if task.higher_is_better else "min"
+            plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode=plateau_mode,
+                factor=0.5,
+                patience=hp["reduce_lr_patience"],
+                min_lr=hp["lr_min"],
             )
 
             best_val = -float("inf") if task.higher_is_better else float("inf")
@@ -255,7 +375,7 @@ def make_objective(args, train_loader, val_loader, task):
                     tr_loss, tr_metric = run_epoch(
                         model, cur_train_loader, task, args.device,
                         optimizer=optimizer, scheduler=scheduler,
-                        grad_clip=1.0,
+                        grad_clip=hp["grad_clip"],
                     )
                     va_loss, va_metric = run_epoch(
                         model, cur_val_loader, task, args.device)
@@ -266,6 +386,7 @@ def make_objective(args, train_loader, val_loader, task):
                     raise
 
                 dt = time.time() - t0
+                plateau_scheduler.step(va_metric)
 
                 improved = (va_metric > best_val if task.higher_is_better
                             else va_metric < best_val)
@@ -310,7 +431,7 @@ def make_objective(args, train_loader, val_loader, task):
 
             print(f"  [trial {trial.number}] OOM at bs={cur_batch_size} → "
                   f"retrying with bs={new_bs}")
-            del optimizer, scheduler
+            del optimizer, scheduler, plateau_scheduler
             torch.cuda.empty_cache()
 
             # Rebuild loaders with the smaller batch size
@@ -326,7 +447,7 @@ def make_objective(args, train_loader, val_loader, task):
         trial.set_user_attr("actual_batch_size", cur_batch_size)
 
         # Clean up GPU memory between trials
-        del model, optimizer, scheduler
+        del model, optimizer, scheduler, plateau_scheduler
         torch.cuda.empty_cache()
 
         return best_val
@@ -435,30 +556,56 @@ def main():
         direction=direction,
         sampler=TPESampler(seed=args.seed),
         pruner=pruner,
-        storage=args.storage,
+        storage=optuna.storages.RDBStorage(url=args.storage, engine_kwargs={"connect_args": {"timeout": 60}},),
         load_if_exists=True,
     )
 
-    n_existing = len(study.trials)
-    if n_existing > 0:
+    # Count only *completed* trials so that param-pruned trials do not
+    # reduce the number of real experiments.
+    n_existing_complete = len([t for t in study.trials
+                               if t.state == optuna.trial.TrialState.COMPLETE])
+    n_existing_all = len(study.trials)
+    if n_existing_all > 0:
         # Offset the seed so the sampler's initial random exploration
         # produces fresh configs instead of repeating old ones.
-        study.sampler = TPESampler(seed=args.seed + n_existing)
+        study.sampler = TPESampler(seed=args.seed + n_existing_all)
         print(f"Resuming study '{args.study_name}' — "
-              f"{n_existing} existing trials found.")
+              f"{n_existing_all} total trials found "
+              f"({n_existing_complete} completed).")
 
-    n_remaining = max(0, args.n_trials - n_existing)
+    n_remaining = max(0, args.n_trials - n_existing_complete)
     if n_remaining == 0:
-        print(f"Already have {n_existing} >= {args.n_trials} trials. "
+        print(f"Already have {n_existing_complete} >= {args.n_trials} "
+              f"completed trials. "
               f"Nothing to do (increase --n_trials to run more).")
     else:
-        print(f"Will run {n_remaining} new trials "
-              f"(target total: {args.n_trials}, existing: {n_existing}).")
+        print(f"Will run until {n_remaining} more trials complete "
+              f"(target total: {args.n_trials} completed, "
+              f"existing completed: {n_existing_complete}).")
+        print("Note: trials exceeding 525k params are pruned immediately "
+              "and do not count toward the target.")
 
     # ---- Run search --------------------------------------------------
+    # Use a callback-based stop so that param-pruned trials (which Optuna
+    # marks as PRUNED, not COMPLETE) do not eat into the completed quota.
     objective = make_objective(args, train_loader, val_loader, task)
     if n_remaining > 0:
-        study.optimize(objective, n_trials=n_remaining, show_progress_bar=True)
+        _n_complete_target = n_existing_complete + n_remaining
+
+        def _stop_when_enough_complete(study: optuna.Study,
+                                       trial: optuna.trial.FrozenTrial) -> None:
+            n_done = len([t for t in study.trials
+                          if t.state == optuna.trial.TrialState.COMPLETE])
+            if n_done >= _n_complete_target:
+                study.stop()
+
+        study.optimize(
+            objective,
+            n_trials=None,          # run until the callback stops us
+            n_jobs=args.n_jobs,
+            show_progress_bar=True,
+            callbacks=[_stop_when_enough_complete],
+        )
 
     # ---- Report ------------------------------------------------------
     print("\n" + "=" * 72)
@@ -519,8 +666,40 @@ def main():
     direct_flags = [
         "hidden_dim", "num_heads", "ffn_ratio", "num_layers", "dropout",
         "hop_mode", "hop_window", "num_global_heads", "graph_pool",
-        "lr", "weight_decay",
+        "norm_type", "lr", "weight_decay", "grad_clip",
+        "warmup_ratio", "reduce_lr_patience", "lr_min",
     ]
+    # Boolean flags (only emitted when True)
+    bool_flags = [
+        "block_diag_out", "dynamic_cross_hop", "use_virtual_node",
+        "use_moe_gating",
+    ]
+    for flag in bool_flags:
+        if bp.get(flag):
+            cmd_parts.append(f"--{flag}")
+
+    # MoE params (only when use_moe_gating is True)
+    if bp.get("use_moe_gating"):
+        for moe_flag in ["top_k", "gate_noise", "balance_coeff",
+                         "entropy_coeff"]:
+            if moe_flag in bp:
+                cmd_parts.append(f"--{moe_flag} {bp[moe_flag]}")
+
+    # v_head_dim (only when not None)
+    if bp.get("v_head_dim") is not None:
+        cmd_parts.append(f"--v_head_dim {bp['v_head_dim']}")
+
+    # Post-GAT layers
+    if bp.get("num_post_gat_layers", 0) > 0:
+        cmd_parts.append(f"--num_post_gat_layers {bp['num_post_gat_layers']}")
+        if "num_gat_heads" in bp:
+            cmd_parts.append(f"--num_gat_heads {bp['num_gat_heads']}")
+
+    # mask_type / adj_self_loops from CLI args
+    if args.mask_type != "shortest_path":
+        cmd_parts.append(f"--mask_type {args.mask_type}")
+    if args.adj_self_loops:
+        cmd_parts.append("--adj_self_loops")
     for flag in direct_flags:
         if flag in bp:
             cmd_parts.append(f"--{flag} {bp[flag]}")
