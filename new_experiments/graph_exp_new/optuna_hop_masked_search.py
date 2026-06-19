@@ -81,7 +81,7 @@ def build_parser():
     p.add_argument("--study_name", type=str,
                    default="hop_masked_hparam_search")
     p.add_argument("--storage", type=str,
-                   default="sqlite:///optuna_hop_masked.db",
+                   default="sqlite:///optuna_hop_masked_new.db",
                    help="Optuna storage URL (default: SQLite for persistence "
                         "across restarts).")
     p.add_argument("--output_json", type=str,
@@ -114,7 +114,7 @@ _HEAD_DIM_TABLE = {
     20: [40, 80, 160, 320, 640],
     40: [40, 80, 160, 320, 640],
 }
-
+_ALL_HIDDEN_DIMS = sorted({d for dims in _HEAD_DIM_TABLE.values() for d in dims})
 
 def suggest_hparams(trial: optuna.Trial) -> dict:
     """Define the Bayesian search space for the hop-masked transformer.
@@ -134,9 +134,12 @@ def suggest_hparams(trial: optuna.Trial) -> dict:
     # Pick num_heads first, then choose hidden_dim from the compatible
     # list so that hidden_dim % num_heads == 0 is always satisfied.
     hp["num_heads"] = trial.suggest_categorical(
-        "num_heads", list(_HEAD_DIM_TABLE.keys()))
-    hp["hidden_dim"] = trial.suggest_categorical(
-        "hidden_dim", _HEAD_DIM_TABLE[hp["num_heads"]])
+        "num_heads", list(_HEAD_DIM_TABLE.keys())
+    )
+    _raw_hidden = trial.suggest_categorical("hidden_dim", _ALL_HIDDEN_DIMS)
+    # Enforce compatibility with num_heads AFTER sampling
+    _valid = _HEAD_DIM_TABLE[hp["num_heads"]]
+    hp["hidden_dim"] = min(_valid, key=lambda x: abs(x - _raw_hidden))
     hp["ffn_ratio"] = trial.suggest_categorical("ffn_ratio", [1, 2, 3, 4])
     hp["num_layers"] = trial.suggest_int("num_layers", 1, 4)
     hp["dropout"] = trial.suggest_float("dropout", 0.05, 0.4, step=0.05)
@@ -149,8 +152,8 @@ def suggest_hparams(trial: optuna.Trial) -> dict:
     use_asym_v = trial.suggest_categorical("use_asym_v", [False, True])
     if use_asym_v:
         qk_head_dim = hp["hidden_dim"] // hp["num_heads"]
-        hp["v_head_dim"] = trial.suggest_categorical(
-            "v_head_dim", [qk_head_dim * 2, qk_head_dim * 4])
+        v_dim_multiplier = trial.suggest_categorical("v_head_dim_multiplier", [0.5, 2, 4])
+        hp["v_head_dim"] = int(qk_head_dim * v_dim_multiplier)
     else:
         hp["v_head_dim"] = None
 
@@ -553,7 +556,7 @@ def main():
         direction=direction,
         sampler=TPESampler(seed=args.seed),
         pruner=pruner,
-        storage=args.storage,
+        storage=optuna.storages.RDBStorage(url=args.storage, engine_kwargs={"connect_args": {"timeout": 60}},),
         load_if_exists=True,
     )
 
