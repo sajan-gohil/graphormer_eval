@@ -38,9 +38,22 @@ import torch
 torch.set_float32_matmul_precision("high")
 
 from data import DATASET_CHOICES, get_loaders
-from metrics import build_task
+from metrics import build_task, compute_pos_weight
 from model_hop_masked_transformer import HopMaskedTransformerModel
 from optim_utils import build_grouped_optimizer_and_scheduler
+
+
+def _gather_train_labels(loader, num_classes):
+    """Collect the (N, C) multi-label target matrix from a training loader."""
+    ds = loader.dataset
+    base = getattr(ds, "pyg_dataset", ds)   # unwrap DistMaskDataset
+    rows = []
+    for i in range(len(base)):
+        g = base[i]
+        y = g.y
+        y = y.numpy() if hasattr(y, "numpy") else np.asarray(y)
+        rows.append(y.reshape(-1)[:num_classes])
+    return np.stack(rows, axis=0)
 
 
 def build_parser():
@@ -95,6 +108,20 @@ def build_parser():
                    help="Insert a dynamic cross-hop attention sublayer "
                         "between MHA and FFN. Best paired with "
                         "--block_diag_out.")
+    p.add_argument("--cross_hop_hop_embedding", action="store_true", default=False,
+                   help="Add a learnable per-head (per-hop-band) embedding "
+                        "inside the DynamicCrossHopMixer so it is no longer "
+                        "permutation-invariant over hop slabs. Only has an "
+                        "effect when --dynamic_cross_hop is set.")
+    p.add_argument("--use_edge_features", action="store_true", default=False,
+                   help="Incorporate edge/bond features: a BondEncoder embeds "
+                        "edge_attr, aggregated into node features in the node "
+                        "encoder, and (if --num_post_gat_layers>0) fed to the "
+                        "GATv2 layers via edge_dim.")
+    p.add_argument("--use_pos_weight", action="store_true", default=False,
+                   help="Use per-class pos_weight = sqrt(N/(C*n_k)) in the BCE "
+                        "loss for multi-label tasks (computed from the training "
+                        "set). No effect on non-multi-label tasks.")
     p.add_argument("--use_virtual_node", action="store_true", default=False,
                    help="Prepend a learnable virtual-node embedding that "
                         "participates in every attention head.  For graph-"
@@ -237,7 +264,22 @@ def main():
     )
     dataset_name = dataset_info["name"]
 
-    task = build_task(dataset_name, dataset_info=dataset_info)
+    # Optional per-class pos_weight = sqrt(N / (C * n_k)) for multi-label BCE.
+    pos_weight = None
+    if args.use_pos_weight:
+        if dataset_info["task_type"] != "multi_label":
+            print(f"--use_pos_weight ignored: task_type="
+                  f"{dataset_info['task_type']} is not multi_label.", flush=True)
+        else:
+            num_classes = dataset_info["output_dim"]
+            labels = _gather_train_labels(train_loader, num_classes)
+            pw = compute_pos_weight(labels, num_classes)
+            pos_weight = torch.as_tensor(pw, dtype=torch.float32, device=args.device)
+            print(f"pos_weight (sqrt(N/(C*n_k))): {np.round(pw, 3)}", flush=True)
+
+    task = build_task(dataset_name, dataset_info=dataset_info, pos_weight=pos_weight)
+    # Move the loss module (and its pos_weight buffer) onto the device.
+    task.loss_fn = task.loss_fn.to(args.device)
 
     print(f"[{dataset_name}] task={task.task_type} level={task.level} "
           f"metric={task.metric_name} (higher_is_better={task.higher_is_better})",
@@ -273,6 +315,9 @@ def main():
         use_virtual_node=args.use_virtual_node,
         num_post_gat_layers=args.num_post_gat_layers,
         num_gat_heads=args.num_gat_heads,
+        cross_hop_hop_embedding=args.cross_hop_hop_embedding,
+        use_edge_features=args.use_edge_features,
+        edge_feat_dim=dataset_info.get("edge_feat_dim"),
     ).to(args.device)
 
     # Print the head -> hop-set assignment so it's logged for reproducibility.
@@ -297,6 +342,11 @@ def main():
     if args.num_post_gat_layers > 0:
         print(f"Post-transformer GATv2: {args.num_post_gat_layers} layer(s), "
               f"{args.num_gat_heads} heads", flush=True)
+    if args.dynamic_cross_hop and args.cross_hop_hop_embedding:
+        print("Cross-hop mixer: per-head hop embedding ENABLED", flush=True)
+    if args.use_edge_features:
+        print("Edge features: ENABLED (BondEncoder in node encoder"
+              + (" + GATv2" if args.num_post_gat_layers > 0 else "") + ")", flush=True)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"trainable params: {n_params/1e6:.3f}M", flush=True)
@@ -438,4 +488,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

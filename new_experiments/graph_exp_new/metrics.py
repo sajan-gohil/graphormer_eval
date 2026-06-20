@@ -214,7 +214,7 @@ class Task:
         compute_macro_ap(preds, labels)             -> task.compute_metric(preds, labels)
     """
 
-    def __init__(self, dataset_name, dataset_info=None):
+    def __init__(self, dataset_name, dataset_info=None, pos_weight=None):
         info = dataset_info or get_dataset_info(dataset_name)
         self.dataset_name = info.get("name", dataset_name)
         self.output_dim = info["output_dim"]
@@ -225,7 +225,10 @@ class Task:
         self.metric_name = info["metric_name"]
 
         if self.task_type == "multi_label":
-            self.loss_fn = nn.BCEWithLogitsLoss()
+            # pos_weight: optional (C,) tensor of per-class positive weights,
+            # registered as a buffer inside BCEWithLogitsLoss so .to(device)
+            # moves it with the module.
+            self.loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         elif self.task_type == "regression":
             # LRGB Peptides-struct uses L1 / MAE.
             self.loss_fn = nn.L1Loss()
@@ -312,6 +315,26 @@ class Task:
         }[self.metric_name]
 
 
-def build_task(dataset_name, dataset_info=None) -> Task:
+def build_task(dataset_name, dataset_info=None, pos_weight=None) -> Task:
     """Convenience constructor — used at the top of every training script."""
-    return Task(dataset_name, dataset_info=dataset_info)
+    return Task(dataset_name, dataset_info=dataset_info, pos_weight=pos_weight)
+
+
+def compute_pos_weight(labels: np.ndarray, num_classes: int) -> np.ndarray:
+    """Per-class positive weight = sqrt(N / (C * n_k)).
+
+    N = number of samples, C = number of classes, n_k = number of positive
+    samples for class k. Classes with no positives fall back to n_k = 1 to
+    avoid division by zero.
+
+    labels: (N, C) binary array of multi-label targets.
+    Returns: (C,) float array of pos_weight values.
+    """
+    labels = np.asarray(labels)
+    if labels.ndim == 1:
+        labels = labels.reshape(-1, num_classes)
+    N = labels.shape[0]
+    n_k = labels.sum(axis=0).astype(np.float64)         # positives per class
+    n_k = np.clip(n_k, 1.0, None)
+    return np.sqrt(N / (num_classes * n_k))
+

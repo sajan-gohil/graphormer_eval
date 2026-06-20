@@ -13,6 +13,97 @@ from data import get_dataset_info
 # OGB peptides categorical feature dimensions.
 FULL_ATOM_FEATURE_DIMS = [119, 5, 12, 12, 10, 6, 6, 2, 2]
 
+# OGB bond (edge) categorical feature dimensions: bond type, bond stereo,
+# is-conjugated. Used by BondEncoder to embed edge_attr for molecular datasets.
+FULL_BOND_FEATURE_DIMS = [5, 6, 2]
+
+
+class BondEncoder(nn.Module):
+    """Categorical bond/edge-feature encoder (OGB-style).
+
+    Mirrors the atom encoder: sums per-feature embeddings of the integer
+    edge_attr columns into a single ``hidden_dim`` edge embedding. Robust to
+    edge_attr that has fewer/more columns than ``FULL_BOND_FEATURE_DIMS`` and
+    clamps out-of-range indices, so it degrades gracefully across datasets.
+    """
+
+    def __init__(self, hidden_dim: int):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.bond_feature_embeddings = nn.ModuleList([
+            nn.Embedding(num_embeddings=dim, embedding_dim=hidden_dim)
+            for dim in FULL_BOND_FEATURE_DIMS
+        ])
+        for emb in self.bond_feature_embeddings:
+            nn.init.normal_(emb.weight, std=0.01)
+
+    def forward(self, edge_attr: torch.Tensor) -> torch.Tensor:
+        # edge_attr: (E, n_bond_features) integer -> (E, hidden_dim).
+        n_cols = min(edge_attr.size(-1), len(self.bond_feature_embeddings))
+        h = 0
+        for i in range(n_cols):
+            emb = self.bond_feature_embeddings[i]
+            feat_i = edge_attr[:, i].long().clamp(min=0, max=emb.num_embeddings - 1)
+            h = h + emb(feat_i)
+        return h
+
+
+class LinearBondEncoder(nn.Module):
+    """Continuous edge-feature encoder: Linear projection of edge_attr.
+
+    Fallback for non-molecular datasets whose ``edge_attr`` is continuous (or
+    integer but not OGB-categorical). Pads/truncates to ``in_dim`` so a dataset
+    switch does not require re-instantiation.
+    """
+
+    def __init__(self, in_dim: int, hidden_dim: int):
+        super().__init__()
+        self.in_dim = in_dim
+        self.hidden_dim = hidden_dim
+        self.proj = nn.Linear(in_dim, hidden_dim)
+
+    def forward(self, edge_attr: torch.Tensor) -> torch.Tensor:
+        x = edge_attr.float()
+        if x.dim() == 1:
+            x = x.unsqueeze(-1)
+        if x.size(-1) < self.in_dim:
+            x = F.pad(x, (0, self.in_dim - x.size(-1)))
+        elif x.size(-1) > self.in_dim:
+            x = x[..., :self.in_dim]
+        return self.proj(x)
+
+
+def build_bond_encoder(hidden_dim, dataset_name="Peptides-func", edge_feat_dim=None):
+    """Factory: categorical BondEncoder for molecular (atom_categorical)
+    datasets, LinearBondEncoder otherwise."""
+    info = get_dataset_info(dataset_name)
+    if info["node_encoder"] == "atom_categorical":
+        return BondEncoder(hidden_dim)
+    in_dim = edge_feat_dim if edge_feat_dim not in (None, "auto") else hidden_dim
+    return LinearBondEncoder(in_dim=in_dim, hidden_dim=hidden_dim)
+
+
+def aggregate_edges_to_nodes(
+    node_h: torch.Tensor,
+    edge_index: torch.Tensor,
+    edge_emb: torch.Tensor,
+) -> torch.Tensor:
+    """Sum incident edge embeddings into their destination nodes, normalised
+    by node degree, and add to ``node_h``.
+
+    node_h:     (N, d) node features.
+    edge_index: (2, E) — edges aggregated onto ``edge_index[1]`` (destination).
+    edge_emb:   (E, d) per-edge embeddings.
+    """
+    N, d = node_h.shape
+    dst = edge_index[1]
+    agg = node_h.new_zeros(N, d)
+    agg.index_add_(0, dst, edge_emb)
+    deg = node_h.new_zeros(N)
+    deg.index_add_(0, dst, node_h.new_ones(dst.shape[0]))
+    agg = agg / deg.clamp(min=1.0).unsqueeze(-1)
+    return node_h + agg
+
 
 class NodeEncoder(nn.Module):
     """Peptides-style atom feature encoder with optional Laplacian PE.
@@ -26,7 +117,7 @@ class NodeEncoder(nn.Module):
     actual learnable input projection rather than this class's pad/truncate
     fallback.
     """
-    def __init__(self, hidden_dim=64, lap_pe_dim=0):
+    def __init__(self, hidden_dim=64, lap_pe_dim=0, use_edge_features=False):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_atom_features = len(FULL_ATOM_FEATURE_DIMS)
@@ -52,6 +143,12 @@ class NodeEncoder(nn.Module):
         if lap_pe_dim > 0:
             self.lap_pe_encoder = nn.Linear(lap_pe_dim, hidden_dim)
 
+        # Optional edge-feature incorporation: embed bonds and aggregate the
+        # incident bond embeddings into each node.
+        self.use_edge_features = use_edge_features
+        if use_edge_features:
+            self.bond_encoder = BondEncoder(hidden_dim)
+
     def _encode_categorical_atom_features(self, x):
         h = 0
         for i, emb in enumerate(self.atom_feature_embeddings):
@@ -60,8 +157,6 @@ class NodeEncoder(nn.Module):
         return self.atom_post(h)
 
     def forward(self, x, edge_index, edge_attr, lap_pe=None):
-        del edge_index, edge_attr  # Unused in the official peptides-style encoder.
-
         is_integral = x.dtype in (
             torch.int8, torch.int16, torch.int32, torch.int64,
             torch.uint8, torch.bool,
@@ -76,6 +171,11 @@ class NodeEncoder(nn.Module):
                 h = x_float[:, :self.hidden_dim]
             else:
                 h = F.pad(x_float, (0, self.hidden_dim - x_float.size(-1)))
+
+        # Incorporate edge features: embed bonds, aggregate onto nodes.
+        if self.use_edge_features and edge_attr is not None and edge_index is not None:
+            edge_emb = self.bond_encoder(edge_attr)
+            h = aggregate_edges_to_nodes(h, edge_index, edge_emb)
 
         # Add Laplacian positional encoding if available
         if self.lap_pe_dim > 0 and lap_pe is not None:
@@ -92,7 +192,8 @@ class LinearNodeEncoder(nn.Module):
     Mirrors the interface of ``NodeEncoder`` so it can be swapped in via
     :func:`build_node_encoder` without touching the downstream encoders.
     """
-    def __init__(self, in_dim, hidden_dim, lap_pe_dim=0):
+    def __init__(self, in_dim, hidden_dim, lap_pe_dim=0, use_edge_features=False,
+                 edge_feat_dim=None, dataset_name="PascalVOC-SP"):
         super().__init__()
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
@@ -104,8 +205,14 @@ class LinearNodeEncoder(nn.Module):
         if lap_pe_dim > 0:
             self.lap_pe_encoder = nn.Linear(lap_pe_dim, hidden_dim)
 
+        # Optional edge-feature incorporation (continuous-feature datasets).
+        self.use_edge_features = use_edge_features
+        if use_edge_features:
+            self.bond_encoder = build_bond_encoder(
+                hidden_dim, dataset_name=dataset_name, edge_feat_dim=edge_feat_dim,
+            )
+
     def forward(self, x, edge_index, edge_attr, lap_pe=None):
-        del edge_index, edge_attr
         x_float = x.float()
         # Robust to feature-dim mismatch: pad/truncate so the experiment script
         # can switch datasets without re-instantiating the model when in_dim
@@ -115,13 +222,19 @@ class LinearNodeEncoder(nn.Module):
         elif x_float.size(-1) > self.in_dim:
             x_float = x_float[..., :self.in_dim]
         h = self.proj(x_float)
+
+        if self.use_edge_features and edge_attr is not None and edge_index is not None:
+            edge_emb = self.bond_encoder(edge_attr)
+            h = aggregate_edges_to_nodes(h, edge_index, edge_emb)
+
         if self.lap_pe_dim > 0 and lap_pe is not None:
             h = h + self.lap_pe_encoder(lap_pe)
         return h
 
 
 def build_node_encoder(hidden_dim, lap_pe_dim=0, dataset_name="Peptides-func",
-                       node_feat_dim=None):
+                       node_feat_dim=None, use_edge_features=False,
+                       edge_feat_dim=None):
     """Factory: pick the right node encoder for a registered dataset.
 
     Reads ``data.GRAPH_DATASETS[dataset_name]`` to decide between the
@@ -133,7 +246,8 @@ def build_node_encoder(hidden_dim, lap_pe_dim=0, dataset_name="Peptides-func",
     info = get_dataset_info(dataset_name)
     kind = info["node_encoder"]
     if kind == "atom_categorical":
-        return NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim)
+        return NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim,
+                           use_edge_features=use_edge_features)
     if kind == "linear":
         # Precedence: explicit arg > registry info > hidden_dim fallback.
         if node_feat_dim not in (None, "auto"):
@@ -151,6 +265,9 @@ def build_node_encoder(hidden_dim, lap_pe_dim=0, dataset_name="Peptides-func",
             in_dim=in_dim,
             hidden_dim=hidden_dim,
             lap_pe_dim=lap_pe_dim,
+            use_edge_features=use_edge_features,
+            edge_feat_dim=edge_feat_dim,
+            dataset_name=info["name"],
         )
     raise ValueError(f"Unknown node_encoder kind: {kind}")
 
@@ -991,3 +1108,4 @@ class GREDHybridTransformer(nn.Module):
         if return_attention:
             return logits, node_emb, attentions
         return logits, node_emb
+

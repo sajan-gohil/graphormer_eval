@@ -167,3 +167,4 @@ def inter_proxy_cosine_stats(
     off_diag = ~torch.eye(M, dtype=torch.bool, device=proxies.device)
     off_diag_sim = sim[:, off_diag]                          # (B, M*(M-1))
     return off_diag_sim.mean().detach(), off_diag_sim.std().detach()
+

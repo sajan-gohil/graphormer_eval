@@ -44,7 +44,7 @@ import torch.nn.functional as F
 from torch_geometric.utils import to_dense_batch
 from torch_geometric.nn import global_add_pool, global_mean_pool, GATv2Conv
 
-from models import build_node_encoder
+from models import build_node_encoder, build_bond_encoder
 
 
 _NEG_INF = float("-inf")
@@ -337,9 +337,43 @@ class DynamicCrossHopMixer(nn.Module):
     different hop-mixing weights.
 
     Cost: O(B * N * H² * Dh) — negligible since H is small (e.g. 8).
+
+    Hop identity: by default the mixer is *permutation-invariant* over the H
+    slabs (shared q/k/v projections, no positional signal), so it cannot tell
+    which slab corresponds to which hop band. With ``use_hop_embedding=True`` a
+    learnable per-hop embedding table ``nn.Embedding(max_hops, Dh)`` tags each
+    slab before the q/k/v projections, restoring the per-hop identity the rest
+    of the model relies on.
+
+    Because a head may cover several hops, each head's tag is the **sum** of the
+    embeddings of the hops in its set, computed as ``membership @ E`` where
+    ``membership`` is a fixed (H, max_hops) {0,1} matrix (row h = the hop set of
+    head h) and ``E`` is the (max_hops, Dh) embedding table. A head covering
+    {0,5,6,7} therefore gets ``e0 + e5 + e6 + e7``. Global heads (hop set None)
+    have an all-zero membership row and receive no hop tag.
+
+    In the MoE-gating path (``moe_soft=True``) the head->hop mapping is the soft,
+    per-graph ``gate_weights`` (B, H, K) rather than a fixed set, so the per-head
+    tag is the *gate-weighted* sum of the per-hop embeddings
+    ``tag[b,h] = sum_k gate_weights[b,h,k] * E[k]`` (top-k is already applied
+    inside the gate when ``top_k>0``). This makes the tag dynamic/per-graph,
+    consistent with the rest of the MoE path, and mirrors the deterministic
+    {0,1}-membership sum.
+
+    Hop-tag mode is one of:
+        "none"        — no hop embedding (permutation-invariant, original).
+        "membership"  — fixed (H, max_hops) {0,1} sum (deterministic path).
+        "moe"         — gate-weighted (B, H, K) sum (MoE path).
+        "head"        — one embedding per head (no hop info available).
+
+    The tag is *added* to each slab (not concatenated), so the token dim stays
+    Dh and the q/k/v projections are unchanged.
     """
 
-    def __init__(self, num_heads: int, head_dim: int, dropout: float = 0.0):
+    def __init__(self, num_heads: int, head_dim: int, dropout: float = 0.0,
+                 use_hop_embedding: bool = False, max_hops: Optional[int] = None,
+                 hop_membership: Optional[torch.Tensor] = None,
+                 moe_soft: bool = False):
         super().__init__()
         self.H = num_heads
         self.Dh = head_dim
@@ -350,10 +384,41 @@ class DynamicCrossHopMixer(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.scale = head_dim ** -0.5
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, N, H*Dh) -> (B, N, H*Dh) with dynamic cross-hop mixing."""
+        if not use_hop_embedding:
+            self.hop_mode = "none"
+        elif moe_soft:
+            # Soft, gate-weighted per-hop embedding (resolved at forward time).
+            self.hop_mode = "moe"
+            self.hop_embedding = nn.Embedding(max_hops, head_dim)
+        elif hop_membership is not None:
+            # Fixed per-head sum over the head's hops.
+            self.hop_mode = "membership"
+            self.hop_embedding = nn.Embedding(max_hops, head_dim)
+            self.register_buffer("hop_membership", hop_membership.float())
+        else:
+            # No hop info available: one embedding per head.
+            self.hop_mode = "head"
+            self.hop_embedding = nn.Embedding(num_heads, head_dim)
+
+    def forward(self, x: torch.Tensor,
+                gate_weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """x: (B, N, H*Dh) -> (B, N, H*Dh) with dynamic cross-hop mixing.
+
+        gate_weights: (B, H, K) soft hop weights — required only in "moe" mode.
+        """
         B, N, d = x.shape
         x = x.view(B, N, self.H, self.Dh)          # (B, N, H, Dh)
+
+        if self.hop_mode == "membership":
+            # (H, max_hops) @ (max_hops, Dh) -> (H, Dh): summed hop tags.
+            tag = (self.hop_membership @ self.hop_embedding.weight)
+            x = x + tag.view(1, 1, self.H, self.Dh)
+        elif self.hop_mode == "moe":
+            # (B, H, K) @ (K, Dh) -> (B, H, Dh): gate-weighted hop tags.
+            tag = torch.einsum("bhk,kd->bhd", gate_weights, self.hop_embedding.weight)
+            x = x + tag.unsqueeze(1)               # broadcast over N
+        elif self.hop_mode == "head":
+            x = x + self.hop_embedding.weight.view(1, 1, self.H, self.Dh)
 
         q = self.q(x)  # (B, N, H, Dh)
         k = self.k(x)
@@ -671,6 +736,8 @@ class HopMaskedTransformerLayer(nn.Module):
         max_hops: int = 40,
         top_k: int = 0,
         gate_noise: float = 0.1,
+        cross_hop_hop_embedding: bool = False,
+        cross_hop_membership: Optional[torch.Tensor] = None,
     ):
         super().__init__()
         self.use_moe_gating = use_moe_gating
@@ -694,6 +761,10 @@ class HopMaskedTransformerLayer(nn.Module):
                 num_heads=num_heads,
                 head_dim=head_dim,
                 dropout=dropout,
+                use_hop_embedding=cross_hop_hop_embedding,
+                max_hops=max_hops,
+                hop_membership=cross_hop_membership,
+                moe_soft=use_moe_gating,
             )
             self.drop_ch = nn.Dropout(dropout)
 
@@ -726,7 +797,9 @@ class HopMaskedTransformerLayer(nn.Module):
             x = x + self.drop1(self.attn(normed, per_head_mask_or_dist_masks, node_mask))
             gate_weights = None
         if self.use_cross_hop:
-            x = x + self.drop_ch(self.cross_hop(self.norm_ch(x, node_mask)))
+            x = x + self.drop_ch(
+                self.cross_hop(self.norm_ch(x, node_mask), gate_weights=gate_weights)
+            )
         x = x + self.drop2(self.ffn(self.norm2(x, node_mask)))
         return (x, gate_weights) if self.use_moe_gating else x
 
@@ -750,13 +823,25 @@ class PostGATv2Block(nn.Module):
         num_gat_heads: int = 4,
         num_gat_layers: int = 1,
         dropout: float = 0.1,
-        edge_dim: Optional[int] = None,
+        use_edge_features: bool = False,
+        dataset_name: str = "Peptides-func",
+        edge_feat_dim: Optional[int] = None,
     ):
         super().__init__()
         assert hidden_dim % num_gat_heads == 0, (
             f"hidden_dim={hidden_dim} must be divisible by num_gat_heads={num_gat_heads}"
         )
         self.num_gat_layers = num_gat_layers
+        # When edge features are enabled, embed edge_attr to hidden_dim and tell
+        # GATv2Conv to consume edges of that width (edge_dim=hidden_dim).
+        self.use_edge_features = use_edge_features
+        if use_edge_features:
+            self.bond_encoder = build_bond_encoder(
+                hidden_dim, dataset_name=dataset_name, edge_feat_dim=edge_feat_dim,
+            )
+            edge_dim = hidden_dim
+        else:
+            edge_dim = None
         self.convs = nn.ModuleList()
         self.norms = nn.ModuleList()
         for _ in range(num_gat_layers):
@@ -779,8 +864,11 @@ class PostGATv2Block(nn.Module):
         edge_index: torch.Tensor,       # (2, E)
         edge_attr: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        edge_emb = None
+        if self.use_edge_features and edge_attr is not None:
+            edge_emb = self.bond_encoder(edge_attr)   # (E, hidden_dim)
         for conv, norm in zip(self.convs, self.norms):
-            out = conv(x, edge_index, edge_attr=edge_attr)
+            out = conv(x, edge_index, edge_attr=edge_emb)
             out = self.drop(F.elu(out))
             x = norm(x + out)           # residual + norm
         return x
@@ -842,6 +930,9 @@ class HopMaskedTransformerModel(nn.Module):
         use_virtual_node: bool = False,
         num_post_gat_layers: int = 0,
         num_gat_heads: int = 4,
+        cross_hop_hop_embedding: bool = False,
+        use_edge_features: bool = False,
+        edge_feat_dim: Optional[int] = None,
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -896,28 +987,47 @@ class HopMaskedTransformerModel(nn.Module):
         ]
         self._max_hop_index = max(used) if used else 0
 
+        self.use_edge_features = use_edge_features
         self.encoder = build_node_encoder(
             hidden_dim=hidden_dim,
             lap_pe_dim=lap_pe_dim,
             dataset_name=dataset_name,
             node_feat_dim=node_feat_dim,
+            use_edge_features=use_edge_features,
+            edge_feat_dim=edge_feat_dim,
+        )
+
+        # Per-hop-embedding membership for the cross-hop mixer is only defined
+        # for the deterministic (non-MoE) path, where each head has a fixed hop
+        # set. In alternating mode the sets differ per layer, so build one
+        # membership matrix per layer.
+        build_membership = (
+            dynamic_cross_hop and cross_hop_hop_embedding and not use_moe_gating
         )
 
         ffn_dim = hidden_dim * ffn_ratio
-        self.layers = nn.ModuleList([
-            HopMaskedTransformerLayer(
-                hidden_dim, num_heads, ffn_dim, dropout,
-                block_diag_out=block_diag_out,
-                dynamic_cross_hop=dynamic_cross_hop,
-                norm_type=norm_type,
-                v_head_dim=v_head_dim,
-                use_moe_gating=use_moe_gating,
-                max_hops=max_hops,
-                top_k=top_k,
-                gate_noise=gate_noise,
+        layers = []
+        for layer_idx in range(num_layers):
+            membership = (
+                self._build_hop_membership(self.per_layer_hop_sets[layer_idx], max_hops)
+                if build_membership else None
             )
-            for _ in range(num_layers)
-        ])
+            layers.append(
+                HopMaskedTransformerLayer(
+                    hidden_dim, num_heads, ffn_dim, dropout,
+                    block_diag_out=block_diag_out,
+                    dynamic_cross_hop=dynamic_cross_hop,
+                    norm_type=norm_type,
+                    v_head_dim=v_head_dim,
+                    use_moe_gating=use_moe_gating,
+                    max_hops=max_hops,
+                    top_k=top_k,
+                    gate_noise=gate_noise,
+                    cross_hop_hop_embedding=cross_hop_hop_embedding,
+                    cross_hop_membership=membership,
+                )
+            )
+        self.layers = nn.ModuleList(layers)
 
         self.readout = None
         if graph_pool == "attention":
@@ -944,6 +1054,9 @@ class HopMaskedTransformerModel(nn.Module):
                 num_gat_heads=num_gat_heads,
                 num_gat_layers=num_post_gat_layers,
                 dropout=dropout,
+                use_edge_features=use_edge_features,
+                dataset_name=dataset_name,
+                edge_feat_dim=edge_feat_dim,
             )
 
     # ----------------------------------------------------------------
@@ -996,6 +1109,26 @@ class HopMaskedTransformerModel(nn.Module):
             if k < k_max:
                 cur_f = torch.bmm(cur_f, base_f)          # base^(k+1), keep as float
         return out
+
+    def _build_hop_membership(
+        self,
+        hop_sets: List[Optional[List[int]]],
+        max_hops: int,
+    ) -> torch.Tensor:
+        """Return a (H, max_hops) {0,1} matrix: row h marks the hops in head h's
+        set, so ``membership @ E`` sums the per-hop embeddings for each head.
+
+        Global heads (hop set None) get an all-zero row (no hop tag).
+        """
+        H = self.num_heads
+        membership = torch.zeros(H, max_hops)
+        for h, hop_set in enumerate(hop_sets):
+            if hop_set is None:
+                continue
+            for k in hop_set:
+                if 0 <= k < max_hops:
+                    membership[h, k] = 1.0
+        return membership
 
     def _build_per_head_mask(
         self,
@@ -1109,7 +1242,8 @@ class HopMaskedTransformerModel(nn.Module):
 
         # ── Optional post-transformer GATv2 on the sparse graph ───────
         if self.post_gat is not None:
-            node_emb = self.post_gat(node_emb, batch.edge_index)
+            edge_attr = getattr(batch, "edge_attr", None) if self.use_edge_features else None
+            node_emb = self.post_gat(node_emb, batch.edge_index, edge_attr=edge_attr)
 
         if self.task_level == "node":
             return self.head(node_emb), node_emb, aux_loss
@@ -1131,4 +1265,5 @@ class HopMaskedTransformerModel(nn.Module):
             else:
                 pooled = global_add_pool(node_emb, batch_vec_dense)
         return self.head(pooled), node_emb, aux_loss
+
 
