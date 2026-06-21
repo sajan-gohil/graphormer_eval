@@ -42,6 +42,11 @@ from metrics import build_task, compute_pos_weight
 from model_hop_masked_transformer import HopMaskedTransformerModel
 from optim_utils import build_grouped_optimizer_and_scheduler
 
+os.environ["PYTHON_HASH_SEED"] = "42"
+torch.manual_seed(42)
+np.random.seed(42)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 def _gather_train_labels(loader, num_classes):
     """Collect the (N, C) multi-label target matrix from a training loader."""

@@ -390,10 +390,16 @@ class DynamicCrossHopMixer(nn.Module):
             # Soft, gate-weighted per-hop embedding (resolved at forward time).
             self.hop_mode = "moe"
             self.hop_embedding = nn.Embedding(max_hops, head_dim)
+            scaled_std = 0.02 * (head_dim ** -0.5) 
+            nn.init.normal_(self.hop_embedding.weight, mean=0.0, std=scaled_std)
+
         elif hop_membership is not None:
             # Fixed per-head sum over the head's hops.
             self.hop_mode = "membership"
             self.hop_embedding = nn.Embedding(max_hops, head_dim)
+            scaled_std = 0.02 * (head_dim ** -0.5) 
+            nn.init.normal_(self.hop_embedding.weight, mean=0.0, std=scaled_std)
+
             self.register_buffer("hop_membership", hop_membership.float())
         else:
             # No hop info available: one embedding per head.
