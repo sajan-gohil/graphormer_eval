@@ -35,7 +35,6 @@ import os
 import time
 import numpy as np
 import torch
-torch.set_float32_matmul_precision("high")
 
 from data import DATASET_CHOICES, get_loaders
 from metrics import build_task, compute_pos_weight

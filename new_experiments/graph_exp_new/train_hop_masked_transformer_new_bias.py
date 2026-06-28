@@ -39,9 +39,14 @@ import torch
 
 from data import DATASET_CHOICES, get_loaders
 from metrics import build_task, compute_pos_weight
-from model_hop_masked_transformer_sep_head import HopMaskedTransformerModel
+from model_hop_masked_transformer_new_bias import HopMaskedTransformerModel
 from optim_utils import build_grouped_optimizer_and_scheduler
 
+os.environ["PYTHON_HASH_SEED"] = "42"
+torch.manual_seed(42)
+np.random.seed(42)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 def _gather_train_labels(loader, num_classes):
     """Collect the (N, C) multi-label target matrix from a training loader."""
@@ -113,23 +118,6 @@ def build_parser():
                         "inside the DynamicCrossHopMixer so it is no longer "
                         "permutation-invariant over hop slabs. Only has an "
                         "effect when --dynamic_cross_hop is set.")
-    p.add_argument("--multihop_attn", action="store_true", default=False,
-                   help="Use multi-hop masked attention: every head is masked "
-                        "by every hop (H x num_hop views) plus an optional "
-                        "global view, sharing one q.k^T per head. The per-hop "
-                        "views are collapsed back to hidden_dim by a sum/mean "
-                        "readout (--multihop_readout). Decouples heads from a "
-                        "fixed hop set; mutually exclusive with --use_moe_gating "
-                        "and --hop_mode assignment.")
-    p.add_argument("--multihop_readout", type=str, default="sum",
-                   choices=["sum", "mean"],
-                   help="How to collapse the per-hop attention views back to "
-                        "hidden_dim in --multihop_attn. 'mean' divides per query "
-                        "node by the number of non-empty views.")
-    p.add_argument("--multihop_no_global", action="store_true", default=False,
-                   help="Drop the unmasked global view in --multihop_attn "
-                        "(by default each head also gets one global, no-hop-mask "
-                        "attention output).")
     p.add_argument("--use_edge_features", action="store_true", default=False,
                    help="Incorporate edge/bond features: a BondEncoder embeds "
                         "edge_attr, aggregated into node features in the node "
@@ -139,6 +127,13 @@ def build_parser():
                    help="Use per-class pos_weight = sqrt(N/(C*n_k)) in the BCE "
                         "loss for multi-label tasks (computed from the training "
                         "set). No effect on non-multi-label tasks.")
+    p.add_argument("--focal_gamma", type=float, default=0.0,
+                   help="Focal loss focusing parameter γ ≥ 0.  0 (default) = "
+                        "standard BCE / CE loss.  Positive values apply focal "
+                        "down-weighting (1-p_t)^γ to easy examples.  Typical: "
+                        "0.5, 1, 2.  Compatible with --use_pos_weight (the "
+                        "pos_weight acts as per-class alpha on top of focal "
+                        "weighting).  No effect on regression tasks.")
     p.add_argument("--use_virtual_node", action="store_true", default=False,
                    help="Prepend a learnable virtual-node embedding that "
                         "participates in every attention head.  For graph-"
@@ -151,6 +146,27 @@ def build_parser():
     p.add_argument("--num_gat_heads", type=int, default=4,
                    help="Number of attention heads in each post-transformer "
                         "GATv2 layer.  Must divide hidden_dim.")
+
+    # New attention bias features
+    p.add_argument("--cross_hop_no_ffn", action="store_true", default=False,
+                   help="When dynamic_cross_hop is enabled, skip the FFN after "
+                        "the cross-hop mixer (FFN becomes redundant).")
+    p.add_argument("--blend_adj_power", action="store_true", default=False,
+                   help="Enable learnable blending of adjacency-power walk-count "
+                        "scores as attention bias within each head's hop mask. "
+                        "Adds per-head learnable scalar (adj_blend_gamma).")
+    p.add_argument("--use_edge_bias", action="store_true", default=False,
+                   help="Enable edge feature attention bias for hop-1 heads. "
+                        "Uses BondEncoder to embed bond features, then projects "
+                        "to per-head scalar biases in attention scores.")
+    p.add_argument("--use_rrwp", action="store_true", default=False,
+                   help="Enable Relative Random Walk Probability (RRWP) as "
+                        "attention bias. Computed on-the-fly from adjacency "
+                        "matrix. Applied to all heads.")
+    p.add_argument("--rrwp_dim", type=int, default=8,
+                   help="Number of random-walk steps (powers of P = D^{-1}A) "
+                        "to compute for RRWP bias. Only used when --use_rrwp "
+                        "is set.")
 
     # Hop-to-head assignment
     p.add_argument("--hop_mode", type=str, default="contiguous",
@@ -206,6 +222,13 @@ def build_parser():
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--dist_mask_workers", type=int, default=8)
 
+    # Diagnostics
+    p.add_argument("--log_head_stats_interval", type=int, default=10,
+                   help="Print per-head diagnostic stats every N validation "
+                        "epochs (0 = disabled).  For MoE: logs gate-weight "
+                        "distribution (which hops each head specialises on). "
+                        "For blend_adj_power: logs adj_blend_gamma per head.")
+
     # Misc
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--save_dir", type=str, default="checkpoints_hop_masked")
@@ -230,9 +253,25 @@ def _move_batch_to_device(batch, device):
 
 
 def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
-              grad_clip=1.0):
+              grad_clip=1.0, collect_gate_weights=False):
+    """Run one epoch.
+
+    Returns:
+        (loss, metric, gate_weights_mean_or_None)
+
+    gate_weights_mean_or_None — non-None only when ``collect_gate_weights=True``
+        and the model uses MoE gating.  Shape: (H, K), CPU tensor, the per-head
+        gate-probability distribution averaged over all batches in this epoch
+        (and over layers).  Each row sums to ~1 (softmax).
+    """
     is_train = optimizer is not None
     model.train(is_train)
+
+    # Gate-weight accumulator: running sum of per-batch (H, K) means.
+    _gw_sum = None    # (H, K) CPU tensor
+    _gw_count = 0
+    # Only collect on eval passes to avoid any gradient/memory overhead on train.
+    _do_collect = collect_gate_weights and (not is_train)
 
     losses, preds_acc, labels_acc = [], [], []
     for batch in loader:
@@ -240,7 +279,10 @@ def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
         if is_train:
             optimizer.zero_grad()
         with torch.set_grad_enabled(is_train):
-            logits, _, aux_loss = model(pyg_batch, dist_masks, node_masks)
+            logits, _, aux_loss, gw = model(
+                pyg_batch, dist_masks, node_masks,
+                return_gate_weights=_do_collect,
+            )
             task_loss = task.loss(logits, pyg_batch.y)
             loss = task_loss + aux_loss
 
@@ -256,10 +298,86 @@ def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
         preds_acc.append(task.predict(logits))
         labels_acc.append(task.labels_to_numpy(pyg_batch.y))
 
+        # Accumulate gate weights (running mean — keeps only (H,K) in memory).
+        if _do_collect and gw is not None:
+            # gw: (H, K) CPU, already batch-averaged inside model.forward
+            _gw_sum  = gw if _gw_sum is None else _gw_sum + gw
+            _gw_count += 1
+
     y_pred = np.concatenate(preds_acc, axis=0)
     y_true = np.concatenate(labels_acc, axis=0)
     metric = task.compute_metric(y_pred, y_true)
-    return float(np.mean(losses)), float(metric)
+    gate_weights_mean = (_gw_sum / _gw_count) if _gw_count > 0 else None
+    return float(np.mean(losses)), float(metric), gate_weights_mean
+
+
+def _log_head_stats(epoch, model, gate_weights_mean, args):
+    """Print per-head diagnostic statistics.
+
+    Two sections (each only printed when the relevant feature is active):
+
+    MoE gate distribution
+        For each head: entropy + top-5 hops by probability, averaged over
+        the validation set and all layers.  Lets you see which heads
+        specialise on which hop bands and how diffuse they are.
+
+    Adj-blend gammas
+        For each head: the raw learnable gamma_h scalar.  Positive values
+        mean the model is boosting walk-count topology within the hop mask;
+        negative values suppress it.  Displayed alongside the hop assignment
+        so the chemical/structural interpretation is immediate.
+        With multiple layers each layer's gammas are shown separately.
+    """
+    prefix = f"[epoch {epoch:03d}]"
+
+    # ── MoE gate distribution ─────────────────────────────────────────────────
+    if args.use_moe_gating and gate_weights_mean is not None:
+        H, K = gate_weights_mean.shape
+        print(f"{prefix} MoE gate distributions (val mean, top-5 hops per head):",
+              flush=True)
+        for h in range(H):
+            probs = gate_weights_mean[h]                           # (K,)
+            top_n = min(5, K)
+            topk_vals, topk_idx = probs.topk(top_n)
+            hop_str = "  ".join(
+                f"k={int(topk_idx[i]):02d}({float(topk_vals[i]):.3f})"
+                for i in range(top_n)
+            )
+            ent = float(-(probs * (probs + 1e-9).log()).sum())
+            # Argmax hop
+            argmax_hop = int(probs.argmax())
+            print(f"  head {h:02d} | argmax k={argmax_hop:02d} | ent={ent:.3f} | {hop_str}",
+                  flush=True)
+
+    # ── Adj-blend gammas ──────────────────────────────────────────────────────
+    if args.blend_adj_power and not args.use_moe_gating:
+        hop_sets   = model.head_hop_sets
+        num_layers = len(model.layers)
+        print(f"{prefix} Adj-blend gammas (gamma>0 = walk-count boosts attn; "
+              f"gamma<0 = suppresses):", flush=True)
+
+        for layer_idx, layer in enumerate(model.layers):
+            if not hasattr(layer.attn, 'adj_blend_gamma'):
+                continue
+            gammas = layer.attn.adj_blend_gamma.detach().cpu()   # (H,)
+            layer_label = f"  [layer {layer_idx}]" if num_layers > 1 else " "
+
+            # Build compact per-head strings, printed 8 per line
+            parts = []
+            for h, hop_set in enumerate(hop_sets):
+                if hop_set is None:
+                    tag = "GLB"
+                else:
+                    non_self = [k for k in hop_set if k != 0]
+                    tag = f"k{non_self[0]:02d}" if non_self else "k00"
+                g = float(gammas[h])
+                parts.append(f"h{h:02d}[{tag}]:{g:+.3f}")
+
+            if layer_label.strip():
+                print(f"{layer_label}", flush=True)
+            # Print 8 entries per line for readability
+            for i in range(0, len(parts), 8):
+                print("    " + "  ".join(parts[i:i + 8]), flush=True)
 
 
 def main():
@@ -294,12 +412,21 @@ def main():
             pos_weight = torch.as_tensor(pw, dtype=torch.float32, device=args.device)
             print(f"pos_weight (sqrt(N/(C*n_k))): {np.round(pw, 3)}", flush=True)
 
-    task = build_task(dataset_name, dataset_info=dataset_info, pos_weight=pos_weight)
+    task = build_task(dataset_name, dataset_info=dataset_info, pos_weight=pos_weight,
+                      focal_gamma=args.focal_gamma)
     # Move the loss module (and its pos_weight buffer) onto the device.
     task.loss_fn = task.loss_fn.to(args.device)
 
+    _loss_name = (
+        f"FocalBCE(γ={args.focal_gamma})" if args.focal_gamma > 0 and task.task_type == "multi_label"
+        else f"FocalCE(γ={args.focal_gamma})" if args.focal_gamma > 0 and task.task_type == "multiclass"
+        else "BCE" if task.task_type == "multi_label"
+        else "CE" if task.task_type == "multiclass"
+        else "L1"
+    )
     print(f"[{dataset_name}] task={task.task_type} level={task.level} "
-          f"metric={task.metric_name} (higher_is_better={task.higher_is_better})",
+          f"metric={task.metric_name} (higher_is_better={task.higher_is_better}) "
+          f"loss={_loss_name}",
           flush=True)
 
     model = HopMaskedTransformerModel(
@@ -335,20 +462,17 @@ def main():
         cross_hop_hop_embedding=args.cross_hop_hop_embedding,
         use_edge_features=args.use_edge_features,
         edge_feat_dim=dataset_info.get("edge_feat_dim"),
-        multihop_attn=args.multihop_attn,
-        multihop_readout=args.multihop_readout,
-        multihop_include_global=not args.multihop_no_global,
+        cross_hop_no_ffn=args.cross_hop_no_ffn,
+        blend_adj_power=args.blend_adj_power,
+        use_edge_bias=args.use_edge_bias,
+        use_rrwp=args.use_rrwp,
+        rrwp_dim=args.rrwp_dim,
     ).to(args.device)
 
     # Print the head -> hop-set assignment so it's logged for reproducibility.
     if args.use_moe_gating:
         print(f"MoE gating config: top_k={args.top_k}, gate_noise={args.gate_noise}, "
               f"balance_coeff={args.balance_coeff}, entropy_coeff={args.entropy_coeff}",
-              flush=True)
-    elif args.multihop_attn:
-        print(f"Multi-hop attention: every head masked by every hop "
-              f"(H x num_hop views), readout={args.multihop_readout}, "
-              f"global_view={'OFF' if args.multihop_no_global else 'ON'}",
               flush=True)
     else:
         print("Head -> hop set assignment:", flush=True)
@@ -372,6 +496,17 @@ def main():
     if args.use_edge_features:
         print("Edge features: ENABLED (BondEncoder in node encoder"
               + (" + GATv2" if args.num_post_gat_layers > 0 else "") + ")", flush=True)
+
+    # New attention bias features logging
+    if args.cross_hop_no_ffn:
+        print("Cross-hop no-FFN mode: ENABLED (skip FFN after cross-hop mixer)",
+              flush=True)
+    if args.blend_adj_power:
+        print("Adj-power blend: ENABLED (learnable per-head gamma)", flush=True)
+    if args.use_edge_bias:
+        print("Edge feature attention bias: ENABLED (hop-1 heads)", flush=True)
+    if args.use_rrwp:
+        print(f"RRWP bias: ENABLED (dim={args.rrwp_dim})", flush=True)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"trainable params: {n_params/1e6:.3f}M", flush=True)
@@ -452,15 +587,27 @@ def main():
         print(f"  Resuming from epoch {start_epoch} "
               f"(best_val={best_val:.4f} at epoch {best_epoch})", flush=True)
 
+    # Pre-compute whether head stats should be logged this epoch.
+    _log_interval = args.log_head_stats_interval
+    _want_head_stats = (
+        _log_interval > 0
+        and (args.use_moe_gating or args.blend_adj_power)
+    )
+
     for epoch in range(start_epoch, args.max_epochs):
         t0 = time.time()
-        tr_loss, tr_metric = run_epoch(
+        tr_loss, tr_metric, _ = run_epoch(
             model, train_loader, task, args.device,
             optimizer=optimizer, scheduler=scheduler, grad_clip=args.grad_clip,
         )
-        va_loss, va_metric = run_epoch(model, val_loader, task, args.device)
+        # Collect gate weights on val pass when it's a logging epoch.
+        _collect_gw = _want_head_stats and (epoch % _log_interval == 0)
+        va_loss, va_metric, _gw_mean = run_epoch(
+            model, val_loader, task, args.device,
+            collect_gate_weights=_collect_gw,
+        )
         plateau_scheduler.step(va_metric)
-        te_loss, te_metric = run_epoch(model, test_loader, task, args.device)
+        te_loss, te_metric, _ = run_epoch(model, test_loader, task, args.device)
         dt = time.time() - t0
 
         improved = (
@@ -502,6 +649,10 @@ def main():
             flush=True,
         )
 
+        # ── Per-head diagnostic logging ───────────────────────────────
+        if _collect_gw:
+            _log_head_stats(epoch, model, _gw_mean, args)
+
         if epochs_since_improve >= args.patience:
             print(f"early stopping at epoch {epoch} "
                   f"(no val improvement in {args.patience} epochs)", flush=True)
@@ -513,3 +664,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
