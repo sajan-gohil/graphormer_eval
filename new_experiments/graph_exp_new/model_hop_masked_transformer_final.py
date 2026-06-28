@@ -377,9 +377,6 @@ class DynamicCrossHopMixer(nn.Module):
         super().__init__()
         self.H = num_heads
         self.Dh = head_dim
-        self.q = nn.Linear(head_dim*2, head_dim)
-        self.k = nn.Linear(head_dim*2, head_dim)
-        self.v = nn.Linear(head_dim*2, head_dim)
         self.out = nn.Linear(head_dim, head_dim)
         self.drop = nn.Dropout(dropout)
         self.scale = head_dim ** -0.5
@@ -405,6 +402,13 @@ class DynamicCrossHopMixer(nn.Module):
             # No hop info available: one embedding per head.
             self.hop_mode = "head"
             self.hop_embedding = nn.Embedding(num_heads, head_dim)
+        multiplier = 2
+        if self.hop_mode == "none":
+            multiplier = 1
+        self.q = nn.Linear(head_dim*multiplier, head_dim)
+        self.k = nn.Linear(head_dim*multiplier, head_dim)
+        self.v = nn.Linear(head_dim*multiplier, head_dim)
+ 
 
     def forward(self, x: torch.Tensor,
                 gate_weights: Optional[torch.Tensor] = None,
