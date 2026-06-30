@@ -10,6 +10,9 @@
 # This script runs a systematic sweep of individual components and modes to
 # identify which give a lift in AP.  Each experiment logs to its own file.
 #
+# Runs 6 experiments in parallel: 3 on cuda:1 + 3 on cuda:2.
+# A new batch of 6 starts once the previous batch finishes.
+#
 # Usage:
 #   chmod +x run_ablation_experiments.sh
 #   bash run_ablation_experiments.sh
@@ -17,14 +20,16 @@
 # To resume after a crash, grep for "DONE" in the log dir and skip completed.
 # =============================================================================
 
-set -e  # exit on error (remove if you want all experiments to try running)
-
 # ─── Paths & common settings ─────────────────────────────────────────────────
 SCRIPT="train_hop_masked_transformer_final.py"
 DATASET="Peptides-func"
 LOG_DIR="ablation_logs"
 CKPT_DIR="ablation_checkpoints"
 mkdir -p "${LOG_DIR}" "${CKPT_DIR}"
+
+# GPUs to use (3 jobs per GPU, 6 total in parallel)
+GPUS=("cuda:1" "cuda:2")
+JOBS_PER_GPU=3
 
 # Best-known base config
 BASE_MAX_HOPS=30
@@ -44,6 +49,11 @@ BASE_GRAD_CLIP=1.0
 BASE_SEED=0
 
 # Shared flags that stay constant across experiments
+# NOTE: --num_workers 0 to avoid deadlocks (fork + numpy/scipy BLAS locks +
+# CUDA context inheritance causes workers to hang at 0% CPU while holding GPU
+# memory). The collate_fn does heavy numpy ops (B,K,N,N) tensors and
+# torch_geometric's Batch.from_data_list can also trigger threading issues
+# under forked workers. Setting to 0 is the safe default.
 COMMON="--dataset ${DATASET} \
   --max_hops ${BASE_MAX_HOPS} \
   --num_layers ${BASE_NUM_LAYERS} \
@@ -54,30 +64,105 @@ COMMON="--dataset ${DATASET} \
   --max_epochs ${BASE_MAX_EPOCHS} \
   --patience ${BASE_PATIENCE} \
   --grad_clip ${BASE_GRAD_CLIP} \
-  --seed ${BASE_SEED}"
+  --seed ${BASE_SEED} \
+  --num_workers 0"
 
-# Helper: run an experiment
-# Args: $1 = experiment name, $2 = extra flags (space-separated)
-run_exp() {
+# ─── Parallel execution machinery ────────────────────────────────────────────
+# We collect experiments into a queue, then dispatch them in batches of 6
+# (3 per GPU). Each batch runs fully in parallel; the next batch starts only
+# after all jobs in the current batch finish.
+
+# Queue: each entry is "name|extra_flags"
+QUEUE=()
+
+enqueue() {
+    # Args: $1 = experiment name, rest = extra flags
     local name="$1"
     shift
-    local extra="$@"
-    local logfile="${LOG_DIR}/${name}.log"
+    QUEUE+=("${name}|$*")
+}
 
-    echo "============================================================"
-    echo "  EXPERIMENT: ${name}"
-    echo "  LOG: ${logfile}"
-    echo "  FLAGS: ${extra}"
-    echo "============================================================"
+flush_queue() {
+    # Dispatch everything in QUEUE in batches of JOBS_PER_GPU * len(GPUS).
+    local batch_size=$(( JOBS_PER_GPU * ${#GPUS[@]} ))
+    local total=${#QUEUE[@]}
+    local batch_num=0
 
-    python3 ${SCRIPT} ${COMMON} \
-        --save_dir "${CKPT_DIR}/${name}" \
-        ${extra} \
-        > "${logfile}" 2>&1
+    for (( start=0; start<total; start+=batch_size )); do
+        batch_num=$((batch_num + 1))
+        local end=$(( start + batch_size ))
+        if (( end > total )); then end=$total; fi
+        local count=$(( end - start ))
 
-    # Print the BEST line for quick comparison
-    echo "  >> $(grep '^BEST:' ${logfile} || echo 'NO BEST LINE FOUND')"
-    echo ""
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════════╗"
+        echo "║  BATCH ${batch_num}: launching ${count} experiments in parallel"
+        echo "║  (experiments $((start+1))–${end} of ${total})"
+        echo "╚══════════════════════════════════════════════════════════════╝"
+        echo ""
+
+        local pids=()
+        local names=()
+        local gpu_idx=0
+        local gpu_slot=0
+
+        for (( i=start; i<end; i++ )); do
+            local entry="${QUEUE[$i]}"
+            local name="${entry%%|*}"
+            local extra="${entry#*|}"
+            local device="${GPUS[$gpu_idx]}"
+            local logfile="${LOG_DIR}/${name}.log"
+
+            # Skip if already completed
+            if [ -f "${logfile}" ] && grep -q '^BEST:' "${logfile}" 2>/dev/null; then
+                echo "  SKIP (already done): ${name}"
+                continue
+            fi
+
+            echo "  START: ${name}  [${device}]  -> ${logfile}"
+
+            mkdir -p "${CKPT_DIR}/${name}"
+            python3 ${SCRIPT} ${COMMON} \
+                --device "${device}" \
+                --save_dir "${CKPT_DIR}/${name}" \
+                ${extra} \
+                >> "${logfile}" 2>&1 &
+
+            pids+=($!)
+            names+=("${name}")
+
+            # Round-robin GPU assignment: 3 jobs per GPU
+            gpu_slot=$((gpu_slot + 1))
+            if (( gpu_slot >= JOBS_PER_GPU )); then
+                gpu_slot=0
+                gpu_idx=$(( (gpu_idx + 1) % ${#GPUS[@]} ))
+            fi
+        done
+
+        # Wait for all jobs in this batch
+        if [ ${#pids[@]} -gt 0 ]; then
+            echo ""
+            echo "  Waiting for ${#pids[@]} jobs..."
+            local failed=0
+            for idx in "${!pids[@]}"; do
+                wait "${pids[$idx]}"
+                local rc=$?
+                local n="${names[$idx]}"
+                local lf="${LOG_DIR}/${n}.log"
+                if [ $rc -ne 0 ]; then
+                    echo "  ✗ FAILED (rc=${rc}): ${n}"
+                    failed=$((failed + 1))
+                else
+                    local best=$(grep '^BEST:' "${lf}" 2>/dev/null || echo "NO BEST LINE")
+                    echo "  ✓ DONE: ${n}  >>  ${best}"
+                fi
+            done
+            echo "  Batch ${batch_num} complete (${#pids[@]} ran, ${failed} failed)."
+        fi
+    done
+
+    # Clear the queue
+    QUEUE=()
 }
 
 # =============================================================================
@@ -85,7 +170,7 @@ run_exp() {
 # =============================================================================
 echo "===== GROUP 0: BASELINE ====="
 
-run_exp "G0_baseline_best" \
+enqueue "G0_baseline_best" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -99,7 +184,7 @@ run_exp "G0_baseline_best" \
 echo "===== GROUP 1: HOP MODE ABLATION ====="
 
 # 1a. Contiguous (partition [1..K-1] into chunks per head)
-run_exp "G1a_hop_mode_contiguous" \
+enqueue "G1a_hop_mode_contiguous" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -107,7 +192,7 @@ run_exp "G1a_hop_mode_contiguous" \
     --hop_window ${BASE_HOP_WINDOW}
 
 # 1b. Window with half-width=1 (each head sees ~3 adjacent hops)
-run_exp "G1b_hop_mode_window_w1" \
+enqueue "G1b_hop_mode_window_w1" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -115,7 +200,7 @@ run_exp "G1b_hop_mode_window_w1" \
     --hop_window 1
 
 # 1c. Window with half-width=2 (each head sees ~5 adjacent hops)
-run_exp "G1c_hop_mode_window_w2" \
+enqueue "G1c_hop_mode_window_w2" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -123,7 +208,7 @@ run_exp "G1c_hop_mode_window_w2" \
     --hop_window 2
 
 # 1d. Interleaved
-run_exp "G1d_hop_mode_interleaved" \
+enqueue "G1d_hop_mode_interleaved" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -131,7 +216,7 @@ run_exp "G1d_hop_mode_interleaved" \
     --hop_window 1
 
 # 1e. Alternating (even layers get even hops, odd layers get odd hops)
-run_exp "G1e_hop_mode_alternating" \
+enqueue "G1e_hop_mode_alternating" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -144,33 +229,36 @@ run_exp "G1e_hop_mode_alternating" \
 # =============================================================================
 echo "===== GROUP 2: GLOBAL HEADS ABLATION ====="
 
-run_exp "G2a_global_heads_0" \
+enqueue "G2a_global_heads_0" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads 0 \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW}
 
-run_exp "G2b_global_heads_2" \
+enqueue "G2b_global_heads_2" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads 2 \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW}
 
-run_exp "G2c_global_heads_3" \
+enqueue "G2c_global_heads_3" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads 3 \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW}
 
-run_exp "G2d_global_heads_5" \
+enqueue "G2d_global_heads_5" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads 5 \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW}
+
+# Flush baseline + hop modes + global heads (12 experiments = 2 batches of 6)
+flush_queue
 
 # =============================================================================
 # GROUP 3: MoE GATING (learned hop assignment)
@@ -179,7 +267,7 @@ run_exp "G2d_global_heads_5" \
 echo "===== GROUP 3: MoE GATING ====="
 
 # 3a. MoE dense (full softmax over all K hops)
-run_exp "G3a_moe_dense" \
+enqueue "G3a_moe_dense" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -189,7 +277,7 @@ run_exp "G3a_moe_dense" \
     --top_k 0
 
 # 3b. MoE sparse top-1
-run_exp "G3b_moe_top1" \
+enqueue "G3b_moe_top1" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -199,7 +287,7 @@ run_exp "G3b_moe_top1" \
     --top_k 1
 
 # 3c. MoE sparse top-3
-run_exp "G3c_moe_top3" \
+enqueue "G3c_moe_top3" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -209,7 +297,7 @@ run_exp "G3c_moe_top3" \
     --top_k 3
 
 # 3d. MoE sparse top-5
-run_exp "G3d_moe_top5" \
+enqueue "G3d_moe_top5" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -225,7 +313,7 @@ run_exp "G3d_moe_top5" \
 echo "===== GROUP 4: MULTIHOP ATTENTION ====="
 
 # 4a. Multihop sum readout + global view
-run_exp "G4a_multihop_sum" \
+enqueue "G4a_multihop_sum" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -235,7 +323,7 @@ run_exp "G4a_multihop_sum" \
     --multihop_readout sum
 
 # 4b. Multihop mean readout + global view
-run_exp "G4b_multihop_mean" \
+enqueue "G4b_multihop_mean" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -244,8 +332,11 @@ run_exp "G4b_multihop_mean" \
     --multihop_attn \
     --multihop_readout mean
 
+# Flush MoE + first 2 multihop (6 experiments)
+flush_queue
+
 # 4c. Multihop sum readout, NO global view
-run_exp "G4c_multihop_sum_no_global" \
+enqueue "G4c_multihop_sum_no_global" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -256,7 +347,7 @@ run_exp "G4c_multihop_sum_no_global" \
     --multihop_no_global
 
 # 4d. Multihop mean readout, NO global view
-run_exp "G4d_multihop_mean_no_global" \
+enqueue "G4d_multihop_mean_no_global" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -273,7 +364,7 @@ run_exp "G4d_multihop_mean_no_global" \
 echo "===== GROUP 5: DYNAMIC CROSS-HOP MIXER ====="
 
 # 5a. Cross-hop mixer (with FFN)
-run_exp "G5a_cross_hop" \
+enqueue "G5a_cross_hop" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -282,7 +373,7 @@ run_exp "G5a_cross_hop" \
     --dynamic_cross_hop
 
 # 5b. Cross-hop mixer + block_diag_out (recommended pairing)
-run_exp "G5b_cross_hop_block_diag" \
+enqueue "G5b_cross_hop_block_diag" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -292,7 +383,7 @@ run_exp "G5b_cross_hop_block_diag" \
     --block_diag_out
 
 # 5c. Cross-hop mixer + hop embedding
-run_exp "G5c_cross_hop_embed" \
+enqueue "G5c_cross_hop_embed" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -302,7 +393,7 @@ run_exp "G5c_cross_hop_embed" \
     --cross_hop_hop_embedding
 
 # 5d. Cross-hop mixer + no-FFN mode
-run_exp "G5d_cross_hop_no_ffn" \
+enqueue "G5d_cross_hop_no_ffn" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -311,8 +402,11 @@ run_exp "G5d_cross_hop_no_ffn" \
     --dynamic_cross_hop \
     --cross_hop_no_ffn
 
+# Flush multihop remainder + cross-hop (6 experiments)
+flush_queue
+
 # 5e. Cross-hop + block_diag + hop_embed + no_ffn (all cross-hop features)
-run_exp "G5e_cross_hop_full" \
+enqueue "G5e_cross_hop_full" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -329,7 +423,7 @@ run_exp "G5e_cross_hop_full" \
 echo "===== GROUP 6: ATTENTION BIASES ====="
 
 # 6a. Adj-power blend (learnable per-head gamma)
-run_exp "G6a_blend_adj_power" \
+enqueue "G6a_blend_adj_power" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -338,7 +432,7 @@ run_exp "G6a_blend_adj_power" \
     --blend_adj_power
 
 # 6b. Edge feature attention bias (hop-1 heads)
-run_exp "G6b_edge_bias" \
+enqueue "G6b_edge_bias" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -347,7 +441,7 @@ run_exp "G6b_edge_bias" \
     --use_edge_bias
 
 # 6c. RRWP bias (dim=8)
-run_exp "G6c_rrwp_d8" \
+enqueue "G6c_rrwp_d8" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -357,7 +451,7 @@ run_exp "G6c_rrwp_d8" \
     --rrwp_dim 8
 
 # 6d. RRWP bias (dim=16)
-run_exp "G6d_rrwp_d16" \
+enqueue "G6d_rrwp_d16" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -367,7 +461,7 @@ run_exp "G6d_rrwp_d16" \
     --rrwp_dim 16
 
 # 6e. Adj-power blend + edge bias
-run_exp "G6e_blend_adj_edge_bias" \
+enqueue "G6e_blend_adj_edge_bias" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -376,8 +470,11 @@ run_exp "G6e_blend_adj_edge_bias" \
     --blend_adj_power \
     --use_edge_bias
 
+# Flush cross-hop-full + attention biases (6 experiments)
+flush_queue
+
 # 6f. Adj-power blend + RRWP
-run_exp "G6f_blend_adj_rrwp" \
+enqueue "G6f_blend_adj_rrwp" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -388,7 +485,7 @@ run_exp "G6f_blend_adj_rrwp" \
     --rrwp_dim 8
 
 # 6g. All attention biases combined
-run_exp "G6g_all_attn_biases" \
+enqueue "G6g_all_attn_biases" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -405,7 +502,7 @@ run_exp "G6g_all_attn_biases" \
 echo "===== GROUP 7: MASK TYPE ABLATION ====="
 
 # 7a. adj_power (A^k)
-run_exp "G7a_mask_adj_power" \
+enqueue "G7a_mask_adj_power" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -414,7 +511,7 @@ run_exp "G7a_mask_adj_power" \
     --mask_type adj_power
 
 # 7b. adj_power with self loops  (A+I)^k
-run_exp "G7b_mask_adj_power_self_loops" \
+enqueue "G7b_mask_adj_power_self_loops" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -429,7 +526,7 @@ run_exp "G7b_mask_adj_power_self_loops" \
 echo "===== GROUP 8: EDGE & STRUCTURAL FEATURES ====="
 
 # 8a. Edge features (BondEncoder in node encoder)
-run_exp "G8a_edge_features" \
+enqueue "G8a_edge_features" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -438,7 +535,7 @@ run_exp "G8a_edge_features" \
     --use_edge_features
 
 # 8b. Laplacian PE
-run_exp "G8b_lap_pe" \
+enqueue "G8b_lap_pe" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -447,8 +544,11 @@ run_exp "G8b_lap_pe" \
     --use_lap_pe \
     --lap_pe_dim 8
 
+# Flush biases remainder + mask types + edge/struct (6 experiments)
+flush_queue
+
 # 8c. Edge features + Lap PE
-run_exp "G8c_edge_lap" \
+enqueue "G8c_edge_lap" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -459,7 +559,7 @@ run_exp "G8c_edge_lap" \
     --lap_pe_dim 8
 
 # 8d. Virtual node
-run_exp "G8d_virtual_node" \
+enqueue "G8d_virtual_node" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -473,7 +573,7 @@ run_exp "G8d_virtual_node" \
 echo "===== GROUP 9: POST-TRANSFORMER GATv2 ====="
 
 # 9a. 1 GATv2 layer (4 heads)
-run_exp "G9a_gat_1layer" \
+enqueue "G9a_gat_1layer" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -483,7 +583,7 @@ run_exp "G9a_gat_1layer" \
     --num_gat_heads 4
 
 # 9b. 2 GATv2 layers (4 heads)
-run_exp "G9b_gat_2layer" \
+enqueue "G9b_gat_2layer" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -493,7 +593,7 @@ run_exp "G9b_gat_2layer" \
     --num_gat_heads 4
 
 # 9c. 1 GATv2 layer + edge features
-run_exp "G9c_gat_1layer_edge" \
+enqueue "G9c_gat_1layer_edge" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -503,13 +603,26 @@ run_exp "G9c_gat_1layer_edge" \
     --num_gat_heads 4 \
     --use_edge_features
 
+# 9d (bonus). 1 GATv2 layer (8 heads)
+enqueue "G9d_gat_1layer_8h" \
+    --hidden_dim ${BASE_HIDDEN_DIM} \
+    --num_heads ${BASE_NUM_HEADS} \
+    --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
+    --hop_mode ${BASE_HOP_MODE} \
+    --hop_window ${BASE_HOP_WINDOW} \
+    --num_post_gat_layers 1 \
+    --num_gat_heads 8
+
+# Flush edge/struct remainder + GAT (6 experiments)
+flush_queue
+
 # =============================================================================
 # GROUP 10: NORMALIZATION TYPE
 # =============================================================================
 echo "===== GROUP 10: NORM TYPE ====="
 
 # 10a. RMSNorm
-run_exp "G10a_norm_rms" \
+enqueue "G10a_norm_rms" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -518,7 +631,7 @@ run_exp "G10a_norm_rms" \
     --norm_type rms
 
 # 10b. GraphNorm
-run_exp "G10b_norm_graph" \
+enqueue "G10b_norm_graph" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -532,7 +645,7 @@ run_exp "G10b_norm_graph" \
 echo "===== GROUP 11: GRAPH POOLING ====="
 
 # 11a. Mean pooling
-run_exp "G11a_pool_mean" \
+enqueue "G11a_pool_mean" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -541,7 +654,7 @@ run_exp "G11a_pool_mean" \
     --graph_pool mean
 
 # 11b. Attention pooling (Set-Transformer PMA)
-run_exp "G11b_pool_attention" \
+enqueue "G11b_pool_attention" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -555,7 +668,7 @@ run_exp "G11b_pool_attention" \
 echo "===== GROUP 12: OUTPUT PROJECTION ====="
 
 # 12a. Block-diagonal out_proj (no cross-head mixing inside attention)
-run_exp "G12a_block_diag_out" \
+enqueue "G12a_block_diag_out" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -570,7 +683,7 @@ echo "===== GROUP 13: VALUE HEAD DIM ====="
 
 # Base QK head dim = 240/30 = 8.  Try larger V heads.
 # 13a. V head dim = 16
-run_exp "G13a_v_head_dim_16" \
+enqueue "G13a_v_head_dim_16" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -578,8 +691,11 @@ run_exp "G13a_v_head_dim_16" \
     --hop_window ${BASE_HOP_WINDOW} \
     --v_head_dim 16
 
+# Flush norm + pool + block_diag + v_head (6 experiments)
+flush_queue
+
 # 13b. V head dim = 32
-run_exp "G13b_v_head_dim_32" \
+enqueue "G13b_v_head_dim_32" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -593,7 +709,7 @@ run_exp "G13b_v_head_dim_32" \
 echo "===== GROUP 14: LOSS FUNCTION ====="
 
 # 14a. Pos weight (per-class rebalancing)
-run_exp "G14a_pos_weight" \
+enqueue "G14a_pos_weight" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -602,7 +718,7 @@ run_exp "G14a_pos_weight" \
     --use_pos_weight
 
 # 14b. Focal loss (gamma=1)
-run_exp "G14b_focal_g1" \
+enqueue "G14b_focal_g1" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -611,7 +727,7 @@ run_exp "G14b_focal_g1" \
     --focal_gamma 1.0
 
 # 14c. Focal loss (gamma=2)
-run_exp "G14c_focal_g2" \
+enqueue "G14c_focal_g2" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -620,7 +736,7 @@ run_exp "G14c_focal_g2" \
     --focal_gamma 2.0
 
 # 14d. Label smoothing (eps=0.05)
-run_exp "G14d_label_smooth_005" \
+enqueue "G14d_label_smooth_005" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -629,7 +745,7 @@ run_exp "G14d_label_smooth_005" \
     --label_smoothing 0.05
 
 # 14e. Label smoothing (eps=0.1)
-run_exp "G14e_label_smooth_01" \
+enqueue "G14e_label_smooth_01" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -637,8 +753,11 @@ run_exp "G14e_label_smooth_01" \
     --hop_window ${BASE_HOP_WINDOW} \
     --label_smoothing 0.1
 
+# Flush v_head_32 + loss variants (6 experiments)
+flush_queue
+
 # 14f. Pos weight + focal (gamma=1)
-run_exp "G14f_pos_weight_focal" \
+enqueue "G14f_pos_weight_focal" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -653,7 +772,7 @@ run_exp "G14f_pos_weight_focal" \
 echo "===== GROUP 15: DEPTH ====="
 
 # 15a. 2 layers
-run_exp "G15a_layers_2" \
+enqueue "G15a_layers_2" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -662,7 +781,7 @@ run_exp "G15a_layers_2" \
     --num_layers 2
 
 # 15b. 6 layers
-run_exp "G15b_layers_6" \
+enqueue "G15b_layers_6" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -671,7 +790,7 @@ run_exp "G15b_layers_6" \
     --num_layers 6
 
 # 15c. 8 layers
-run_exp "G15c_layers_8" \
+enqueue "G15c_layers_8" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -686,7 +805,7 @@ run_exp "G15c_layers_8" \
 echo "===== GROUP 16: WIDTH ====="
 
 # 16a. 16 heads × 8 = hidden_dim 128
-run_exp "G16a_h16_d128" \
+enqueue "G16a_h16_d128" \
     --hidden_dim 128 \
     --num_heads 16 \
     --num_global_heads 1 \
@@ -694,15 +813,18 @@ run_exp "G16a_h16_d128" \
     --hop_window ${BASE_HOP_WINDOW}
 
 # 16b. 20 heads × 8 = hidden_dim 160
-run_exp "G16b_h20_d160" \
+enqueue "G16b_h20_d160" \
     --hidden_dim 160 \
     --num_heads 20 \
     --num_global_heads 1 \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW}
 
+# Flush loss remainder + depth + width (6 experiments)
+flush_queue
+
 # 16c. 30 heads × 12 = hidden_dim 360 (bigger per-head dim)
-run_exp "G16c_h30_d360" \
+enqueue "G16c_h30_d360" \
     --hidden_dim 360 \
     --num_heads 30 \
     --num_global_heads 1 \
@@ -710,7 +832,7 @@ run_exp "G16c_h30_d360" \
     --hop_window ${BASE_HOP_WINDOW}
 
 # 16d. 30 heads × 16 = hidden_dim 480 (even bigger)
-run_exp "G16d_h30_d480" \
+enqueue "G16d_h30_d480" \
     --hidden_dim 480 \
     --num_heads 30 \
     --num_global_heads 1 \
@@ -722,7 +844,7 @@ run_exp "G16d_h30_d480" \
 # =============================================================================
 echo "===== GROUP 17: DROPOUT ====="
 
-run_exp "G17a_dropout_01" \
+enqueue "G17a_dropout_01" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -730,7 +852,7 @@ run_exp "G17a_dropout_01" \
     --hop_window ${BASE_HOP_WINDOW} \
     --dropout 0.1
 
-run_exp "G17b_dropout_03" \
+enqueue "G17b_dropout_03" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -746,7 +868,7 @@ run_exp "G17b_dropout_03" \
 echo "===== GROUP 18: COMBO CANDIDATES ====="
 
 # 18a. Edge features + edge bias + RRWP
-run_exp "G18a_edge_edge_bias_rrwp" \
+enqueue "G18a_edge_edge_bias_rrwp" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -758,7 +880,7 @@ run_exp "G18a_edge_edge_bias_rrwp" \
     --rrwp_dim 8
 
 # 18b. Edge features + virtual node + lap PE
-run_exp "G18b_edge_vnode_lap" \
+enqueue "G18b_edge_vnode_lap" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -769,8 +891,11 @@ run_exp "G18b_edge_vnode_lap" \
     --use_lap_pe \
     --lap_pe_dim 8
 
+# Flush width remainder + dropout + combo (6 experiments)
+flush_queue
+
 # 18c. Cross-hop + blend adj + edge features
-run_exp "G18c_cross_hop_blend_edge" \
+enqueue "G18c_cross_hop_blend_edge" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -781,7 +906,7 @@ run_exp "G18c_cross_hop_blend_edge" \
     --use_edge_features
 
 # 18d. GATv2 + edge features + label smoothing
-run_exp "G18d_gat_edge_ls" \
+enqueue "G18d_gat_edge_ls" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -793,7 +918,7 @@ run_exp "G18d_gat_edge_ls" \
     --label_smoothing 0.05
 
 # 18e. Kitchen sink: edge + lap PE + RRWP + blend adj + virtual node
-run_exp "G18e_kitchen_sink" \
+enqueue "G18e_kitchen_sink" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
     --num_heads ${BASE_NUM_HEADS} \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
@@ -805,13 +930,16 @@ run_exp "G18e_kitchen_sink" \
     --blend_adj_power \
     --use_virtual_node
 
+# Final flush (3 remaining experiments)
+flush_queue
+
 # =============================================================================
 # SUMMARY EXTRACTION
 # =============================================================================
 echo ""
-echo "============================================================"
-echo "  ALL EXPERIMENTS COMPLETE"
-echo "============================================================"
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║                ALL EXPERIMENTS COMPLETE                     ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Results summary (experiment → best test AP):"
 echo "--------------------------------------------------------------"
@@ -819,7 +947,7 @@ for logfile in ${LOG_DIR}/*.log; do
     name=$(basename "${logfile}" .log)
     best=$(grep '^BEST:' "${logfile}" 2>/dev/null || echo "NO RESULT")
     printf "  %-45s %s\n" "${name}" "${best}"
-done
+done | sort
 echo "--------------------------------------------------------------"
 echo ""
 echo "Full logs in: ${LOG_DIR}/"
