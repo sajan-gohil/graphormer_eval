@@ -377,9 +377,9 @@ class DynamicCrossHopMixer(nn.Module):
         super().__init__()
         self.H = num_heads
         self.Dh = head_dim
-        self.q = nn.Linear(head_dim*2, head_dim)
-        self.k = nn.Linear(head_dim*2, head_dim)
-        self.v = nn.Linear(head_dim*2, head_dim)
+        self.q = nn.Linear(head_dim, head_dim)
+        self.k = nn.Linear(head_dim, head_dim)
+        self.v = nn.Linear(head_dim, head_dim)
         self.out = nn.Linear(head_dim, head_dim)
         self.drop = nn.Dropout(dropout)
         self.scale = head_dim ** -0.5
@@ -418,16 +418,16 @@ class DynamicCrossHopMixer(nn.Module):
         if self.hop_mode == "membership":
             # (H, max_hops) @ (max_hops, Dh) -> (H, Dh): summed hop tags.
             tag = (self.hop_membership @ self.hop_embedding.weight)
-            # x = x + tag.view(1, 1, self.H, self.Dh)
-            x = torch.cat([x, tag.view(1, 1, self.H, self.Dh)], dim=-1)
+            x = x + tag.view(1, 1, self.H, self.Dh)
+            # x = torch.cat([x, tag.view(1, 1, self.H, self.Dh)], dim=-1)
         elif self.hop_mode == "moe":
             # (B, H, K) @ (K, Dh) -> (B, H, Dh): gate-weighted hop tags.
             tag = torch.einsum("bhk,kd->bhd", gate_weights, self.hop_embedding.weight)
-            # x = x + tag.unsqueeze(1)               # broadcast over N
-            x = torch.cat([x, tag.unsqueeze(1)], dim=-1)
+            x = x + tag.unsqueeze(1)               # broadcast over N
+            # x = torch.cat([x, tag.unsqueeze(1)], dim=-1)
         elif self.hop_mode == "head":
-            # x = x + self.hop_embedding.weight.view(1, 1, self.H, self.Dh)
-            x = torch.cat([x, self.hop_embedding.weight.view(1, 1, self.H, self.Dh)], dim=-1)
+            x = x + self.hop_embedding.weight.view(1, 1, self.H, self.Dh)
+            # x = torch.cat([x, self.hop_embedding.weight.view(1, 1, self.H, self.Dh)], dim=-1)
 
         q = self.q(x)  # (B, N, H, Dh)
         k = self.k(x)
@@ -942,6 +942,8 @@ class HopMaskedTransformerModel(nn.Module):
         cross_hop_hop_embedding: bool = False,
         use_edge_features: bool = False,
         edge_feat_dim: Optional[int] = None,
+        hop_offset_aug_prob: float = 0.2,
+        hop_offset_max: int = 0,
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -960,6 +962,9 @@ class HopMaskedTransformerModel(nn.Module):
         self.entropy_coeff = entropy_coeff
         self.use_virtual_node = use_virtual_node
         self.use_alternating = (hop_mode == "alternating")
+        self.hop_offset_aug_prob = hop_offset_aug_prob
+        # 0 means "auto": use half of max_hops as the upper bound for offsets.
+        self.hop_offset_max = hop_offset_max if hop_offset_max > 1 else max(2, max_hops // 2)
 
         # ----- Per-layer hop sets (alternating mode) or shared -----
         if self.use_alternating:
@@ -1139,6 +1144,55 @@ class HopMaskedTransformerModel(nn.Module):
                     membership[h, k] = 1.0
         return membership
 
+    def _apply_hop_offset_augmentation(
+        self,
+        dist_masks: torch.Tensor,  # (B, K, N, N)
+    ) -> torch.Tensor:
+        """Training-time augmentation: shift hop slots forward by a random offset.
+
+        For each sample selected (probability ``hop_offset_aug_prob``), a
+        random integer offset ``o ∈ [2, hop_offset_max]`` is drawn.  The
+        dist_masks for that sample are shifted along the K dimension:
+
+            new_dist_masks[b, k] = dist_masks[b, k - o]   if k >= o
+                                 = zeros                   if k <  o
+
+        Effect on attention heads:
+        - Heads whose hop sets map entirely to slots < o will have an empty
+          (or identity-only) band after the shift, so the global-head
+          promotion logic in ``_build_per_head_mask`` automatically converts
+          them to global attention for the affected sample.
+        - Heads whose hop sets map to slots >= o will attend to the nodes
+          that were at a *shorter* real distance (their effective hop range
+          is shifted down by o), giving those heads a longer-range
+          responsibility for that sample.
+
+        This is a no-op at eval time or when ``hop_offset_aug_prob <= 0``.
+        """
+        if not self.training or self.hop_offset_aug_prob <= 0.0:
+            return dist_masks
+
+        B, K, N, _ = dist_masks.shape
+        # Bernoulli selection of samples to augment.
+        aug_mask = torch.rand(B, device=dist_masks.device) < self.hop_offset_aug_prob
+        if not aug_mask.any():
+            return dist_masks
+
+        # Random offset per sample: o ∈ [2, hop_offset_max].
+        offsets = torch.randint(
+            2, self.hop_offset_max + 1, (B,), device=dist_masks.device
+        )  # (B,)
+
+        out = dist_masks.clone()
+        for b in aug_mask.nonzero(as_tuple=False).view(-1):
+            o = int(offsets[b].item())
+            if o <= 0 or o >= K:
+                continue
+            # Shift forward: slot k ← slot (k - o).
+            out[b, o:] = dist_masks[b, : K - o]
+            out[b, :o] = 0  # zeroed slots → empty hop band → global head
+        return out
+
     def _build_per_head_mask(
         self,
         dist_masks: torch.Tensor,
@@ -1152,24 +1206,41 @@ class HopMaskedTransformerModel(nn.Module):
 
         If ``hop_sets`` is provided it overrides ``self.head_hop_sets``
         (used for per-layer alternating assignment).
+
+        **Global-head promotion**: if a sample's graph diameter is smaller than
+        all hops in a head's set — i.e. the union of the hop masks for that
+        sample has no off-diagonal True entries (identity / empty matrix) —
+        that sample is treated as if the head is a global head (all-True mask)
+        rather than producing an empty row that would become NaN after softmax.
         """
         B, K_runtime, N, _ = dist_masks.shape
         H = self.num_heads
         if hop_sets is None:
             hop_sets = self.head_hop_sets
         out = dist_masks.new_zeros(B, H, N, N, dtype=torch.bool)
+        # Pre-compute the identity so we can detect "empty hop band" per sample.
+        eye = torch.eye(N, device=dist_masks.device, dtype=torch.bool)  # (N, N)
         for h, hop_set in enumerate(hop_sets):
             if hop_set is None:
                 out[:, h] = True
                 continue
             idx = [k for k in hop_set if k < K_runtime]
             if not idx:
-                # Empty — head sees nothing; softmax row will be NaN→zero.
-                # This happens only if all hops in the set exceed K_runtime,
-                # which is the dataset's actual diameter cap.
+                # All hops in the head's set exceed K_runtime (the dataset's
+                # diameter cap).  Every sample gets global attention.
+                out[:, h] = True
                 continue
             stacked = dist_masks[:, idx].bool().any(dim=1)  # (B, N, N)
+            # For each sample, check whether the hop band contains any
+            # off-diagonal edge.  A band that is all-identity (or all-zero)
+            # means the graph diameter is smaller than every hop in this set.
+            has_off_diag = (stacked & ~eye.unsqueeze(0)).any(dim=(-2, -1))  # (B,)
+            # Start with the restricted mask for all samples …
             out[:, h] = stacked
+            # … then promote samples whose hop band is trivially empty to global.
+            small_diam = ~has_off_diag  # (B,) — True where diameter < hop set
+            if small_diam.any():
+                out[small_diam, h] = True
         return out
 
     # ----------------------------------------------------------------
@@ -1213,6 +1284,9 @@ class HopMaskedTransformerModel(nn.Module):
             dense_x = torch.cat([vn, dense_x], dim=1)        # (B, N+1, d)
             nm = torch.cat([nm.new_ones(B, 1), nm], dim=1)   # (B, N+1)
             mask_source = self._augment_dist_masks_vn(mask_source)
+
+        # ── Hop-offset augmentation (training only) ─────────────────
+        mask_source = self._apply_hop_offset_augmentation(mask_source)
 
         x = dense_x
         all_gate_weights = []

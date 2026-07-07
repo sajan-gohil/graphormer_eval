@@ -437,13 +437,13 @@ class DynamicCrossHopMixer(nn.Module):
         if self.hop_mode == "membership":
             # (H, max_hops) @ (max_hops, Dh) -> (H, Dh): summed hop tags.
             tag = (self.hop_membership @ self.hop_embedding.weight)
-            x = torch.cat([x, tag.view(1, 1, self.H, self.Dh)], dim=-1)
+            x = torch.cat([x, tag.view(1, 1, self.H, self.Dh).expand(B, N, self.H, self.Dh)], dim=-1)
         elif self.hop_mode == "moe":
             # (B, H, K) @ (K, Dh) -> (B, H, Dh): gate-weighted hop tags.
             tag = torch.einsum("bhk,kd->bhd", gate_weights, self.hop_embedding.weight)
-            x = torch.cat([x, tag.unsqueeze(1)], dim=-1)
+            x = torch.cat([x, tag.unsqueeze(1).expand(B, N, self.H, self.Dh)], dim=-1)
         elif self.hop_mode == "head":
-            x = torch.cat([x, self.hop_embedding.weight.view(1, 1, self.H, self.Dh)], dim=-1)
+            x = torch.cat([x, self.hop_embedding.weight.view(1, 1, self.H, self.Dh).expand(B, N, self.H, self.Dh)], dim=-1)
 
         q = self.q(x)  # (B, N, H, Dh)
         k = self.k(x)

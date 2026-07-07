@@ -7,6 +7,11 @@
 #   max_hops=30  num_heads=30  num_global_heads=1  hop_mode=single
 #   hop_window=0  hidden_dim=240  (8 per head)
 #
+# Fix applied from retry script: for single hop_mode,
+#   num_heads = num_global_heads + (max_hops - 1)
+# For G16a/G16b (smaller width), max_hops is reduced to satisfy:
+#   max_hops = num_heads - num_global_heads + 1
+#
 # This script runs a systematic sweep of individual components and modes to
 # identify which give a lift in AP.  Each experiment logs to its own file.
 #
@@ -194,7 +199,7 @@ enqueue "G1a_hop_mode_contiguous" \
 # 1b. Window with half-width=1 (each head sees ~3 adjacent hops)
 enqueue "G1b_hop_mode_window_w1" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode window \
     --hop_window 1
@@ -231,28 +236,28 @@ echo "===== GROUP 2: GLOBAL HEADS ABLATION ====="
 
 enqueue "G2a_global_heads_0" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 29 \
     --num_global_heads 0 \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW}
 
 enqueue "G2b_global_heads_2" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 31 \
     --num_global_heads 2 \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW}
 
 enqueue "G2c_global_heads_3" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 32 \
     --num_global_heads 3 \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW}
 
 enqueue "G2d_global_heads_5" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 34 \
     --num_global_heads 5 \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW}
@@ -269,7 +274,7 @@ echo "===== GROUP 3: MoE GATING ====="
 # 3a. MoE dense (full softmax over all K hops)
 enqueue "G3a_moe_dense" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -289,7 +294,7 @@ enqueue "G3b_moe_top1" \
 # 3c. MoE sparse top-3
 enqueue "G3c_moe_top3" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -299,7 +304,7 @@ enqueue "G3c_moe_top3" \
 # 3d. MoE sparse top-5
 enqueue "G3d_moe_top5" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -315,7 +320,7 @@ echo "===== GROUP 4: MULTIHOP ATTENTION ====="
 # 4a. Multihop sum readout + global view
 enqueue "G4a_multihop_sum" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -325,7 +330,7 @@ enqueue "G4a_multihop_sum" \
 # 4b. Multihop mean readout + global view
 enqueue "G4b_multihop_mean" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -338,7 +343,7 @@ flush_queue
 # 4c. Multihop sum readout, NO global view
 enqueue "G4c_multihop_sum_no_global" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -349,7 +354,7 @@ enqueue "G4c_multihop_sum_no_global" \
 # 4d. Multihop mean readout, NO global view
 enqueue "G4d_multihop_mean_no_global" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -366,7 +371,7 @@ echo "===== GROUP 5: DYNAMIC CROSS-HOP MIXER ====="
 # 5a. Cross-hop mixer (with FFN)
 enqueue "G5a_cross_hop" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -385,7 +390,7 @@ enqueue "G5b_cross_hop_block_diag" \
 # 5c. Cross-hop mixer + hop embedding
 enqueue "G5c_cross_hop_embed" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -408,7 +413,7 @@ flush_queue
 # 5e. Cross-hop + block_diag + hop_embed + no_ffn (all cross-hop features)
 enqueue "G5e_cross_hop_full" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -504,7 +509,7 @@ echo "===== GROUP 7: MASK TYPE ABLATION ====="
 # 7a. adj_power (A^k)
 enqueue "G7a_mask_adj_power" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -595,7 +600,7 @@ enqueue "G9b_gat_2layer" \
 # 9c. 1 GATv2 layer + edge features
 enqueue "G9c_gat_1layer_edge" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -711,7 +716,7 @@ echo "===== GROUP 14: LOSS FUNCTION ====="
 # 14a. Pos weight (per-class rebalancing)
 enqueue "G14a_pos_weight" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -720,7 +725,7 @@ enqueue "G14a_pos_weight" \
 # 14b. Focal loss (gamma=1)
 enqueue "G14b_focal_g1" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -809,6 +814,7 @@ enqueue "G16a_h16_d128" \
     --hidden_dim 128 \
     --num_heads 16 \
     --num_global_heads 1 \
+    --max_hops 16 \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW}
 
@@ -817,6 +823,7 @@ enqueue "G16b_h20_d160" \
     --hidden_dim 160 \
     --num_heads 20 \
     --num_global_heads 1 \
+    --max_hops 20 \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW}
 
@@ -920,7 +927,7 @@ enqueue "G18d_gat_edge_ls" \
 # 18e. Kitchen sink: edge + lap PE + RRWP + blend adj + virtual node
 enqueue "G18e_kitchen_sink" \
     --hidden_dim ${BASE_HIDDEN_DIM} \
-    --num_heads ${BASE_NUM_HEADS} \
+    --num_heads 30 \
     --num_global_heads ${BASE_NUM_GLOBAL_HEADS} \
     --hop_mode ${BASE_HOP_MODE} \
     --hop_window ${BASE_HOP_WINDOW} \
@@ -938,7 +945,7 @@ flush_queue
 # =============================================================================
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║                ALL EXPERIMENTS COMPLETE                     ║"
+echo "║                ALL EXPERIMENTS COMPLETE                      ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Results summary (experiment → best test AP):"
