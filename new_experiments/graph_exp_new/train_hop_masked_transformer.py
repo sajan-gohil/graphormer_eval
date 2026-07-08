@@ -38,7 +38,7 @@ import torch
 
 from data import DATASET_CHOICES, get_loaders
 from metrics import build_task, compute_pos_weight
-from model_hop_masked_transformer import HopMaskedTransformerModel
+from model_hop_masked_transformer_spectral import HopMaskedTransformerModel
 from optim_utils import build_grouped_optimizer_and_scheduler
 
 os.environ["PYTHON_HASH_SEED"] = "42"
