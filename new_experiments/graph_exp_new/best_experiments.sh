@@ -27,7 +27,7 @@ CKPT_DIR="ablation_checkpoints"
 mkdir -p "${LOG_DIR}" "${CKPT_DIR}"
 
 GPUS=("cuda:1" "cuda:2")
-JOBS_PER_GPU=1
+JOBS_PER_GPU=2
 
 BASE_MAX_HOPS=30
 BASE_NUM_GLOBAL_HEADS=1
@@ -154,10 +154,70 @@ flush_queue() {
 # =============================================================================
 echo "===== GROUP 1 (retry): HOP MODE WINDOW W1 ====="
 
-enqueue "C1_sparse_structural_shallow" \
-    --hop_mode ${BASE_HOP_MODE} \
-    --hop_window ${BASE_HOP_WINDOW} \
+# 1. C1 + Focal Loss (gamma = 1.0)
+enqueue "C1_focal_g1" \
     --num_layers 2 \
+    --hidden_dim 160 \
+    --num_heads 20 \
+    --max_hops 20 \
+    --num_global_heads 1 \
+    --norm_type graph \
+    --block_diag_out \
+    --blend_adj_power \
+    --focal_gamma 1.0
+
+# 2. C1 + Label Smoothing (eps = 0.05)
+enqueue "C1_label_smooth_005" \
+    --num_layers 2 \
+    --hidden_dim 160 \
+    --num_heads 20 \
+    --max_hops 20 \
+    --num_global_heads 1 \
+    --norm_type graph \
+    --block_diag_out \
+    --blend_adj_power \
+    --label_smoothing 0.05
+
+# 3. C1 + Positional Weighting
+enqueue "C1_pos_weight" \
+    --num_layers 2 \
+    --hidden_dim 160 \
+    --num_heads 20 \
+    --max_hops 20 \
+    --num_global_heads 1 \
+    --norm_type graph \
+    --block_diag_out \
+    --blend_adj_power \
+    --use_pos_weight
+
+# 4. C1 + dynamic_cross_hop
+enqueue "C1_dynamic_cross_hop" \
+    --num_layers 2 \
+    --hidden_dim 160 \
+    --num_heads 20 \
+    --max_hops 20 \
+    --num_global_heads 1 \
+    --norm_type graph \
+    --block_diag_out \
+    --blend_adj_power \
+    --dynamic_cross_hop
+
+# 5. C1 + dynamic_cross_hop + cross_hop_hop_embedding
+enqueue "C1_dynamic_cross_hop_embed" \
+    --num_layers 2 \
+    --hidden_dim 160 \
+    --num_heads 20 \
+    --max_hops 20 \
+    --num_global_heads 1 \
+    --norm_type graph \
+    --block_diag_out \
+    --blend_adj_power \
+    --dynamic_cross_hop \
+    --cross_hop_hop_embedding
+
+# 6. C1 + 3 layers
+enqueue "C1_layers_3" \
+    --num_layers 3 \
     --hidden_dim 160 \
     --num_heads 20 \
     --max_hops 20 \
@@ -166,81 +226,29 @@ enqueue "C1_sparse_structural_shallow" \
     --block_diag_out \
     --blend_adj_power
 
-enqueue "C2_moe_dynamic_shallow" \
-    --hop_mode ${BASE_HOP_MODE} \
-    --hop_window ${BASE_HOP_WINDOW} \
+# 7. C1 + 40 heads (scaled hidden_dim and max_hops to preserve head capacity)
+enqueue "C1_heads_40" \
     --num_layers 2 \
-    --hidden_dim 240 \
-    --num_heads 30 \
-    --num_global_heads 1 \
-    --norm_type graph \
-    --use_moe_gating \
-    --top_k 1 \
-    --block_diag_out
-
-enqueue "C3_cross_hop_laplacian" \
-    --hop_mode ${BASE_HOP_MODE} \
-    --hop_window ${BASE_HOP_WINDOW} \
-    --num_layers 2 \
-    --hidden_dim 240 \
-    --num_heads 30 \
-    --num_global_heads 1 \
-    --norm_type graph \
-    --dynamic_cross_hop \
-    --block_diag_out \
-    --cross_hop_no_ffn \
-    --use_edge_features \
-    --use_lap_pe \
-    --lap_pe_dim 8
-
-flush_queue
-
-enqueue "C4_sparse_structural_shallow" \
-    --hop_mode ${BASE_HOP_MODE} \
-    --hop_window ${BASE_HOP_WINDOW} \
-    --num_layers 1 \
-    --ffn_ratio 1 \
-    --hidden_dim 160 \
-    --num_heads 20 \
-    --max_hops 20 \
+    --hidden_dim 320 \
+    --num_heads 40 \
+    --max_hops 40 \
     --num_global_heads 1 \
     --norm_type graph \
     --block_diag_out \
     --blend_adj_power
 
-enqueue "C5_moe_dynamic_shallow" \
-    --hop_mode ${BASE_HOP_MODE} \
-    --hop_window ${BASE_HOP_WINDOW} \
-    --num_layers 1 \
-    --ffn_ratio 1 \
-    --hidden_dim 240 \
-    --num_heads 30 \
+# 8. C1 - blend_adj_power (removed the flag)
+enqueue "C1_no_blend_adj" \
+    --num_layers 2 \
+    --hidden_dim 160 \
+    --num_heads 20 \
+    --max_hops 20 \
     --num_global_heads 1 \
     --norm_type graph \
-    --use_moe_gating \
-    --top_k 1 \
     --block_diag_out
-
-enqueue "C6_cross_hop_laplacian" \
-    --hop_mode ${BASE_HOP_MODE} \
-    --hop_window ${BASE_HOP_WINDOW} \
-    --num_layers 1 \
-    --ffn_ratio 1 \
-    --hidden_dim 240 \
-    --num_heads 30 \
-    --num_global_heads 1 \
-    --norm_type graph \
-    --dynamic_cross_hop \
-    --block_diag_out \
-    --cross_hop_no_ffn \
-    --use_edge_features \
-    --use_lap_pe \
-    --lap_pe_dim 8
 
 flush_queue
 
-# =============================================================================
-# SUMMARY
 # =============================================================================
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
