@@ -199,7 +199,7 @@ def build_parser():
     # Hop-to-head assignment
     p.add_argument("--hop_mode", type=str, default="contiguous",
                    choices=["contiguous", "window", "single", "interleaved",
-                            "alternating"],
+                            "alternating", "file"],
                    help="How to assign hops to heads. contiguous = partition "
                         "[1..K-1] into num_heads chunks; window = evenly-spaced "
                         "centres with hop_window half-width; single = exactly "
@@ -214,6 +214,11 @@ def build_parser():
     p.add_argument("--num_global_heads", type=int, default=0,
                    help="Last N heads are unrestricted (free global "
                         "attention) rather than hop-masked.")
+    p.add_argument("--hop_file", type=str, default=None,
+                   help="Path to a JSON file for 'file' hop_mode. Keys are "
+                        "1-indexed head numbers, values are lists of hop "
+                        "indices. E.g. {\"1\": [0, 1], \"2\": [0, 2, 4]}. "
+                        "Heads not listed get global attention.")
 
     # MoE gating (optional, replaces deterministic hop assignment)
     p.add_argument("--use_moe_gating", action="store_true", default=False,
@@ -467,6 +472,7 @@ def main():
         max_hops=args.max_hops,
         hop_mode=args.hop_mode,
         hop_window=args.hop_window,
+        hop_file=args.hop_file,
         num_global_heads=args.num_global_heads,
         output_dim=task.output_dim,
         graph_pool=args.graph_pool,
@@ -515,6 +521,8 @@ def main():
         print("Head -> hop set assignment:", flush=True)
         for h, s in enumerate(model.head_hop_sets):
             print(f"  head {h}: {'GLOBAL (no hop mask)' if s is None else s}", flush=True)
+    if args.hop_mode == "file":
+        print(f"Loaded head->hop assignment from file: {args.hop_file}", flush=True)
     if args.use_virtual_node:
         print("Virtual node: ENABLED (learnable embedding, visible to all heads)",
               flush=True)
