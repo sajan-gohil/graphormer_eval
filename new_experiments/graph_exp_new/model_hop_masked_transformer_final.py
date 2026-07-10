@@ -35,6 +35,7 @@ Datasets: Peptides-func, Peptides-struct, PascalVOC-SP.
 
 from __future__ import annotations
 
+import json
 import math
 from typing import List, Optional, Sequence, Tuple
 
@@ -71,6 +72,7 @@ def build_head_hop_sets(
     window: int = 1,
     include_self: bool = True,
     num_global_heads: int = 0,
+    hop_file: Optional[str] = None,
 ) -> List[Optional[List[int]]]:
     """Assign a hop set to each attention head.
 
@@ -78,7 +80,7 @@ def build_head_hop_sets(
         max_hops:           K — total number of hop levels available.
         num_heads:          H — total attention heads.
         mode:               "contiguous" | "window" | "single" | "interleaved"
-                        | "alternating".
+                        | "alternating" | "file".
         window:             half-window for "window" mode; stride for
                             "interleaved" mode.
         include_self:       if True, hop 0 is added to every restricted head
@@ -86,6 +88,12 @@ def build_head_hop_sets(
                             valid key (no empty-softmax NaNs).
         num_global_heads:   the last N heads are unrestricted (hop_set=None
                             → free global attention).
+        hop_file:           path to a JSON file for "file" mode. The JSON
+                            must be an object with 1-indexed head numbers as
+                            keys (strings) and lists of hop indices as values.
+                            Example: {"1": [0, 1], "2": [0, 2, 4], ...}.
+                            Heads not listed in the file get no hop mask
+                            (global attention).
 
     Returns a list of length ``num_heads``; each entry is either a list of
     int hop indices the head is allowed to attend to, or ``None`` for an
@@ -165,6 +173,33 @@ def build_head_hop_sets(
         # The model swaps to odd at odd-indexed layers.
         even_hops = [k for k in range(0, K) if k % 2 == 0]
         sets = [even_hops] * H_restricted
+    elif mode == "file":
+        # Read head→hop assignment from a JSON file.
+        # Keys are 1-indexed head numbers (as strings in JSON), values are
+        # lists of hop indices. Heads not in the file get global attention.
+        if hop_file is None:
+            raise ValueError(
+                "hop_mode='file' requires --hop_file to be specified"
+            )
+        with open(hop_file, "r") as f:
+            raw = json.load(f)
+        # Build the full list: head 0..num_heads-1.
+        # JSON keys are 1-indexed strings; convert to 0-indexed.
+        all_sets: List[Optional[List[int]]] = [None] * num_heads
+        for key, hops in raw.items():
+            head_idx = int(key) - 1  # convert 1-indexed → 0-indexed
+            if head_idx < 0 or head_idx >= num_heads:
+                raise ValueError(
+                    f"Head key {key} (0-indexed: {head_idx}) out of range "
+                    f"for num_heads={num_heads}"
+                )
+            all_sets[head_idx] = sorted(int(h) for h in hops)
+        if include_self:
+            all_sets = [
+                sorted(set([0] + s)) if s is not None else None
+                for s in all_sets
+            ]
+        return all_sets  # bypass the normal sets + global_heads append
     else:
         raise ValueError(f"Unknown hop assignment mode: {mode}")
 
@@ -1140,9 +1175,10 @@ class HopMaskedTransformerModel(nn.Module):
         num_layers:        number of stacked transformer layers.
         dropout:           shared dropout.
         max_hops:          K — total hop levels in the precomputed dist_masks.
-        hop_mode:          "contiguous" / "window" / "single" — see
+        hop_mode:          "contiguous" / "window" / "single" / "file" — see
                            ``build_head_hop_sets``.
         hop_window:        half-window for "window" mode.
+        hop_file:          path to JSON file for "file" hop_mode.
         num_global_heads:  number of heads that bypass hop masking.
         output_dim:        task output channels.
         graph_pool:        "sum" or "mean" pool for graph-level tasks.
@@ -1162,6 +1198,7 @@ class HopMaskedTransformerModel(nn.Module):
         max_hops: int = 40,
         hop_mode: str = "contiguous",
         hop_window: int = 1,
+        hop_file: Optional[str] = None,
         num_global_heads: int = 0,
         output_dim: int = 10,
         graph_pool: str = "sum",
@@ -1246,6 +1283,7 @@ class HopMaskedTransformerModel(nn.Module):
                 window=hop_window,
                 include_self=True,
                 num_global_heads=num_global_heads,
+                hop_file=hop_file,
             )
             self.per_layer_hop_sets = [self.head_hop_sets] * num_layers
 
