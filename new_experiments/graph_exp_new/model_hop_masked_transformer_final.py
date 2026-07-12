@@ -414,6 +414,10 @@ class DynamicCrossHopMixer(nn.Module):
         self.Dh = head_dim
         self.out = nn.Linear(head_dim, head_dim)
         self.drop = nn.Dropout(dropout)
+        # (#10) Dropout applied to hop-tag embeddings before concatenation with
+        # the node features, preventing the cross-hop mixer from over-relying
+        # on fixed hop-identity signals.
+        self.hop_tag_drop = nn.Dropout(dropout)
         self.scale = head_dim ** -0.5
 
         if not use_hop_embedding:
@@ -472,13 +476,16 @@ class DynamicCrossHopMixer(nn.Module):
         if self.hop_mode == "membership":
             # (H, max_hops) @ (max_hops, Dh) -> (H, Dh): summed hop tags.
             tag = (self.hop_membership @ self.hop_embedding.weight)
-            x = torch.cat([x, tag.view(1, 1, self.H, self.Dh).expand(B, N, self.H, self.Dh)], dim=-1)
+            tag = self.hop_tag_drop(tag.view(1, 1, self.H, self.Dh).expand(B, N, self.H, self.Dh))
+            x = torch.cat([x, tag], dim=-1)
         elif self.hop_mode == "moe":
             # (B, H, K) @ (K, Dh) -> (B, H, Dh): gate-weighted hop tags.
             tag = torch.einsum("bhk,kd->bhd", gate_weights, self.hop_embedding.weight)
-            x = torch.cat([x, tag.unsqueeze(1).expand(B, N, self.H, self.Dh)], dim=-1)
+            tag = self.hop_tag_drop(tag.unsqueeze(1).expand(B, N, self.H, self.Dh))
+            x = torch.cat([x, tag], dim=-1)
         elif self.hop_mode == "head":
-            x = torch.cat([x, self.hop_embedding.weight.view(1, 1, self.H, self.Dh).expand(B, N, self.H, self.Dh)], dim=-1)
+            tag = self.hop_tag_drop(self.hop_embedding.weight.view(1, 1, self.H, self.Dh).expand(B, N, self.H, self.Dh))
+            x = torch.cat([x, tag], dim=-1)
 
         q = self.q(x)  # (B, N, H, Dh)
         k = self.k(x)
@@ -793,9 +800,12 @@ class HopGate(nn.Module):
         self.gate_noise = gate_noise
 
         # Small 2-layer MLP: hidden_dim -> H * K logits.
+        # (#5) Dropout between layers regularises the routing network and
+        # discourages it from memorising graph-specific routing patterns.
         self.gate_mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
+            nn.Dropout(gate_noise if gate_noise > 0 else 0.0),
             nn.Linear(hidden_dim, num_heads * max_hops),
         )
 
@@ -893,6 +903,10 @@ class MoEHopMaskedMHA(nn.Module):
         self.v_proj = nn.Linear(hidden_dim, hidden_dim)
         self.out_proj = nn.Linear(hidden_dim, hidden_dim)
         self.attn_drop = nn.Dropout(dropout)
+        # (#6) Dropout on gate weights before soft-mask construction stochastically
+        # silences hop channels during training, analogous to DropToken in MoE
+        # and preventing gate collapse on a small set of hop distances.
+        self.gate_drop = nn.Dropout(dropout)
 
         # Learnable temperature for the soft mask (per head).
         self.mask_temperature = nn.Parameter(torch.ones(1, num_heads, 1, 1))
@@ -914,6 +928,9 @@ class MoEHopMaskedMHA(nn.Module):
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(Dh)  # (B, H, N, N)
 
         # Build soft mask from gated mixture of distance masks.
+        # (#6) Apply dropout to gate_weights before mixing — randomly zeroes
+        # some per-head hop weights so the model cannot rely on a single hop.
+        gate_weights = self.gate_drop(gate_weights)
         # gate_weights: (B, H, K) — dist_masks: (B, K, N, N)
         # soft_mask: (B, H, N, N) = einsum('bhk, bkij -> bhij')
         soft_mask = torch.einsum('bhk,bkij->bhij', gate_weights, dist_masks.float())
@@ -1231,6 +1248,7 @@ class HopMaskedTransformerModel(nn.Module):
         multihop_attn: bool = False,
         multihop_readout: str = "sum",
         multihop_include_global: bool = True,
+        embed_dropout: float = 0.0,
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -1260,6 +1278,10 @@ class HopMaskedTransformerModel(nn.Module):
         self.use_edge_bias = use_edge_bias
         self.use_rrwp = use_rrwp
         self.rrwp_dim = rrwp_dim
+        # (#3) Post-encoder embedding dropout — applied once after the node
+        # encoder and before the first transformer layer.  Separate from the
+        # per-sublayer ``dropout`` so it can be tuned independently.
+        self.embed_drop = nn.Dropout(embed_dropout)
 
         # ----- Per-layer hop sets (alternating mode) or shared -----
         if self.use_alternating:
@@ -1723,6 +1745,8 @@ class HopMaskedTransformerModel(nn.Module):
             loop without gradient overhead.
         """
         dense_x, dense_mask = self.encode_dense(batch)
+        # (#3) Post-encoder embedding dropout.
+        dense_x = self.embed_drop(dense_x)
         nm = node_masks if node_masks is not None else dense_mask
 
         mask_source = (
