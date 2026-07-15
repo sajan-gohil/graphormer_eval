@@ -88,8 +88,8 @@ def build_parser():
     p.add_argument("--hidden_dim", type=int, default=128)
     p.add_argument("--num_heads", type=int, default=8,
                    help="Total heads. Must divide hidden_dim.")
-    p.add_argument("--ffn_ratio", type=int, default=4)
-    p.add_argument("--num_layers", type=int, default=4)
+    p.add_argument("--ffn_ratio", type=int, default=1)
+    p.add_argument("--num_layers", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--graph_pool", type=str, default="sum",
                    choices=["sum", "mean", "attention"],
@@ -246,12 +246,12 @@ def build_parser():
     p.add_argument("--lr_min", type=float, default=1e-6)
     p.add_argument("--weight_decay", type=float, default=3e-4)
     p.add_argument("--batch_size", type=int, default=64)
-    p.add_argument("--max_epochs", type=int, default=200)
+    p.add_argument("--max_epochs", type=int, default=500)
     p.add_argument("--patience", type=int, default=40)
     p.add_argument("--reduce_lr_patience", type=int, default=10,
                    help="Patience for ReduceLROnPlateau (epochs).")
-    p.add_argument("--warmup_ratio", type=float, default=0.05)
-    p.add_argument("--grad_clip", type=float, default=1.0)
+    p.add_argument("--warmup_ratio", type=float, default=0.01)
+    p.add_argument("--grad_clip", type=float, default=5.0)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--dist_mask_workers", type=int, default=8)
 
@@ -505,6 +505,7 @@ def main():
         multihop_attn=args.multihop_attn,
         multihop_readout=args.multihop_readout,
         multihop_include_global=not args.multihop_no_global,
+        embed_dropout=args.dropout
     ).to(args.device)
 
     # Print the head -> hop-set assignment so it's logged for reproducibility.
