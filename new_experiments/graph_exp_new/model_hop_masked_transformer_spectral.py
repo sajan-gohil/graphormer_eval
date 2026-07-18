@@ -45,29 +45,7 @@ from torch_geometric.utils import to_dense_batch
 from torch_geometric.nn import global_add_pool, global_mean_pool, GATv2Conv
 
 from models import build_node_encoder, build_bond_encoder
-
-
-# ---------------------------------------------------------------------------
-# GaussianSmearing: maps scalars to Gaussian basis function vectors.
-# Equivalent to torch_geometric.nn.models.schnet.GaussianSmearing.
-# ---------------------------------------------------------------------------
-class GaussianSmearing(nn.Module):
-    """Expand scalar distances into a vector of Gaussian basis values.
-
-    ``num_gaussians`` centers are placed uniformly in [start, stop].
-    """
-
-    def __init__(self, start: float = 0.0, stop: float = 2.0,
-                 num_gaussians: int = 50):
-        super().__init__()
-        offset = torch.linspace(start, stop, num_gaussians)
-        self.register_buffer('offset', offset)
-        self.coeff = -0.5 / max((offset[1] - offset[0]).item(), 1e-6) ** 2
-
-    def forward(self, dist: torch.Tensor) -> torch.Tensor:
-        dist = dist.unsqueeze(-1) - self.offset
-        return torch.exp(self.coeff * dist.pow(2))
-
+from torch_geometric.nn.models.schnet import GaussianSmearing
 
 
 _NEG_INF = float("-inf")
@@ -449,7 +427,9 @@ class SpectralBandFilter(nn.Module):
         z_hat = torch.einsum("bnk,bnsd->bksd", eigvecs, z)
 
         # ── S2GNN-style filter: GaussianSmearing -> bottleneck MLP ──
-        basis = self.distance_expansion(eigvals)          # (B, K, num_gaussians)
+        eigvals_shape = eigvals.shape
+        basis = self.distance_expansion(eigvals)              # (B*K, num_gaussians)
+        basis = basis.view(*eigvals_shape, -1)                # (B, K, num_gaussians)
         response = self.filter_mlp(basis)                 # (B, K, num_bands)
         response = response * eigmask.unsqueeze(-1).to(response.dtype)
         # Broadcast: (B, K, S, 1) * (B, K, S, Dh)
@@ -1506,13 +1486,35 @@ class HopMaskedTransformerModel(nn.Module):
         aug[:, :, :, 0] = 1                       # everyone attends to vn
         return aug
 
-    def _build_spectral_basis(self, dist_masks, node_mask):
+    def _build_spectral_basis(self, dist_masks, node_mask, batch=None):
         """Compute the first k eigenpairs of the normalized Laplacian per graph.
 
-        Uses hop-1 connectivity from dist_masks.  This is intentionally kept
-        outside the transformer layers so the EVD is computed once per forward
-        and shared by all layers.
+        If ``batch`` carries precomputed attributes ``laplacian_eigenvalue_plain``
+        and ``laplacian_eigenvector_plain`` (as produced by S2GNN-style
+        preprocessing), those are used directly — skipping the runtime EVD.
+        Otherwise falls back to computing eigenpairs from hop-1 connectivity in
+        dist_masks.  This is intentionally kept outside the transformer layers so
+        the EVD is computed once per forward and shared by all layers.
         """
+        # ── Try precomputed eigenpairs first ────────────────────────────
+        if batch is not None:
+            eigvals_pre = getattr(batch, "laplacian_eigenvalue_plain", None)
+            eigvecs_pre = getattr(batch, "laplacian_eigenvector_plain", None)
+            if eigvals_pre is not None and eigvecs_pre is not None:
+                # Precomputed tensors: (B, K_pre) and (B, N, K_pre)
+                K_pre = eigvals_pre.shape[-1]
+                K = min(self.spectral_k, K_pre)
+                eigvals = eigvals_pre[:, :K]
+                eigvecs = eigvecs_pre[:, :, :K]
+                eigmask = (eigvals.abs() > 0) | (torch.arange(K, device=eigvals.device) == 0)
+                # Expand to batch if needed.
+                if eigvals.dim() == 1:
+                    eigvals = eigvals.unsqueeze(0)
+                    eigvecs = eigvecs.unsqueeze(0)
+                    eigmask = eigmask.unsqueeze(0)
+                return eigvecs, eigvals, eigmask
+
+        # ── Fallback: runtime eigendecomposition from dist_masks ───────
         B, _, N, _ = dist_masks.shape
         K = min(self.spectral_k, N)
         eigvecs = dist_masks.new_zeros(B, N, K, dtype=torch.float32)
@@ -1563,7 +1565,7 @@ class HopMaskedTransformerModel(nn.Module):
 
         # Spectral basis is computed once and shared across all layers.
         spectral_basis = (
-            self._build_spectral_basis(mask_source, nm)
+            self._build_spectral_basis(mask_source, nm, batch=batch)
             if self.use_spectral_branch else None
         )
 

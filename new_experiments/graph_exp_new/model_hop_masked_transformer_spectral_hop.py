@@ -43,31 +43,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.utils import to_dense_batch
 from torch_geometric.nn import global_add_pool, global_mean_pool, GATv2Conv
+from torch_geometric.nn.models.schnet import GaussianSmearing
 
 from models import build_node_encoder, build_bond_encoder
-
-
-# ---------------------------------------------------------------------------
-# GaussianSmearing: maps scalars to Gaussian basis function vectors.
-# Equivalent to torch_geometric.nn.models.schnet.GaussianSmearing.
-# ---------------------------------------------------------------------------
-class GaussianSmearing(nn.Module):
-    """Expand scalar distances into a vector of Gaussian basis values.
-
-    ``num_gaussians`` centers are placed uniformly in [start, stop].
-    """
-
-    def __init__(self, start: float = 0.0, stop: float = 2.0,
-                 num_gaussians: int = 50):
-        super().__init__()
-        offset = torch.linspace(start, stop, num_gaussians)
-        self.register_buffer('offset', offset)
-        self.coeff = -0.5 / max((offset[1] - offset[0]).item(), 1e-6) ** 2
-
-    def forward(self, dist: torch.Tensor) -> torch.Tensor:
-        dist = dist.unsqueeze(-1) - self.offset
-        return torch.exp(self.coeff * dist.pow(2))
-
 
 
 _NEG_INF = float("-inf")
