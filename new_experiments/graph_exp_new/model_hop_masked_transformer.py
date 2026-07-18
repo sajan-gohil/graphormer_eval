@@ -1228,7 +1228,7 @@ class HopMaskedTransformerModel(nn.Module):
             if not idx:
                 # All hops in the head's set exceed K_runtime (the dataset's
                 # diameter cap).  Every sample gets global attention.
-                out[:, h] = True
+                # out[:, h] = True
                 continue
             stacked = dist_masks[:, idx].bool().any(dim=1)  # (B, N, N)
             # For each sample, check whether the hop band contains any

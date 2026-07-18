@@ -47,6 +47,29 @@ from torch_geometric.nn import global_add_pool, global_mean_pool, GATv2Conv
 from models import build_node_encoder, build_bond_encoder
 
 
+# ---------------------------------------------------------------------------
+# GaussianSmearing: maps scalars to Gaussian basis function vectors.
+# Equivalent to torch_geometric.nn.models.schnet.GaussianSmearing.
+# ---------------------------------------------------------------------------
+class GaussianSmearing(nn.Module):
+    """Expand scalar distances into a vector of Gaussian basis values.
+
+    ``num_gaussians`` centers are placed uniformly in [start, stop].
+    """
+
+    def __init__(self, start: float = 0.0, stop: float = 2.0,
+                 num_gaussians: int = 50):
+        super().__init__()
+        offset = torch.linspace(start, stop, num_gaussians)
+        self.register_buffer('offset', offset)
+        self.coeff = -0.5 / max((offset[1] - offset[0]).item(), 1e-6) ** 2
+
+    def forward(self, dist: torch.Tensor) -> torch.Tensor:
+        dist = dist.unsqueeze(-1) - self.offset
+        return torch.exp(self.coeff * dist.pow(2))
+
+
+
 _NEG_INF = float("-inf")
 
 
@@ -333,16 +356,27 @@ class SpectralCrossHopMixer(nn.Module):
 
     Each node's H head slabs are treated as a signal on a fixed hop graph
     0--1--...--H-1. The hop-graph Laplacian eigenbasis is computed once and
-    stored as buffers. A learnable per-channel spectral response rescales each
-    hop-frequency mode before reconstruction.
+    stored as buffers.
+
+    The filter is parameterized following S2GNN (Rampášek et al.):
+      - GaussianSmearing maps each hop eigenvalue to a basis of
+        ``num_gaussians`` evenly-spaced Gaussians over [0, 2]
+        (the spectral range of the normalized Laplacian).
+      - A bottleneck MLP (num_gaussians -> bottleneck -> head_dim) produces
+        per-channel filter magnitudes.
+      - A Tukey (tapered-cosine) window smoothly tapers the filter at the
+        spectral boundary.
 
     Input/output shape: (B, N, H*Dh).
     """
 
-    def __init__(self, num_heads: int, head_dim: int, dropout: float = 0.0):
+    def __init__(self, num_heads: int, head_dim: int, dropout: float = 0.0,
+                 num_gaussians: int = 60, basis_bottleneck: float = 0.2,
+                 tukey_alpha: float = 0.5):
         super().__init__()
         self.H = num_heads
         self.Dh = head_dim
+        self.tukey_alpha = tukey_alpha
 
         # Path graph over hop/head slots: 0--1--...--H-1.
         A = torch.zeros(num_heads, num_heads, dtype=torch.float32)
@@ -361,12 +395,38 @@ class SpectralCrossHopMixer(nn.Module):
         self.register_buffer("hop_eigenvalues", eigenvalues)
         self.register_buffer("hop_eigenvectors", eigenvectors)
 
-        # One learnable response per hop-frequency mode and feature channel.
-        # Zero init makes the residual branch initially contribute zero.
-        self.spectral_response = nn.Parameter(
-            torch.zeros(num_heads, head_dim)
+        # ── S2GNN-style filter: GaussianSmearing + bottleneck MLP ──
+        # Eigenvalues of the normalized Laplacian lie in [0, 2].
+        self.distance_expansion = GaussianSmearing(
+            start=0.0, stop=2.0, num_gaussians=num_gaussians,
         )
+        bottleneck_d = max(1, int(basis_bottleneck * head_dim))
+        self.filter_mlp = nn.Sequential(
+            nn.Linear(num_gaussians, bottleneck_d, bias=False),
+            nn.Linear(bottleneck_d, head_dim),
+        )
+
         self.drop = nn.Dropout(dropout)
+
+    def _tukey_window(self, eigenvalues: torch.Tensor) -> torch.Tensor:
+        """One-sided Tukey (tapered-cosine) window.
+
+        Uses a small wiggle (2.5%) beyond the maximum eigenvalue to ensure
+        the last eigenvalue still receives some contribution, matching
+        the S2GNN default behaviour.
+        """
+        alpha = self.tukey_alpha
+        M = eigenvalues.max()
+        if M < 1e-9:
+            return torch.ones_like(eigenvalues)
+        M = M * 1.025  # wiggle factor
+        normed = eigenvalues / M
+        window = torch.cos(
+            torch.pi * (normed - alpha) / (2 - 2 * alpha)
+        )
+        window = window.clamp_min(0.0)
+        window[normed <= alpha] = 1.0
+        return window
 
     def forward(
         self,
@@ -386,10 +446,14 @@ class SpectralCrossHopMixer(nn.Module):
         # Graph Fourier transform over the hop axis: V^T x.
         x_hat = torch.einsum("kh,bnhd->bnkd", V, x)
 
-        # Mode-wise, channel-wise filtering.
-        x_hat = x_hat * self.spectral_response.view(
-            1, 1, self.H, self.Dh
-        )
+        # ── S2GNN-style filter: GaussianSmearing -> bottleneck MLP ──
+        basis = self.distance_expansion(self.hop_eigenvalues)  # (H, num_gaussians)
+        response = self.filter_mlp(basis)                      # (H, Dh)
+        x_hat = x_hat * response.view(1, 1, self.H, self.Dh)
+
+        # ── Tukey window ──
+        window = self._tukey_window(self.hop_eigenvalues)       # (H,)
+        x_hat = x_hat * window.view(1, 1, self.H, 1)
 
         # Inverse graph Fourier transform: V x_hat.
         out = torch.einsum("hk,bnkd->bnhd", V, x_hat)

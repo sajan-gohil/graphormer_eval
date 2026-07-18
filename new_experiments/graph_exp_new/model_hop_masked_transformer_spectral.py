@@ -47,6 +47,29 @@ from torch_geometric.nn import global_add_pool, global_mean_pool, GATv2Conv
 from models import build_node_encoder, build_bond_encoder
 
 
+# ---------------------------------------------------------------------------
+# GaussianSmearing: maps scalars to Gaussian basis function vectors.
+# Equivalent to torch_geometric.nn.models.schnet.GaussianSmearing.
+# ---------------------------------------------------------------------------
+class GaussianSmearing(nn.Module):
+    """Expand scalar distances into a vector of Gaussian basis values.
+
+    ``num_gaussians`` centers are placed uniformly in [start, stop].
+    """
+
+    def __init__(self, start: float = 0.0, stop: float = 2.0,
+                 num_gaussians: int = 50):
+        super().__init__()
+        offset = torch.linspace(start, stop, num_gaussians)
+        self.register_buffer('offset', offset)
+        self.coeff = -0.5 / max((offset[1] - offset[0]).item(), 1e-6) ** 2
+
+    def forward(self, dist: torch.Tensor) -> torch.Tensor:
+        dist = dist.unsqueeze(-1) - self.offset
+        return torch.exp(self.coeff * dist.pow(2))
+
+
+
 _NEG_INF = float("-inf")
 
 
@@ -332,8 +355,17 @@ class SpectralBandFilter(nn.Module):
 
     Uses the first ``spectral_k`` eigenpairs of the symmetric normalized
     Laplacian.  For each band, node features are projected to one head-width,
-    gathered with V^T, modulated by a smooth RBF-parameterized response
-    g_hat(lambda), and scattered back with V.
+    gathered with V^T, modulated by a learned spectral filter g(lambda),
+    windowed, and scattered back with V.
+
+    The filter follows the S2GNN pipeline (Rampášek et al.):
+      - GaussianSmearing maps each eigenvalue to a basis of ``num_gaussians``
+        evenly-spaced Gaussians over [0, frequency_cutoff].
+      - A bottleneck MLP (num_gaussians -> bottleneck -> num_bands) produces
+        per-band filter magnitudes.
+      - A Tukey (tapered-cosine) window smoothly suppresses the filter
+        response at the spectral truncation boundary.
+    A simplified GLU feature gate is applied before spectral projection.
 
     Returns:
         residual: (B, N, hidden_dim)
@@ -344,51 +376,90 @@ class SpectralBandFilter(nn.Module):
         self,
         hidden_dim: int,
         num_heads: int,
-        spectral_k: int = 16,
+        spectral_k: int = 150,
         num_bands: int = 4,
-        num_rbf: int = 16,
+        num_gaussians: int = 60,
+        basis_bottleneck: float = 0.2,
+        frequency_cutoff: float = 0.7,
+        tukey_alpha: float = 0.5,
         dropout: float = 0.0,
+        glu_bottleneck: float = 0.05,
     ):
         super().__init__()
         self.spectral_k = spectral_k
         self.num_bands = num_bands
         self.head_dim = hidden_dim // num_heads
-        self.num_rbf = num_rbf
+        self.frequency_cutoff = frequency_cutoff
+        self.tukey_alpha = tukey_alpha
 
+        # ── GLU feature gate (S2GNN SpecFeatureTransformLayer, simplified) ──
+        # Equivalent to: F.silu(Linear(d -> bn*d -> d)) * x
+        glu_inner = max(1, int(glu_bottleneck * hidden_dim))
+        self.glu_down = nn.Linear(hidden_dim, glu_inner, bias=False)
+        self.glu_up = nn.Linear(glu_inner, hidden_dim)
+
+        # ── Input projection ──
         self.in_proj = nn.Linear(hidden_dim, num_bands * self.head_dim, bias=False)
-        self.filter_coeff = nn.Parameter(
-            torch.empty(num_bands, num_rbf, self.head_dim)
+
+        # ── Learnable spectral filter: GaussianSmearing + bottleneck MLP ──
+        # (S2GNN BasisFunctionsLayer)
+        self.distance_expansion = GaussianSmearing(
+            start=0.0, stop=frequency_cutoff, num_gaussians=num_gaussians,
         )
-        nn.init.normal_(self.filter_coeff, mean=0.0, std=0.02)
+        bottleneck_d = max(1, int(basis_bottleneck * num_bands))
+        self.filter_mlp = nn.Sequential(
+            nn.Linear(num_gaussians, bottleneck_d, bias=False),
+            nn.Linear(bottleneck_d, num_bands),
+        )
 
-        centers = torch.linspace(0.0, 2.0, num_rbf)
-        self.register_buffer("rbf_centers", centers)
-        spacing = 2.0 / max(1, num_rbf - 1)
-        self.rbf_width = spacing
-
+        # ── Output ──
         self.residual_proj = nn.Linear(num_bands * self.head_dim, hidden_dim)
         self.drop = nn.Dropout(dropout)
+
+    def _tukey_window(self, eigenvalues: torch.Tensor) -> torch.Tensor:
+        """One-sided Tukey (tapered-cosine) window.
+
+        Window = 1.0 for eigenvalues <= alpha * cutoff (full pass),
+        cosine taper to 0 in (alpha * cutoff, cutoff], 0 beyond.
+        """
+        alpha = self.tukey_alpha
+        cutoff = self.frequency_cutoff
+        if cutoff <= 0:
+            return torch.ones_like(eigenvalues)
+        normed = eigenvalues / cutoff
+        window = torch.cos(
+            torch.pi * (normed - alpha) / (2 - 2 * alpha)
+        )
+        window = window.clamp_min(0.0)
+        window[normed <= alpha] = 1.0
+        window[normed > 1.0] = 0.0
+        return window
 
     def forward(self, x, eigvecs, eigvals, eigmask):
         # x: (B,N,d), eigvecs: (B,N,K), eigvals/eigmask: (B,K)
         B, N, _ = x.shape
         K = eigvecs.shape[-1]
+
+        # ── GLU feature gate ──
+        x = F.silu(self.glu_up(self.glu_down(x))) * x  # (B, N, d)
+
         z = self.in_proj(x).view(B, N, self.num_bands, self.head_dim)
 
-        # Gather: (B,K,N) x (B,N,S,Dh) -> (B,K,S,Dh)
+        # Gather: V^T z   (B,N,K)^T x (B,N,S,Dh) -> (B,K,S,Dh)
         z_hat = torch.einsum("bnk,bnsd->bksd", eigvecs, z)
 
-        # Smooth RBF parameterization of g_hat(lambda).
-        phi = torch.exp(
-            -0.5 * ((eigvals.unsqueeze(-1) - self.rbf_centers) / self.rbf_width) ** 2
-        )  # (B,K,R)
-        response = torch.einsum(
-            "bkr,srd->bksd", phi, self.filter_coeff
-        )  # (B,K,S,Dh)
-        response = response * eigmask[:, :, None, None].to(response.dtype)
+        # ── S2GNN-style filter: GaussianSmearing -> bottleneck MLP ──
+        basis = self.distance_expansion(eigvals)          # (B, K, num_gaussians)
+        response = self.filter_mlp(basis)                 # (B, K, num_bands)
+        response = response * eigmask.unsqueeze(-1).to(response.dtype)
+        # Broadcast: (B, K, S, 1) * (B, K, S, Dh)
+        z_hat = z_hat * response.unsqueeze(-1)
 
-        # Apply + Scatter.
-        z_hat = z_hat * response
+        # ── Tukey window ──
+        window = self._tukey_window(eigvals)               # (B, K)
+        z_hat = z_hat * window[:, :, None, None]
+
+        # Scatter: V z_hat   (B,N,K) x (B,K,S,Dh) -> (B,N,S,Dh)
         bands = torch.einsum("bnk,bksd->bnsd", eigvecs, z_hat)
         bands = self.drop(bands)
         residual = self.residual_proj(bands.reshape(B, N, -1))
@@ -864,8 +935,13 @@ class HopMaskedTransformerLayer(nn.Module):
         cross_hop_hop_embedding: bool = False,
         cross_hop_membership: Optional[torch.Tensor] = None,
         use_spectral_branch: bool = False,
-        spectral_k: int = 16,
+        spectral_k: int = 150,
         num_spectral_bands: int = 4,
+        num_gaussians: int = 60,
+        basis_bottleneck: float = 0.2,
+        frequency_cutoff: float = 0.7,
+        tukey_alpha: float = 0.5,
+        glu_bottleneck: float = 0.05,
     ):
         super().__init__()
         self.use_moe_gating = use_moe_gating
@@ -888,7 +964,12 @@ class HopMaskedTransformerLayer(nn.Module):
                 num_heads=num_heads,
                 spectral_k=spectral_k,
                 num_bands=num_spectral_bands,
+                num_gaussians=num_gaussians,
+                basis_bottleneck=basis_bottleneck,
+                frequency_cutoff=frequency_cutoff,
+                tukey_alpha=tukey_alpha,
                 dropout=dropout,
+                glu_bottleneck=glu_bottleneck,
             )
             self.cross_scale = SharedCrossScaleMixer(
                 num_heads=num_heads,
@@ -1090,8 +1171,13 @@ class HopMaskedTransformerModel(nn.Module):
         hop_offset_aug_prob: float = 0.2,
         hop_offset_max: int = 0,
         use_spectral_branch: bool = True,
-        spectral_k: int = 16,
+        spectral_k: int = 150,
         num_spectral_bands: int = 4,
+        num_gaussians: int = 60,
+        basis_bottleneck: float = 0.2,
+        frequency_cutoff: float = 0.7,
+        tukey_alpha: float = 0.5,
+        glu_bottleneck: float = 0.05,
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -1192,6 +1278,11 @@ class HopMaskedTransformerModel(nn.Module):
                     use_spectral_branch=use_spectral_branch,
                     spectral_k=spectral_k,
                     num_spectral_bands=num_spectral_bands,
+                    num_gaussians=num_gaussians,
+                    basis_bottleneck=basis_bottleneck,
+                    frequency_cutoff=frequency_cutoff,
+                    tukey_alpha=tukey_alpha,
+                    glu_bottleneck=glu_bottleneck,
                 )
             )
         self.layers = nn.ModuleList(layers)
@@ -1381,7 +1472,7 @@ class HopMaskedTransformerModel(nn.Module):
             if not idx:
                 # All hops in the head's set exceed K_runtime (the dataset's
                 # diameter cap).  Every sample gets global attention.
-                out[:, h] = True
+                # out[:, h] = True
                 continue
             stacked = dist_masks[:, idx].bool().any(dim=1)  # (B, N, N)
             # For each sample, check whether the hop band contains any
