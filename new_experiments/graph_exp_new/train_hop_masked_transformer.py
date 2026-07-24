@@ -489,8 +489,236 @@ def main():
     print(f"BEST: val {ml} {best_val:.4f} | test {ml} {best_test:.4f} "
           f"(epoch {best_epoch})", flush=True)
 
+    # ------------------------------------------------------------------ #
+    # Post-training: error-by-diameter analysis                            #
+    # ------------------------------------------------------------------ #
+    print("\n=== Error-by-diameter analysis ===", flush=True)
+    ckpt_path = os.path.join(args.save_dir, f"best_{dataset_name}.pt")
+    if os.path.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location=args.device)
+        model.load_state_dict(ckpt["model"])
+        print(f"Loaded best checkpoint (epoch {ckpt.get('epoch', '?')})", flush=True)
+    else:
+        print("No best checkpoint found, using final model weights.", flush=True)
+
+    _plot_error_by_diameter(
+        model, train_loader, test_loader, task, args.device,
+        dataset_name, args.save_dir,
+    )
+
+
+def _get_diameters_from_loader(loader):
+    """Extract per-graph diameter from the DistMaskDataset backing a loader.
+
+    Diameter = shape[0] - 1 of each graph's pre-padded distance mask (the
+    number of hop levels K_i minus the self-loop level 0).
+    """
+    ds = loader.dataset  # DistMaskDataset
+    diameters = []
+    for i in range(len(ds)):
+        _, dm = ds[i]  # dm is (K_i, N_i, N_i) numpy array
+        diameters.append(dm.shape[0] - 1)
+    return np.array(diameters, dtype=np.int32)
+
+
+@torch.no_grad()
+def _collect_per_sample_loss(model, loader, task, device):
+    """Run model over *loader* and return a 1-D array of per-sample losses.
+
+    Works for graph-level tasks (multi_label, regression, multiclass).
+    For node-level tasks, the loss is averaged over valid nodes within each
+    graph — the result is still one scalar per graph.
+    """
+    import torch.nn.functional as F
+
+    model.eval()
+    per_sample_losses = []
+
+    for batch in loader:
+        pyg_batch, dist_masks, node_masks = _move_batch_to_device(batch, device)
+        logits, _, aux_loss = model(pyg_batch, dist_masks, node_masks)
+
+        # --- Per-sample loss (unreduced) ---
+        if task.task_type == "multi_label":
+            y = pyg_batch.y.float()
+            # (B, C) -> mean over C -> (B,)
+            loss_per = F.binary_cross_entropy_with_logits(
+                logits, y, reduction="none"
+            ).mean(dim=-1)
+        elif task.task_type == "regression":
+            y = pyg_batch.y.float()
+            # (B, K) -> mean over K -> (B,)
+            loss_per = F.l1_loss(logits, y, reduction="none")
+            if loss_per.dim() > 1:
+                loss_per = loss_per.mean(dim=-1)
+        elif task.task_type == "multiclass":
+            y = pyg_batch.y.long()
+            if y.dim() > 1:
+                y = y.view(-1)
+            if task.level == "node":
+                # Node-level: aggregate per-node losses back to per-graph
+                loss_all = F.cross_entropy(logits, y, ignore_index=-1,
+                                           reduction="none")  # (total_nodes,)
+                # Use pyg_batch.batch to group nodes -> graphs
+                batch_ids = pyg_batch.batch  # (total_nodes,)
+                B = int(batch_ids.max().item()) + 1
+                graph_losses = []
+                for g in range(B):
+                    mask = (batch_ids == g) & (y != -1)
+                    if mask.any():
+                        graph_losses.append(loss_all[mask].mean().item())
+                    else:
+                        graph_losses.append(0.0)
+                loss_per = torch.tensor(graph_losses)
+            else:
+                loss_per = F.cross_entropy(logits, y, reduction="none")  # (B,)
+        else:
+            raise ValueError(f"Unknown task_type: {task.task_type}")
+
+        per_sample_losses.append(loss_per.detach().cpu().numpy())
+
+    return np.concatenate(per_sample_losses, axis=0)
+
+
+def _plot_error_by_diameter(model, train_loader, test_loader, task, device,
+                            dataset_name, save_dir):
+    """Compute per-sample loss, group by graph diameter, and generate box plots."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    # --- Collect diameters ---
+    print("  Extracting graph diameters...", flush=True)
+    train_diameters = _get_diameters_from_loader(train_loader)
+    test_diameters = _get_diameters_from_loader(test_loader)
+
+    # --- Collect per-sample losses ---
+    print("  Computing per-sample losses (train)...", flush=True)
+    train_losses = _collect_per_sample_loss(model, train_loader, task, device)
+    print("  Computing per-sample losses (test)...", flush=True)
+    test_losses = _collect_per_sample_loss(model, test_loader, task, device)
+
+    # Verify alignment
+    assert len(train_diameters) == len(train_losses), \
+        f"Train mismatch: {len(train_diameters)} diameters vs {len(train_losses)} losses"
+    assert len(test_diameters) == len(test_losses), \
+        f"Test mismatch: {len(test_diameters)} diameters vs {len(test_losses)} losses"
+
+    # --- Print summary statistics per diameter ---
+    all_diameters = np.unique(np.concatenate([train_diameters, test_diameters]))
+    print(f"\n  {'Diam':>5s} | {'Train N':>8s} {'Train Mean':>11s} {'Train Med':>10s} "
+          f"| {'Test N':>7s} {'Test Mean':>10s} {'Test Med':>9s}", flush=True)
+    print("  " + "-" * 75, flush=True)
+    for d in sorted(all_diameters):
+        tr_mask = train_diameters == d
+        te_mask = test_diameters == d
+        tr_n = tr_mask.sum()
+        te_n = te_mask.sum()
+        tr_mean = np.mean(train_losses[tr_mask]) if tr_n > 0 else float("nan")
+        tr_med = np.median(train_losses[tr_mask]) if tr_n > 0 else float("nan")
+        te_mean = np.mean(test_losses[te_mask]) if te_n > 0 else float("nan")
+        te_med = np.median(test_losses[te_mask]) if te_n > 0 else float("nan")
+        print(f"  {d:5d} | {tr_n:8d} {tr_mean:11.5f} {tr_med:10.5f} "
+              f"| {te_n:7d} {te_mean:10.5f} {te_med:9.5f}", flush=True)
+
+    # --- Box plot ---
+    fig, axes = plt.subplots(1, 2, figsize=(18, 7), sharey=True)
+
+    for ax, (diameters, losses, label) in zip(
+        axes,
+        [(train_diameters, train_losses, "Train"),
+         (test_diameters, test_losses, "Test")],
+    ):
+        unique_d = sorted(np.unique(diameters))
+        grouped = [losses[diameters == d] for d in unique_d]
+        counts = [len(g) for g in grouped]
+
+        bp = ax.boxplot(
+            grouped,
+            positions=range(len(unique_d)),
+            widths=0.6,
+            patch_artist=True,
+            showfliers=True,
+            flierprops=dict(marker=".", markersize=2, alpha=0.3),
+            medianprops=dict(color="black", linewidth=1.5),
+        )
+        # Color boxes
+        color = "#4C72B0" if label == "Train" else "#DD8452"
+        for patch in bp["boxes"]:
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+
+        ax.set_xticks(range(len(unique_d)))
+        ax.set_xticklabels(
+            [f"{d}\n(n={c})" for d, c in zip(unique_d, counts)],
+            fontsize=7, rotation=45, ha="right",
+        )
+        ax.set_xlabel("Graph Diameter", fontsize=11)
+        ax.set_ylabel("Per-sample Loss" if ax == axes[0] else "", fontsize=11)
+        ax.set_title(f"{label} Set — {dataset_name}", fontsize=13)
+        ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle(
+        f"Per-sample Loss Distribution by Graph Diameter — {dataset_name}",
+        fontsize=14, fontweight="bold",
+    )
+    plt.tight_layout()
+    plot_path = os.path.join(save_dir, f"error_by_diameter_{dataset_name}.png")
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"\n  Plot saved to: {plot_path}", flush=True)
+
+    # --- Also save a violin plot for denser view ---
+    fig2, axes2 = plt.subplots(1, 2, figsize=(18, 7), sharey=True)
+
+    for ax, (diameters, losses, label) in zip(
+        axes2,
+        [(train_diameters, train_losses, "Train"),
+         (test_diameters, test_losses, "Test")],
+    ):
+        unique_d = sorted(np.unique(diameters))
+        grouped = [losses[diameters == d] for d in unique_d]
+        counts = [len(g) for g in grouped]
+
+        # Only include groups with >= 2 points for violin (needs variance)
+        valid_idx = [i for i, g in enumerate(grouped) if len(g) >= 2]
+        if valid_idx:
+            valid_grouped = [grouped[i] for i in valid_idx]
+            valid_positions = list(range(len(valid_idx)))
+            valid_unique_d = [unique_d[i] for i in valid_idx]
+            valid_counts = [counts[i] for i in valid_idx]
+
+            vp = ax.violinplot(
+                valid_grouped,
+                positions=valid_positions,
+                showmedians=True,
+                showextrema=True,
+            )
+            color = "#4C72B0" if label == "Train" else "#DD8452"
+            for body in vp["bodies"]:
+                body.set_facecolor(color)
+                body.set_alpha(0.6)
+
+            ax.set_xticks(valid_positions)
+            ax.set_xticklabels(
+                [f"{d}\n(n={c})" for d, c in zip(valid_unique_d, valid_counts)],
+                fontsize=7, rotation=45, ha="right",
+            )
+        ax.set_xlabel("Graph Diameter", fontsize=11)
+        ax.set_ylabel("Per-sample Loss" if ax == axes2[0] else "", fontsize=11)
+        ax.set_title(f"{label} Set — {dataset_name}", fontsize=13)
+        ax.grid(axis="y", alpha=0.3)
+
+    fig2.suptitle(
+        f"Per-sample Loss Distribution by Graph Diameter (Violin) — {dataset_name}",
+        fontsize=14, fontweight="bold",
+    )
+    plt.tight_layout()
+    plot_path2 = os.path.join(save_dir, f"error_by_diameter_violin_{dataset_name}.png")
+    fig2.savefig(plot_path2, dpi=150, bbox_inches="tight")
+    plt.close(fig2)
+    print(f"  Violin plot saved to: {plot_path2}", flush=True)
+
 
 if __name__ == "__main__":
     main()
-
-
