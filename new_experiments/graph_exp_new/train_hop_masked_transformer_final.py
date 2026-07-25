@@ -720,22 +720,34 @@ def main():
         print("No best checkpoint found, using final model weights.", flush=True)
 
     _plot_error_by_diameter(
-        model, train_loader, test_loader, task, args.device,
+        model, train_loader, val_loader, test_loader, task, args.device,
         dataset_name, args.save_dir,
     )
 
 
 def _get_diameters_from_loader(loader):
-    """Extract per-graph diameter from the DistMaskDataset backing a loader.
+    """Extract per-graph **true** diameter from the underlying PyG graphs.
 
-    Diameter = shape[0] - 1 of each graph's pre-padded distance mask (the
-    number of hop levels K_i minus the self-loop level 0).
+    Computes the all-pairs shortest path via Floyd-Warshall on each graph's
+    adjacency matrix and returns the maximum finite distance (the diameter).
+    This is independent of the ``max_hops`` truncation applied to the
+    distance masks, so diameters beyond ``max_hops`` are reported correctly.
     """
+    from scipy.sparse.csgraph import floyd_warshall as fw
+
     ds = loader.dataset  # DistMaskDataset
+    base = getattr(ds, "pyg_dataset", ds)  # unwrap to raw PyG dataset
     diameters = []
-    for i in range(len(ds)):
-        _, dm = ds[i]  # dm is (K_i, N_i, N_i) numpy array
-        diameters.append(dm.shape[0] - 1)
+    for i in range(len(base)):
+        g = base[i]
+        n = g.x.shape[0]
+        adj = np.zeros((n, n), dtype=np.float32)
+        ei = g.edge_index.numpy()
+        adj[ei[0], ei[1]] = 1.0
+        dist = fw(adj, directed=False, unweighted=True)
+        finite = dist[np.isfinite(dist)]
+        diam = int(finite.max()) if finite.size > 0 else 0
+        diameters.append(diam)
     return np.array(diameters, dtype=np.int32)
 
 
@@ -798,8 +810,8 @@ def _collect_per_sample_loss(model, loader, task, device):
     return np.concatenate(per_sample_losses, axis=0)
 
 
-def _plot_error_by_diameter(model, train_loader, test_loader, task, device,
-                            dataset_name, save_dir):
+def _plot_error_by_diameter(model, train_loader, val_loader, test_loader,
+                            task, device, dataset_name, save_dir):
     """Compute per-sample loss, group by graph diameter, and generate box plots."""
     import matplotlib
     matplotlib.use("Agg")
@@ -808,45 +820,58 @@ def _plot_error_by_diameter(model, train_loader, test_loader, task, device,
     # --- Collect diameters ---
     print("  Extracting graph diameters...", flush=True)
     train_diameters = _get_diameters_from_loader(train_loader)
+    val_diameters = _get_diameters_from_loader(val_loader)
     test_diameters = _get_diameters_from_loader(test_loader)
 
     # --- Collect per-sample losses ---
     print("  Computing per-sample losses (train)...", flush=True)
     train_losses = _collect_per_sample_loss(model, train_loader, task, device)
+    print("  Computing per-sample losses (val)...", flush=True)
+    val_losses = _collect_per_sample_loss(model, val_loader, task, device)
     print("  Computing per-sample losses (test)...", flush=True)
     test_losses = _collect_per_sample_loss(model, test_loader, task, device)
 
     # Verify alignment
     assert len(train_diameters) == len(train_losses), \
         f"Train mismatch: {len(train_diameters)} diameters vs {len(train_losses)} losses"
+    assert len(val_diameters) == len(val_losses), \
+        f"Val mismatch: {len(val_diameters)} diameters vs {len(val_losses)} losses"
     assert len(test_diameters) == len(test_losses), \
         f"Test mismatch: {len(test_diameters)} diameters vs {len(test_losses)} losses"
 
     # --- Print summary statistics per diameter ---
-    all_diameters = np.unique(np.concatenate([train_diameters, test_diameters]))
+    all_diameters = np.unique(np.concatenate(
+        [train_diameters, val_diameters, test_diameters]))
     print(f"\n  {'Diam':>5s} | {'Train N':>8s} {'Train Mean':>11s} {'Train Med':>10s} "
+          f"| {'Val N':>6s} {'Val Mean':>9s} {'Val Med':>8s} "
           f"| {'Test N':>7s} {'Test Mean':>10s} {'Test Med':>9s}", flush=True)
-    print("  " + "-" * 75, flush=True)
+    print("  " + "-" * 105, flush=True)
     for d in sorted(all_diameters):
         tr_mask = train_diameters == d
+        va_mask = val_diameters == d
         te_mask = test_diameters == d
         tr_n = tr_mask.sum()
+        va_n = va_mask.sum()
         te_n = te_mask.sum()
         tr_mean = np.mean(train_losses[tr_mask]) if tr_n > 0 else float("nan")
         tr_med = np.median(train_losses[tr_mask]) if tr_n > 0 else float("nan")
+        va_mean = np.mean(val_losses[va_mask]) if va_n > 0 else float("nan")
+        va_med = np.median(val_losses[va_mask]) if va_n > 0 else float("nan")
         te_mean = np.mean(test_losses[te_mask]) if te_n > 0 else float("nan")
         te_med = np.median(test_losses[te_mask]) if te_n > 0 else float("nan")
         print(f"  {d:5d} | {tr_n:8d} {tr_mean:11.5f} {tr_med:10.5f} "
+              f"| {va_n:6d} {va_mean:9.5f} {va_med:8.5f} "
               f"| {te_n:7d} {te_mean:10.5f} {te_med:9.5f}", flush=True)
 
-    # --- Box plot ---
-    fig, axes = plt.subplots(1, 2, figsize=(18, 7), sharey=True)
+    # --- Box plot (independent y-axes) ---
+    split_data = [
+        (train_diameters, train_losses, "Train", "#4C72B0"),
+        (val_diameters, val_losses, "Val", "#55A868"),
+        (test_diameters, test_losses, "Test", "#DD8452"),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(24, 7), sharey=False)
 
-    for ax, (diameters, losses, label) in zip(
-        axes,
-        [(train_diameters, train_losses, "Train"),
-         (test_diameters, test_losses, "Test")],
-    ):
+    for ax, (diameters, losses, label, color) in zip(axes, split_data):
         unique_d = sorted(np.unique(diameters))
         grouped = [losses[diameters == d] for d in unique_d]
         counts = [len(g) for g in grouped]
@@ -860,8 +885,6 @@ def _plot_error_by_diameter(model, train_loader, test_loader, task, device,
             flierprops=dict(marker=".", markersize=2, alpha=0.3),
             medianprops=dict(color="black", linewidth=1.5),
         )
-        # Color boxes
-        color = "#4C72B0" if label == "Train" else "#DD8452"
         for patch in bp["boxes"]:
             patch.set_facecolor(color)
             patch.set_alpha(0.7)
@@ -872,7 +895,7 @@ def _plot_error_by_diameter(model, train_loader, test_loader, task, device,
             fontsize=7, rotation=45, ha="right",
         )
         ax.set_xlabel("Graph Diameter", fontsize=11)
-        ax.set_ylabel("Per-sample Loss" if ax == axes[0] else "", fontsize=11)
+        ax.set_ylabel("Per-sample Loss", fontsize=11)
         ax.set_title(f"{label} Set — {dataset_name}", fontsize=13)
         ax.grid(axis="y", alpha=0.3)
 
@@ -886,14 +909,10 @@ def _plot_error_by_diameter(model, train_loader, test_loader, task, device,
     plt.close(fig)
     print(f"\n  Plot saved to: {plot_path}", flush=True)
 
-    # --- Also save a violin plot for denser view ---
-    fig2, axes2 = plt.subplots(1, 2, figsize=(18, 7), sharey=True)
+    # --- Also save a violin plot for denser view (independent y-axes) ---
+    fig2, axes2 = plt.subplots(1, 3, figsize=(24, 7), sharey=False)
 
-    for ax, (diameters, losses, label) in zip(
-        axes2,
-        [(train_diameters, train_losses, "Train"),
-         (test_diameters, test_losses, "Test")],
-    ):
+    for ax, (diameters, losses, label, color) in zip(axes2, split_data):
         unique_d = sorted(np.unique(diameters))
         grouped = [losses[diameters == d] for d in unique_d]
         counts = [len(g) for g in grouped]
@@ -912,7 +931,6 @@ def _plot_error_by_diameter(model, train_loader, test_loader, task, device,
                 showmedians=True,
                 showextrema=True,
             )
-            color = "#4C72B0" if label == "Train" else "#DD8452"
             for body in vp["bodies"]:
                 body.set_facecolor(color)
                 body.set_alpha(0.6)
@@ -923,7 +941,7 @@ def _plot_error_by_diameter(model, train_loader, test_loader, task, device,
                 fontsize=7, rotation=45, ha="right",
             )
         ax.set_xlabel("Graph Diameter", fontsize=11)
-        ax.set_ylabel("Per-sample Loss" if ax == axes2[0] else "", fontsize=11)
+        ax.set_ylabel("Per-sample Loss", fontsize=11)
         ax.set_title(f"{label} Set — {dataset_name}", fontsize=13)
         ax.grid(axis="y", alpha=0.3)
 
