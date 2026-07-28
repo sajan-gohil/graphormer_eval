@@ -72,7 +72,6 @@ def precompute_distance_masks(dataset, cache_path, max_hops=40,
     _slices = dataset.slices
 
     x_slices = _slices['x']             # (num_graphs + 1,)
-    ei_slices = _slices['edge_index']   # (num_graphs + 1,)
     all_ei = _data.edge_index           # (2, total_edges)
     num_graphs = len(x_slices) - 1
 
@@ -82,17 +81,25 @@ def precompute_distance_masks(dataset, cache_path, max_hops=40,
         flush=True,
     )
 
-    # Build adjacency matrices directly from raw tensors + slices.
+    # Build adjacency matrices directly from raw tensors + node slices.
     # This avoids dataset[i] which can fail when set_dataset_attr has
-    # added graph-level attributes with incompatible slice lengths.
+    # added graph-level attributes with incompatible slice lengths, and it
+    # remains correct even if the batched edge_index was globally transformed
+    # after collation (which can invalidate the original edge slices).
     adjs = []
     for i in range(num_graphs):
-        n = int(x_slices[i + 1]) - int(x_slices[i])
-        ei_start = int(ei_slices[i])
-        ei_end = int(ei_slices[i + 1])
-        ei = all_ei[:, ei_start:ei_end].numpy()
+        node_start = int(x_slices[i])
+        node_end = int(x_slices[i + 1])
+        n = node_end - node_start
+
+        edge_mask = (
+            (all_ei[0] >= node_start) & (all_ei[0] < node_end) &
+            (all_ei[1] >= node_start) & (all_ei[1] < node_end)
+        )
+        ei = all_ei[:, edge_mask].numpy()
+
         # Remap to local (0-based) node indices.
-        ei = ei - int(x_slices[i])
+        ei = ei - node_start
         adj = np.zeros((n, n), dtype=np.float32)
         adj[ei[0], ei[1]] = 1.0
         adjs.append(adj)
