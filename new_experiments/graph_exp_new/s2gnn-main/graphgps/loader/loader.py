@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Callable
 import torch
@@ -410,13 +411,53 @@ def create_loader():
 
     """
     dataset = create_dataset()
-    # train loader
+
+    # ---- Hop-masked transformer: precompute / load distance masks ----------
+    use_hop_masked = (hasattr(cfg.gnn, 'hop_masked')
+                      and getattr(cfg.gnn.hop_masked, 'enable', False))
+
+    all_dist_masks = None
+    if use_hop_masked:
+        from graphgps.loader.dist_mask_utils import (
+            precompute_distance_masks,
+            DistMaskGraphDataset,
+            collate_s2gnn_dist_masks,
+        )
+        from torch.utils.data import DataLoader as TorchDataLoader
+        from functools import partial
+
+        max_hops = cfg.gnn.hop_masked.num_hops
+        cache_dir = os.path.join(cfg.dataset.dir,
+                                 cfg.dataset.name.replace('-', '_'),
+                                 'dist_masks')
+        cache_path = os.path.join(cache_dir, 'all.pkl')
+
+        logging.info(f"[HopMasked] Precomputing / loading distance masks "
+                     f"(max_hops={max_hops})...")
+        all_dist_masks = precompute_distance_masks(
+            dataset, cache_path, max_hops=max_hops, num_workers=8,
+        )
+        collate_fn = partial(collate_s2gnn_dist_masks, max_hops=max_hops)
+
+    # ---- Build loaders per split ------------------------------------------
     if cfg.dataset.task == 'graph':
-        id = dataset.data['train_graph_index']
-        loaders = [
-            get_loader(dataset[id], cfg.train.sampler, cfg.train.batch_size,
-                       shuffle=True)
-        ]
+        train_id = dataset.data['train_graph_index']
+
+        if use_hop_masked:
+            train_dm = [all_dist_masks[i] for i in train_id.tolist()]
+            wrapped = DistMaskGraphDataset(dataset[train_id], train_dm)
+            pw = cfg.num_workers > 0
+            loaders = [
+                TorchDataLoader(wrapped, batch_size=cfg.train.batch_size,
+                                shuffle=True, num_workers=cfg.num_workers,
+                                collate_fn=collate_fn, pin_memory=True,
+                                persistent_workers=pw)
+            ]
+        else:
+            loaders = [
+                get_loader(dataset[train_id], cfg.train.sampler,
+                           cfg.train.batch_size, shuffle=True)
+            ]
         delattr(dataset.data, 'train_graph_index')
     else:
         loaders = [
@@ -431,10 +472,22 @@ def create_loader():
     for i in range(cfg.share.num_splits - 1):
         if cfg.dataset.task == 'graph':
             split_names = ['val_graph_index', 'test_graph_index']
-            id = dataset.data[split_names[i]]
-            loaders.append(
-                get_loader(dataset[id], cfg.val.sampler, cfg.train.batch_size,
-                           shuffle=False))
+            split_id = dataset.data[split_names[i]]
+
+            if use_hop_masked:
+                split_dm = [all_dist_masks[j] for j in split_id.tolist()]
+                wrapped = DistMaskGraphDataset(dataset[split_id], split_dm)
+                pw = cfg.num_workers > 0
+                loaders.append(
+                    TorchDataLoader(wrapped, batch_size=cfg.train.batch_size,
+                                    shuffle=False, num_workers=cfg.num_workers,
+                                    collate_fn=collate_fn, pin_memory=True,
+                                    persistent_workers=pw)
+                )
+            else:
+                loaders.append(
+                    get_loader(dataset[split_id], cfg.val.sampler,
+                               cfg.train.batch_size, shuffle=False))
             delattr(dataset.data, split_names[i])
         else:
             loaders.append(
