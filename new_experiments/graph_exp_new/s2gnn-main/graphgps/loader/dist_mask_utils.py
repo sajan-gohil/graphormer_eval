@@ -64,19 +64,37 @@ def precompute_distance_masks(dataset, cache_path, max_hops=40,
         with open(cache_path, "rb") as f:
             return pickle.load(f)
 
+    # Determine number of graphs.  For InMemoryDatasets the length is
+    # derived from the slices, but after set_dataset_attr() the slices
+    # become inconsistent.  The 'x' slices are always reliable because
+    # they are set during the original dataset construction and never
+    # overwritten by the s2gnn loader.
+    _data = getattr(dataset, '_data', None) or dataset.data
+    _slices = dataset.slices
+
+    x_slices = _slices['x']             # (num_graphs + 1,)
+    ei_slices = _slices['edge_index']   # (num_graphs + 1,)
+    all_ei = _data.edge_index           # (2, total_edges)
+    num_graphs = len(x_slices) - 1
+
     print(
-        f"  Computing distance masks for {len(dataset)} graphs "
+        f"  Computing distance masks for {num_graphs} graphs "
         f"(max_hops={max_hops})...",
         flush=True,
     )
 
-    # Build adjacency matrices.
+    # Build adjacency matrices directly from raw tensors + slices.
+    # This avoids dataset[i] which can fail when set_dataset_attr has
+    # added graph-level attributes with incompatible slice lengths.
     adjs = []
-    for i in range(len(dataset)):
-        g = dataset[i]
-        num_nodes = g.x.shape[0]
-        adj = np.zeros((num_nodes, num_nodes), dtype=np.float32)
-        ei = g.edge_index.numpy()
+    for i in range(num_graphs):
+        n = int(x_slices[i + 1]) - int(x_slices[i])
+        ei_start = int(ei_slices[i])
+        ei_end = int(ei_slices[i + 1])
+        ei = all_ei[:, ei_start:ei_end].numpy()
+        # Remap to local (0-based) node indices.
+        ei = ei - int(x_slices[i])
+        adj = np.zeros((n, n), dtype=np.float32)
         adj[ei[0], ei[1]] = 1.0
         adjs.append(adj)
 
