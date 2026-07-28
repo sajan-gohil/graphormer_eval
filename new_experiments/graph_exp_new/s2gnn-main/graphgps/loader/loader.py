@@ -100,10 +100,22 @@ def load_pyg(name, dataset_dir):
 
 
 def set_dataset_attr(dataset, name, value, size):
+    """Attach an attribute to an InMemoryDataset without corrupting slices.
+
+    For existing data attributes such as ``x`` or ``edge_index`` we preserve the
+    original per-graph slice layout. Only attributes that were not already part
+    of the dataset receive a simple ``[0, size]`` slice, which is appropriate
+    for graph-level split indices and other scalar-like metadata.
+    """
     dataset._data_list = None
     dataset.data[name] = value
-    if dataset.slices is not None:
-        dataset.slices[name] = torch.tensor([0, size], dtype=torch.long)
+    if dataset.slices is None:
+        return
+
+    if name in dataset.slices:
+        return
+
+    dataset.slices[name] = torch.tensor([0, size], dtype=torch.long)
 
 
 def load_ogb(name, dataset_dir):

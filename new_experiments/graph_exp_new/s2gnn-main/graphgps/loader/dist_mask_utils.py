@@ -64,11 +64,10 @@ def precompute_distance_masks(dataset, cache_path, max_hops=40,
         with open(cache_path, "rb") as f:
             return pickle.load(f)
 
-    # Determine number of graphs.  For InMemoryDatasets the length is
-    # derived from the slices, but after set_dataset_attr() the slices
-    # become inconsistent.  The 'x' slices are always reliable because
-    # they are set during the original dataset construction and never
-    # overwritten by the s2gnn loader.
+    # Determine number of graphs from the original node slices.  The loader
+    # now preserves the original per-graph slice layout for existing data
+    # attributes, so this path remains valid even after split metadata has been
+    # attached to the dataset.
     _data = getattr(dataset, '_data', None) or dataset.data
     _slices = dataset.slices
 
