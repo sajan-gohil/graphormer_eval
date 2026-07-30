@@ -752,8 +752,9 @@ def _get_diameters_from_loader(loader):
 
 
 @torch.no_grad()
-def _collect_per_sample_loss(model, loader, task, device):
-    """Run model over *loader* and return a 1-D array of per-sample losses.
+def _collect_per_sample_data(model, loader, task, device):
+    """Run model over *loader* and return a 1-D array of per-sample losses,
+    along with true labels and predictions (for AP calculation if applicable).
 
     Works for graph-level tasks (multi_label, regression, multiclass).
     For node-level tasks, the loss is averaged over valid nodes within each
@@ -763,6 +764,8 @@ def _collect_per_sample_loss(model, loader, task, device):
 
     model.eval()
     per_sample_losses = []
+    y_trues = []
+    y_preds = []
 
     for batch in loader:
         pyg_batch, dist_masks, node_masks = _move_batch_to_device(batch, device)
@@ -775,6 +778,9 @@ def _collect_per_sample_loss(model, loader, task, device):
             loss_per = F.binary_cross_entropy_with_logits(
                 logits, y, reduction="none"
             ).mean(dim=-1)
+            
+            y_trues.append(y.detach().cpu().numpy())
+            y_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
         elif task.task_type == "regression":
             y = pyg_batch.y.float()
             # (B, K) -> mean over K -> (B,)
@@ -807,7 +813,10 @@ def _collect_per_sample_loss(model, loader, task, device):
 
         per_sample_losses.append(loss_per.detach().cpu().numpy())
 
-    return np.concatenate(per_sample_losses, axis=0)
+    losses_out = np.concatenate(per_sample_losses, axis=0)
+    if task.task_type == "multi_label" and len(y_trues) > 0:
+        return losses_out, np.concatenate(y_trues, axis=0), np.concatenate(y_preds, axis=0)
+    return losses_out, None, None
 
 
 def _plot_error_by_diameter(model, train_loader, val_loader, test_loader,
@@ -823,13 +832,13 @@ def _plot_error_by_diameter(model, train_loader, val_loader, test_loader,
     val_diameters = _get_diameters_from_loader(val_loader)
     test_diameters = _get_diameters_from_loader(test_loader)
 
-    # --- Collect per-sample losses ---
+    # --- Collect per-sample losses and data ---
     print("  Computing per-sample losses (train)...", flush=True)
-    train_losses = _collect_per_sample_loss(model, train_loader, task, device)
+    train_losses, train_y, train_p = _collect_per_sample_data(model, train_loader, task, device)
     print("  Computing per-sample losses (val)...", flush=True)
-    val_losses = _collect_per_sample_loss(model, val_loader, task, device)
+    val_losses, val_y, val_p = _collect_per_sample_data(model, val_loader, task, device)
     print("  Computing per-sample losses (test)...", flush=True)
-    test_losses = _collect_per_sample_loss(model, test_loader, task, device)
+    test_losses, test_y, test_p = _collect_per_sample_data(model, test_loader, task, device)
 
     # Verify alignment
     assert len(train_diameters) == len(train_losses), \
@@ -839,13 +848,36 @@ def _plot_error_by_diameter(model, train_loader, val_loader, test_loader,
     assert len(test_diameters) == len(test_losses), \
         f"Test mismatch: {len(test_diameters)} diameters vs {len(test_losses)} losses"
 
+    def _safe_ap(y_t, y_p):
+        from sklearn.metrics import average_precision_score
+        if len(y_t) == 0: return float("nan")
+        aps = []
+        for c in range(y_t.shape[1]):
+            if y_t[:, c].sum() > 0:
+                try:
+                    aps.append(average_precision_score(y_t[:, c], y_p[:, c]))
+                except:
+                    pass
+        if not aps: return float("nan")
+        return np.mean(aps)
+
+    has_ap = task.task_type == "multi_label"
+
     # --- Print summary statistics per diameter ---
     all_diameters = np.unique(np.concatenate(
         [train_diameters, val_diameters, test_diameters]))
-    print(f"\n  {'Diam':>5s} | {'Train N':>8s} {'Train Mean':>11s} {'Train Med':>10s} "
-          f"| {'Val N':>6s} {'Val Mean':>9s} {'Val Med':>8s} "
-          f"| {'Test N':>7s} {'Test Mean':>10s} {'Test Med':>9s}", flush=True)
-    print("  " + "-" * 105, flush=True)
+    
+    if has_ap:
+        print(f"\n  {'Diam':>5s} | {'Train N':>8s} {'Tr Mean':>9s} {'Tr Med':>8s} {'Tr AP':>8s} "
+              f"| {'Val N':>6s} {'Val Mean':>9s} {'Val Med':>8s} {'Val AP':>8s} "
+              f"| {'Test N':>7s} {'Te Mean':>9s} {'Te Med':>8s} {'Te AP':>8s}", flush=True)
+        print("  " + "-" * 135, flush=True)
+    else:
+        print(f"\n  {'Diam':>5s} | {'Train N':>8s} {'Train Mean':>11s} {'Train Med':>10s} "
+              f"| {'Val N':>6s} {'Val Mean':>9s} {'Val Med':>8s} "
+              f"| {'Test N':>7s} {'Test Mean':>10s} {'Test Med':>9s}", flush=True)
+        print("  " + "-" * 105, flush=True)
+
     for d in sorted(all_diameters):
         tr_mask = train_diameters == d
         va_mask = val_diameters == d
@@ -859,9 +891,18 @@ def _plot_error_by_diameter(model, train_loader, val_loader, test_loader,
         va_med = np.median(val_losses[va_mask]) if va_n > 0 else float("nan")
         te_mean = np.mean(test_losses[te_mask]) if te_n > 0 else float("nan")
         te_med = np.median(test_losses[te_mask]) if te_n > 0 else float("nan")
-        print(f"  {d:5d} | {tr_n:8d} {tr_mean:11.5f} {tr_med:10.5f} "
-              f"| {va_n:6d} {va_mean:9.5f} {va_med:8.5f} "
-              f"| {te_n:7d} {te_mean:10.5f} {te_med:9.5f}", flush=True)
+        
+        if has_ap:
+            tr_ap = _safe_ap(train_y[tr_mask], train_p[tr_mask]) if tr_n > 0 else float("nan")
+            va_ap = _safe_ap(val_y[va_mask], val_p[va_mask]) if va_n > 0 else float("nan")
+            te_ap = _safe_ap(test_y[te_mask], test_p[te_mask]) if te_n > 0 else float("nan")
+            print(f"  {d:5d} | {tr_n:8d} {tr_mean:9.5f} {tr_med:8.5f} {tr_ap:8.4f} "
+                  f"| {va_n:6d} {va_mean:9.5f} {va_med:8.5f} {va_ap:8.4f} "
+                  f"| {te_n:7d} {te_mean:9.5f} {te_med:8.5f} {te_ap:8.4f}", flush=True)
+        else:
+            print(f"  {d:5d} | {tr_n:8d} {tr_mean:11.5f} {tr_med:10.5f} "
+                  f"| {va_n:6d} {va_mean:9.5f} {va_med:8.5f} "
+                  f"| {te_n:7d} {te_mean:10.5f} {te_med:9.5f}", flush=True)
 
     # --- Box plot (independent y-axes) ---
     split_data = [
