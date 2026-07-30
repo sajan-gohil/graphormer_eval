@@ -128,6 +128,57 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
 
         return dm_padded
 
+    def _log_metrics(self, t_layer, dist_masks, spat_out, spec_out, node_mask):
+        import logging
+        import random
+        # Only log 5% of the time during eval to avoid spam
+        if self.training or random.random() > 0.05:
+            return
+            
+        if not hasattr(t_layer.attn, '_last_attn') or not hasattr(t_layer.attn, '_last_out_pre_proj'):
+            return
+
+        attn = t_layer.attn._last_attn # (B, H, N, N)
+        out_pre = t_layer.attn._last_out_pre_proj # (B, H, N, Dh)
+        B, H, N, Dh = out_pre.shape
+
+        # 1. Output Norm of each head (Hop Importance)
+        out_pre_masked = out_pre * node_mask.view(B, 1, N, 1)
+        head_norms = torch.linalg.norm(out_pre_masked, dim=-1).sum(dim=-1) / (node_mask.sum(dim=-1, keepdim=True).unsqueeze(1) + 1e-6)
+        head_norms_mean = head_norms.mean(dim=0)
+        logging.info(f"[HopMaskedS2GNN] Head Output Norms (Hop Importance): {['{:.4f}'.format(x) for x in head_norms_mean.cpu().tolist()]}")
+        
+        # 2. Self vs Neighbor Ratio within isolated heads
+        self_mask = torch.eye(N, device=attn.device).unsqueeze(0).unsqueeze(0).bool()
+        attn_masked = attn * node_mask.view(B, 1, N, 1) * node_mask.view(B, 1, 1, N)
+        self_attn_sum = (attn_masked * self_mask).sum(dim=(2, 3))
+        total_attn_sum = attn_masked.sum(dim=(2, 3)) + 1e-6
+        self_ratio = (self_attn_sum / total_attn_sum).mean(dim=0)
+        logging.info(f"[HopMaskedS2GNN] Self-Attention Ratio per head: {['{:.4f}'.format(x) for x in self_ratio.cpu().tolist()]}")
+        
+        # 3. Global Head's natural distribution across hops
+        global_head_idx = None
+        for i, h_set in enumerate(self.head_hop_sets):
+            if h_set is None:
+                global_head_idx = i
+                break
+                
+        if global_head_idx is not None:
+            global_attn = attn_masked[:, global_head_idx] # (B, N, N)
+            hop_distributions = []
+            K_runtime = dist_masks.shape[1]
+            for k in range(K_runtime):
+                hop_k_mask = dist_masks[:, k].bool() # (B, N, N)
+                hop_k_attn = (global_attn * hop_k_mask).sum(dim=(1, 2))
+                hop_distributions.append(hop_k_attn.mean().item())
+            logging.info(f"[HopMaskedS2GNN] Global Head Attn Dist across hops 0 to {K_runtime-1}: {['{:.4f}'.format(x) for x in hop_distributions]}")
+
+        # 4. spat_out vs spec_out norms
+        spat_norm = torch.linalg.norm(spat_out, dim=-1).mean().item()
+        spec_norm = torch.linalg.norm(spec_out, dim=-1).mean().item()
+        spat_ratio = spat_norm / (spat_norm + spec_norm + 1e-6)
+        logging.info(f"[HopMaskedS2GNN] Spat Out Norm: {spat_norm:.4f}, Spec Out Norm: {spec_norm:.4f}, Ratio Spat/(Spat+Spec): {spat_ratio:.4f}")
+
     # ----- forward ----------------------------------------------------------
     def forward(self, batch):
         x_in = batch.x  # (N_total, d)
@@ -152,6 +203,10 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
         spat_out = h[mask]  # (N_total, d)
 
         # --- Aggregate -----------------------------------------------------
+        # Log metrics before aggregation
+        if len(self.transformer_layers) > 0:
+            self._log_metrics(self.transformer_layers[0], dist_masks, spat_out, spec_out, mask)
+
         y = spec_out + spat_out  # sum aggregation (same as s2gnn default)
         if self.with_node_residual:
             y = y + x_in

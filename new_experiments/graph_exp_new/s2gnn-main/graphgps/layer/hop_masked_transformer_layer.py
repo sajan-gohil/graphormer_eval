@@ -187,6 +187,12 @@ class HopMaskedMHA(nn.Module):
         attn = self.attn_drop(attn)
 
         out = torch.matmul(attn, v)                        # (B, H, N, Dh)
+        
+        # Save pre-projected output and attention for logging/analysis
+        if not self.training:
+            self._last_attn = attn.detach()
+            self._last_out_pre_proj = out.detach()
+
         out = out.transpose(1, 2).reshape(B, N, d)         # (B, N, d)
         return self.out_proj(out)
 
