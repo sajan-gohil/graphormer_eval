@@ -59,6 +59,10 @@ def precompute_distance_masks(dataset, cache_path, max_hops=40,
     list of ndarray
         One ``(K_i, N_i, N_i)`` boolean array per graph.
     """
+    cache_dir = os.path.dirname(cache_path)
+    base_name = os.path.basename(cache_path).replace('.pkl', f'_max_hops_{max_hops}.pkl')
+    cache_path = os.path.join(cache_dir, base_name)
+    
     if os.path.exists(cache_path):
         print(f"  Loading cached distance masks from {cache_path}", flush=True)
         with open(cache_path, "rb") as f:
