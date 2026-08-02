@@ -185,7 +185,7 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
 
         # 1. Output Norm of each head (Hop Importance)
         out_pre_masked = out_pre * node_mask.view(B, 1, N, 1)
-        head_norms = torch.linalg.norm(out_pre_masked, dim=-1).sum(dim=-1) / (node_mask.sum(dim=-1, keepdim=True).unsqueeze(1) + 1e-6)
+        head_norms = torch.linalg.norm(out_pre_masked, dim=-1).sum(dim=-1) / (node_mask.sum(dim=-1, keepdim=True) + 1e-6)
         self._eval_accum['head_norms'] += head_norms.mean(dim=0)
         
         # 2. Self vs Neighbor Ratio within isolated heads
