@@ -61,7 +61,7 @@ gnn:
     num_heads: 30
     ffn_ratio: 1
   spectral:
-    layer_skip: [3]
+    layer_skip: []
     frequency_cutoff: 0.7
     filter_encoder: basis
     feature_transform: glu_0.05
