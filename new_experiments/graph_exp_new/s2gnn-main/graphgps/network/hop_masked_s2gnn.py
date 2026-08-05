@@ -233,39 +233,84 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
 
     # ----- forward ----------------------------------------------------------
     def forward(self, batch):
+        from torch_geometric.graphgym.config import cfg
         x_in = batch.x  # (N_total, d)
 
-        # --- Spectral branch (sparse, unchanged) ---------------------------
-        spec_out = self.spec_layer(batch)  # returns features, not batch
-
-        # --- Hop-masked transformer branch (dense) -------------------------
-        dense_x, mask = to_dense_batch(x_in, batch.batch)  # (B, N_max, d)
-        B, N_max, d = dense_x.shape
-
-        # Build padded distance masks and per-head mask.
-        dist_masks = self._pad_dist_masks(batch, N_max, dense_x.device)
-        per_head_mask = self._build_per_head_mask(dist_masks)
-
-        # Run transformer sub-layers.
-        h = dense_x
-        for t_layer in self.transformer_layers:
-            h = t_layer(h, per_head_mask, mask)
-
-        # Back to sparse.
-        spat_out = h[mask]  # (N_total, d)
-
-        # --- Aggregate -----------------------------------------------------
-        y = spec_out + spat_out  # sum aggregation (same as s2gnn default)
-        if self.with_node_residual:
-            y = y + x_in
-        batch.x = (1.0 / math.sqrt(self.norm_factor)) * y
-
-        # Log metrics after aggregation so we can capture combined_out
-        if len(self.transformer_layers) > 0:
-            self._log_metrics(self.transformer_layers[0], dist_masks,
-                              spat_out, spec_out, mask, x_in, batch.x)
-
-        return batch
+        if cfg.gnn.spectral.combine_with_spatial is None:
+            # --- SEQUENTIAL MODE (Transformer -> Spectral) ---------------------
+            
+            # 1. Hop-masked transformer branch
+            dense_x, mask = to_dense_batch(x_in, batch.batch)  # (B, N_max, d)
+            B, N_max, d = dense_x.shape
+            
+            dist_masks = self._pad_dist_masks(batch, N_max, dense_x.device)
+            per_head_mask = self._build_per_head_mask(dist_masks)
+            
+            h = dense_x
+            for t_layer in self.transformer_layers:
+                h = t_layer(h, per_head_mask, mask)
+            
+            spat_out = h[mask]
+            
+            if self.with_node_residual:
+                batch.x = x_in + spat_out
+            else:
+                batch.x = spat_out
+                
+            x_after_spat = batch.x
+            
+            # 2. Spectral branch
+            spec_out = self.spec_layer(batch)
+            
+            if self.with_node_residual:
+                y = x_after_spat + spec_out
+            else:
+                y = spec_out
+                
+            batch.x = y
+            
+            if len(self.transformer_layers) > 0:
+                self._log_metrics(self.transformer_layers[0], dist_masks, spat_out, spec_out, mask, x_in, batch.x)
+                
+            return batch
+            
+        else:
+            # --- PARALLEL MODE (Original HopMaskedS2GNN) -----------------------
+            # --- Spectral branch (sparse, unchanged) ---------------------------
+            spec_out = self.spec_layer(batch)  # returns features, not batch
+    
+            # --- Hop-masked transformer branch (dense) -------------------------
+            dense_x, mask = to_dense_batch(x_in, batch.batch)  # (B, N_max, d)
+            B, N_max, d = dense_x.shape
+    
+            # Build padded distance masks and per-head mask.
+            dist_masks = self._pad_dist_masks(batch, N_max, dense_x.device)
+            per_head_mask = self._build_per_head_mask(dist_masks)
+    
+            # Run transformer sub-layers.
+            h = dense_x
+            for t_layer in self.transformer_layers:
+                h = t_layer(h, per_head_mask, mask)
+    
+            # Convert back to sparse format.
+            spat_out = h[mask]  # (N_total, d)
+    
+            # --- Aggregate -----------------------------------------------------
+            y = spec_out + spat_out  # sum aggregation (same as s2gnn default)
+    
+            if self.with_node_residual:
+                y = y + x_in
+    
+            if self.norm:
+                # Same normalisation as S2GNN
+                batch.x = 1 / math.sqrt(self.norm_factor) * y
+            else:
+                batch.x = y
+    
+            if len(self.transformer_layers) > 0:
+                self._log_metrics(self.transformer_layers[0], dist_masks, spat_out, spec_out, mask, x_in, batch.x)
+    
+            return batch
 
 
 # ---------------------------------------------------------------------------
