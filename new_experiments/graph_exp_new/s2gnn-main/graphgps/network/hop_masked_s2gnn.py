@@ -157,11 +157,19 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
         spat_norm = self._eval_accum['spat_norm'] / count
         spec_norm = self._eval_accum['spec_norm'] / count
         spat_ratio = spat_norm / (spat_norm + spec_norm + 1e-6)
-        logging.info(f"[HopMaskedS2GNN] Spat Out Norm: {spat_norm:.4f}, Spec Out Norm: {spec_norm:.4f}, Ratio Spat/(Spat+Spec): {spat_ratio:.4f}")
+        combined_norm = self._eval_accum['combined_norm'] / count
+        x_in_norm = self._eval_accum['x_in_norm'] / count
+        delta_norm = self._eval_accum['delta_norm'] / count
+        logging.info(f"[HopMaskedS2GNN] Spat Out Norm: {spat_norm:.4f}, "
+                     f"Spec Out Norm: {spec_norm:.4f}, "
+                     f"Ratio Spat/(Spat+Spec): {spat_ratio:.4f}")
+        logging.info(f"[HopMaskedS2GNN] Combined Out Norm: {combined_norm:.4f}, "
+                     f"Input Norm: {x_in_norm:.4f}, "
+                     f"Delta Norm (out-in): {delta_norm:.4f}")
         
         self._eval_accum = None
 
-    def _log_metrics(self, t_layer, dist_masks, spat_out, spec_out, node_mask):
+    def _log_metrics(self, t_layer, dist_masks, spat_out, spec_out, node_mask, x_in_feat, combined_out):
         if self.training:
             return
             
@@ -178,7 +186,10 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
                 'head_norms': torch.zeros(H, device=out_pre.device),
                 'self_ratio': torch.zeros(H, device=attn.device),
                 'spat_norm': 0.0,
-                'spec_norm': 0.0
+                'spec_norm': 0.0,
+                'combined_norm': 0.0,
+                'x_in_norm': 0.0,
+                'delta_norm': 0.0,
             }
 
         self._eval_accum['count'] += 1
@@ -216,6 +227,9 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
         # 4. spat_out vs spec_out norms
         self._eval_accum['spat_norm'] += torch.linalg.norm(spat_out, dim=-1).mean().item()
         self._eval_accum['spec_norm'] += torch.linalg.norm(spec_out, dim=-1).mean().item()
+        self._eval_accum['combined_norm'] += torch.linalg.norm(combined_out, dim=-1).mean().item()
+        self._eval_accum['x_in_norm'] += torch.linalg.norm(x_in_feat, dim=-1).mean().item()
+        self._eval_accum['delta_norm'] += torch.linalg.norm(combined_out - x_in_feat, dim=-1).mean().item()
 
     # ----- forward ----------------------------------------------------------
     def forward(self, batch):
@@ -241,14 +255,15 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
         spat_out = h[mask]  # (N_total, d)
 
         # --- Aggregate -----------------------------------------------------
-        # Log metrics before aggregation
-        if len(self.transformer_layers) > 0:
-            self._log_metrics(self.transformer_layers[0], dist_masks, spat_out, spec_out, mask)
-
         y = spec_out + spat_out  # sum aggregation (same as s2gnn default)
         if self.with_node_residual:
             y = y + x_in
         batch.x = (1.0 / math.sqrt(self.norm_factor)) * y
+
+        # Log metrics after aggregation so we can capture combined_out
+        if len(self.transformer_layers) > 0:
+            self._log_metrics(self.transformer_layers[0], dist_masks,
+                              spat_out, spec_out, mask, x_in, batch.x)
 
         return batch
 

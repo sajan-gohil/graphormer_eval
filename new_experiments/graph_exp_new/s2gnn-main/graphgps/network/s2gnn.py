@@ -1,4 +1,5 @@
 from functools import partial
+import logging
 import math
 from typing import List
 
@@ -34,6 +35,59 @@ class BatchS2GNNGNNLayer(nn.Module):
             self.linear = nn.Linear(layer_config.dim_in, layer_config.dim_out)
             self.act = nn.SiLU()
 
+        # Accumulators for evaluation metrics (comparable to HopMaskedS2GNN)
+        self._eval_accum = None
+
+    def train(self, mode: bool = True):
+        # When switching from eval -> train, flush aggregated metrics
+        if not self.training and mode:
+            self._flush_eval_metrics()
+        super().train(mode)
+
+    def _flush_eval_metrics(self):
+        if self._eval_accum is None or self._eval_accum['count'] == 0:
+            return
+
+        count = self._eval_accum['count']
+        spat_norm = self._eval_accum['spat_norm'] / count
+        spec_norm = self._eval_accum['spec_norm'] / count
+        spat_ratio = spat_norm / (spat_norm + spec_norm + 1e-6)
+        combined_norm = self._eval_accum['combined_norm'] / count
+        x_in_norm = self._eval_accum['x_in_norm'] / count
+        delta_norm = self._eval_accum['delta_norm'] / count
+
+        logging.info(f"[S2GNN] --- Epoch Eval Aggregates (over {count} batches) ---")
+        logging.info(f"[S2GNN] Spat Out Norm: {spat_norm:.4f}, "
+                     f"Spec Out Norm: {spec_norm:.4f}, "
+                     f"Ratio Spat/(Spat+Spec): {spat_ratio:.4f}")
+        logging.info(f"[S2GNN] Combined Out Norm: {combined_norm:.4f}, "
+                     f"Input Norm: {x_in_norm:.4f}, "
+                     f"Delta Norm (out-in): {delta_norm:.4f}")
+
+        self._eval_accum = None
+
+    def _log_metrics(self, spat_out, spec_out, x_in, combined_out):
+        """Accumulate per-batch eval metrics (no-op during training)."""
+        if self.training:
+            return
+
+        if self._eval_accum is None:
+            self._eval_accum = {
+                'count': 0,
+                'spat_norm': 0.0,
+                'spec_norm': 0.0,
+                'combined_norm': 0.0,
+                'x_in_norm': 0.0,
+                'delta_norm': 0.0,
+            }
+
+        self._eval_accum['count'] += 1
+        self._eval_accum['spat_norm'] += torch.linalg.norm(spat_out, dim=-1).mean().item()
+        self._eval_accum['spec_norm'] += torch.linalg.norm(spec_out, dim=-1).mean().item()
+        self._eval_accum['combined_norm'] += torch.linalg.norm(combined_out, dim=-1).mean().item()
+        self._eval_accum['x_in_norm'] += torch.linalg.norm(x_in, dim=-1).mean().item()
+        self._eval_accum['delta_norm'] += torch.linalg.norm(combined_out - x_in, dim=-1).mean().item()
+
     def forward(self, batch):
         if self.aggr_mode == 'mamba_like':
             z = self.act(self.linear(batch.x))
@@ -42,6 +96,7 @@ class BatchS2GNNGNNLayer(nn.Module):
             batch.x = y * z
             return batch
         else:
+            x_in = batch.x
             spat_out = self.spat_layer(batch)
             spec_out = self.spec_layer(batch)
             # Aggregate spec/spat part
@@ -53,9 +108,13 @@ class BatchS2GNNGNNLayer(nn.Module):
                 raise ValueError(f'Unknown aggregation mode: {self.aggr_mode}')
             # Residual
             if self.with_node_residual:
-                y = y + batch.x
+                y = y + x_in
             # Normalization
             batch.x = 1 / math.sqrt(self.norm_factor) * y
+
+            # Log metrics during eval
+            self._log_metrics(spat_out, spec_out, x_in, batch.x)
+
             return batch
 
 
