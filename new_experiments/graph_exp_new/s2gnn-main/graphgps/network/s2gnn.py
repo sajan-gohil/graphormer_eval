@@ -128,6 +128,7 @@ class S2GNN(nn.Module):
 
     def __init__(self, dim_in, dim_out):
         super().__init__()
+        self._eval_accum = None
 
         # Init dataloader
         if cfg.dataset.node_encoder_name in ['TPUNode', 'TPUBslnNode']:
@@ -271,6 +272,58 @@ class S2GNN(nn.Module):
         else:
             return FeatureBatchSpectralLayer
 
+    def train(self, mode: bool = True):
+        # When switching from eval -> train, flush aggregated metrics
+        if not self.training and mode:
+            self._flush_eval_metrics()
+        super().train(mode)
+
+    def _flush_eval_metrics(self):
+        if self._eval_accum is None or len(self._eval_accum) == 0:
+            return
+
+        for i, accum in enumerate(self._eval_accum):
+            count = accum['count']
+            if count == 0: continue
+            spat_norm = accum['spat_norm'] / count
+            spec_norm = accum['spec_norm'] / count
+            spat_ratio = spat_norm / (spat_norm + spec_norm + 1e-6)
+            combined_norm = accum['combined_norm'] / count
+            x_in_norm = accum['x_in_norm'] / count
+            delta_norm = accum['delta_norm'] / count
+
+            logging.info(f"[S2GNN Sequential Layer {i+1}] --- Epoch Eval Aggregates (over {count} batches) ---")
+            logging.info(f"[S2GNN Sequential Layer {i+1}] Spat Out Norm: {spat_norm:.4f}, "
+                         f"Spec Out Norm: {spec_norm:.4f}, "
+                         f"Ratio Spat/(Spat+Spec): {spat_ratio:.4f}")
+            logging.info(f"[S2GNN Sequential Layer {i+1}] Combined Out Norm: {combined_norm:.4f}, "
+                         f"Input Norm: {x_in_norm:.4f}, "
+                         f"Delta Norm (out-in): {delta_norm:.4f}")
+
+        self._eval_accum = None
+
+    def _log_metrics(self, layer_idx, spat_out, spec_out, x_in, combined_out):
+        """Accumulate per-batch eval metrics (no-op during training)."""
+        if self.training:
+            return
+
+        if self._eval_accum is None:
+            self._eval_accum = []
+            
+        while len(self._eval_accum) <= layer_idx:
+            self._eval_accum.append({
+                'count': 0, 'spat_norm': 0.0, 'spec_norm': 0.0,
+                'combined_norm': 0.0, 'x_in_norm': 0.0, 'delta_norm': 0.0
+            })
+
+        accum = self._eval_accum[layer_idx]
+        accum['count'] += 1
+        accum['spat_norm'] += torch.linalg.norm(spat_out, dim=-1).mean().item()
+        accum['spec_norm'] += torch.linalg.norm(spec_out, dim=-1).mean().item()
+        accum['combined_norm'] += torch.linalg.norm(combined_out, dim=-1).mean().item()
+        accum['x_in_norm'] += torch.linalg.norm(x_in, dim=-1).mean().item()
+        accum['delta_norm'] += torch.linalg.norm(combined_out - x_in, dim=-1).mean().item()
+
     def forward(self, batch):
         # For obg products, we need to handle the subsampling of nodes
         if (cfg.train.sampler == 'random_node'
@@ -283,8 +336,26 @@ class S2GNN(nn.Module):
         if not hasattr(batch, 'num_graphs'):
             batch.num_graphs = 1
 
-        for module in self.children():
-            batch = module(batch)
+        for name, module in self.named_children():
+            # If it's sequential (uncombined) S2GNN, we intercept gnn_layers to log the intermediate Spatial/Spectral norms
+            if name == 'gnn_layers' and not self.training and len(module) == 2 * cfg.gnn.layers_mp:
+                for i in range(cfg.gnn.layers_mp):
+                    spat_layer = module[2*i]
+                    spec_layer = module[2*i + 1]
+                    
+                    x_in = batch.x
+                    batch = spat_layer(batch)
+                    x_after_spat = batch.x
+                    spat_out = x_after_spat - x_in  # Delta from spatial layer
+                    
+                    batch = spec_layer(batch)
+                    x_after_spec = batch.x
+                    spec_out = x_after_spec - x_after_spat  # Delta from spectral layer
+                    
+                    self._log_metrics(i, spat_out, spec_out, x_in, x_after_spec)
+            else:
+                batch = module(batch)
+                
         return batch
 
     def last_layer_keys(self) -> List[str]:
