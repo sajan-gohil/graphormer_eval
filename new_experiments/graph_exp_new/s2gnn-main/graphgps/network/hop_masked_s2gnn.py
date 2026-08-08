@@ -77,6 +77,10 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
         
         # Accumulators for evaluation metrics
         self._eval_accum = None
+        self.branch_ablation = None
+
+    def set_branch_ablation(self, branch: Optional[str] = None):
+        self.branch_ablation = branch
 
     # ----- helpers ----------------------------------------------------------
     def _build_per_head_mask(
@@ -235,6 +239,7 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
     def forward(self, batch):
         from torch_geometric.graphgym.config import cfg
         x_in = batch.x  # (N_total, d)
+        branch_ablation = None if self.training else self.branch_ablation
 
         if cfg.gnn.spectral.combine_with_spatial is None:
             # --- SEQUENTIAL MODE (Transformer -> Spectral) ---------------------
@@ -251,6 +256,8 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
                 h = t_layer(h, per_head_mask, mask)
             
             spat_out = h[mask]
+            if branch_ablation == 'spatial':
+                spat_out = torch.zeros_like(spat_out)
             
             if self.with_node_residual:
                 batch.x = x_in + spat_out
@@ -261,6 +268,8 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
             
             # 2. Spectral branch
             spec_out = self.spec_layer(batch)
+            if branch_ablation == 'spectral':
+                spec_out = torch.zeros_like(spec_out)
             
             if self.with_node_residual:
                 y = x_after_spat + spec_out
@@ -294,9 +303,13 @@ class BatchHopMaskedS2GNNLayer(nn.Module):
     
             # Convert back to sparse format.
             spat_out = h[mask]  # (N_total, d)
+            if branch_ablation == 'spatial':
+                spat_out = torch.zeros_like(spat_out)
     
             # --- Aggregate -----------------------------------------------------
             y = spec_out + spat_out  # sum aggregation (same as s2gnn default)
+            if branch_ablation == 'spectral':
+                y = spat_out
     
             if self.with_node_residual:
                 y = y + x_in
@@ -431,11 +444,15 @@ class HopMaskedS2GNN(nn.Module):
             ))
 
         self.gnn_layers = nn.ModuleList(layers)
-
         # ---- Task head (same as s2gnn) -------------------------------------
         GNNHead = register.head_dict[cfg.gnn.head]
         is_first = cfg.gnn.layers_mp <= 0
         self.post_mp = GNNHead(cfg.gnn.dim_inner, dim_out, is_first)
+
+    def set_branch_ablation(self, branch: Optional[str] = None):
+        for layer in self.gnn_layers:
+            if hasattr(layer, 'set_branch_ablation'):
+                layer.set_branch_ablation(branch)
 
     def forward(self, batch):
         # Set num_graphs if not available.

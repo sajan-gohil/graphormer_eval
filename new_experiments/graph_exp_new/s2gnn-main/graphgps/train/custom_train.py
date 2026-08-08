@@ -1,6 +1,7 @@
 import logging
 import time
 import os
+import copy
 from typing import List
 
 import numpy as np
@@ -170,6 +171,20 @@ def build_ckpt_data(data, loggers):
     return data_save
 
 
+def _set_branch_ablation(model, branch=None):
+    if hasattr(model, 'set_branch_ablation'):
+        model.set_branch_ablation(branch)
+
+
+@torch.no_grad()
+def _eval_val_ap(loggers, loader, model, branch=None):
+    _set_branch_ablation(model, branch)
+    loggers[1].reset()
+    eval_epoch(loggers[1], loader, model, split='val')
+    perf = loggers[1].write_epoch(0)
+    return perf.get('ap')
+
+
 @torch.no_grad()
 def submission_csv(preds, test_loader, output_dir=None, suffix=None):
     tpu_task = cfg.dataset.tpu_graphs.tpu_task
@@ -255,6 +270,8 @@ def custom_train(loggers, loaders, model, optimizer, scheduler):
     split_names = ['val', 'test']
     full_epoch_times = []
     perf = [[] for _ in range(num_splits)]
+    best_state_dict = None
+    best_state_epoch = None
     for cur_epoch in range(start_epoch, cfg.optim.max_epoch):
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
@@ -394,9 +411,30 @@ def custom_train(loggers, loaders, model, optimizer, scheduler):
                 logging.info(f"Patience stop in epoch {best_epoch}")
                 break
 
+            if best_epoch == len(perf[1]) - 1:
+                best_state_dict = copy.deepcopy(model.state_dict())
+                best_state_epoch = cur_epoch
+
         if (cfg.optim.model_averaging
                 and cur_epoch >= cfg.optim.model_averaging_start):
             model = model_  # Swap back
+
+    if best_state_dict is not None:
+        current_state_dict = copy.deepcopy(model.state_dict())
+        model.load_state_dict(best_state_dict)
+        if len(loaders) >= 2:
+            clean_ap = _eval_val_ap(loggers, loaders[1], model, branch=None)
+            spatial_zero_ap = _eval_val_ap(loggers, loaders[1], model, branch='spatial')
+            spectral_zero_ap = _eval_val_ap(loggers, loaders[1], model, branch='spectral')
+            if clean_ap is not None and spatial_zero_ap is not None and spectral_zero_ap is not None:
+                logging.info(
+                    '[Branch Ablation] best_epoch=%s val_ap=%.4f spatial_zero_val_ap=%.4f spectral_zero_val_ap=%.4f',
+                    best_state_epoch, clean_ap, spatial_zero_ap, spectral_zero_ap,
+                )
+                logging.info('[Branch Ablation] val_ap_drop_spatial=%.4f', clean_ap - spatial_zero_ap)
+                logging.info('[Branch Ablation] val_ap_drop_spectral=%.4f', clean_ap - spectral_zero_ap)
+        _set_branch_ablation(model, None)
+        model.load_state_dict(current_state_dict)
 
     logging.info(f"Avg time per epoch: {np.mean(full_epoch_times):.2f}s")
     logging.info(

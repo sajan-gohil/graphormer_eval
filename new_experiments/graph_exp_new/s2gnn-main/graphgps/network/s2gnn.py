@@ -1,7 +1,7 @@
 from functools import partial
 import logging
 import math
-from typing import List
+from typing import List, Optional
 
 import torch
 from torch import nn
@@ -37,6 +37,10 @@ class BatchS2GNNGNNLayer(nn.Module):
 
         # Accumulators for evaluation metrics (comparable to HopMaskedS2GNN)
         self._eval_accum = None
+        self.branch_ablation = None
+
+    def set_branch_ablation(self, branch: Optional[str] = None):
+        self.branch_ablation = branch
 
     def train(self, mode: bool = True):
         # When switching from eval -> train, flush aggregated metrics
@@ -89,16 +93,25 @@ class BatchS2GNNGNNLayer(nn.Module):
         self._eval_accum['delta_norm'] += torch.linalg.norm(combined_out - x_in, dim=-1).mean().item()
 
     def forward(self, batch):
+        branch_ablation = None if self.training else self.branch_ablation
         if self.aggr_mode == 'mamba_like':
             z = self.act(self.linear(batch.x))
             batch.x = self.act(self.spat_layer(batch))
             y = self.spec_layer(batch)
+            if branch_ablation == 'spatial':
+                z = torch.zeros_like(z)
+            elif branch_ablation == 'spectral':
+                y = torch.zeros_like(y)
             batch.x = y * z
             return batch
         else:
             x_in = batch.x
             spat_out = self.spat_layer(batch)
             spec_out = self.spec_layer(batch)
+            if branch_ablation == 'spatial':
+                spat_out = torch.zeros_like(spat_out)
+            elif branch_ablation == 'spectral':
+                spec_out = torch.zeros_like(spec_out)
             # Aggregate spec/spat part
             if self.aggr_mode == 'sum':
                 y = spec_out + spat_out
@@ -129,6 +142,7 @@ class S2GNN(nn.Module):
     def __init__(self, dim_in, dim_out):
         super().__init__()
         self._eval_accum = None
+        self.branch_ablation = None
 
         # Init dataloader
         if cfg.dataset.node_encoder_name in ['TPUNode', 'TPUBslnNode']:
@@ -236,6 +250,14 @@ class S2GNN(nn.Module):
             (cfg.gnn.layer_type == 'lin_gnn' and cfg.gnn.layers_mp == 1))
         self.post_mp = GNNHead(cfg.gnn.dim_inner, dim_out, is_first)
 
+    def set_branch_ablation(self, branch: Optional[str] = None):
+        self.branch_ablation = branch
+        for module in self.modules():
+            if module is self:
+                continue
+            if hasattr(module, 'set_branch_ablation'):
+                module.set_branch_ablation(branch)
+
     def build_spatial_layer(self, model_type, make_undirected, use_edge_attr,
                             adj_norm, dir_aggr):
         """Prototype/constructor for spatial layer (message passing)."""
@@ -339,18 +361,29 @@ class S2GNN(nn.Module):
         for name, module in self.named_children():
             # If it's sequential (uncombined) S2GNN, we intercept gnn_layers to log the intermediate Spatial/Spectral norms
             if name == 'gnn_layers' and not self.training and len(module) == 2 * cfg.gnn.layers_mp:
+                branch_ablation = self.branch_ablation
                 for i in range(cfg.gnn.layers_mp):
                     spat_layer = module[2*i]
                     spec_layer = module[2*i + 1]
                     
                     x_in = batch.x
-                    batch = spat_layer(batch)
-                    x_after_spat = batch.x
-                    spat_out = x_after_spat - x_in  # Delta from spatial layer
-                    
-                    batch = spec_layer(batch)
-                    x_after_spec = batch.x
-                    spec_out = x_after_spec - x_after_spat  # Delta from spectral layer
+                    if branch_ablation == 'spatial':
+                        x_after_spat = x_in
+                        spat_out = torch.zeros_like(x_in)
+                        batch.x = x_after_spat
+                    else:
+                        batch = spat_layer(batch)
+                        x_after_spat = batch.x
+                        spat_out = x_after_spat - x_in  # Delta from spatial layer
+
+                    if branch_ablation == 'spectral':
+                        x_after_spec = x_after_spat
+                        spec_out = torch.zeros_like(x_after_spat)
+                        batch.x = x_after_spec
+                    else:
+                        batch = spec_layer(batch)
+                        x_after_spec = batch.x
+                        spec_out = x_after_spec - x_after_spat  # Delta from spectral layer
                     
                     self._log_metrics(i, spat_out, spec_out, x_in, x_after_spec)
             else:
