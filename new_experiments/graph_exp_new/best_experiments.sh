@@ -21,13 +21,13 @@
 # =============================================================================
 
 SCRIPT="train_hop_masked_transformer_final.py"
-DATASET="CIFAR10"
-LOG_DIR="ablation_logs_cifar10"
-CKPT_DIR="ablation_checkpoints"
+DATASET="Peptides-func"
+LOG_DIR="ablation_logs_func_patient"
+CKPT_DIR="ablation_checkpoints_patient"
 mkdir -p "${LOG_DIR}" "${CKPT_DIR}"
 
-GPUS=("cuda:0" "cuda:1")
-JOBS_PER_GPU=3
+GPUS=("cuda:2")
+JOBS_PER_GPU=1
 
 BASE_MAX_HOPS=30
 BASE_NUM_GLOBAL_HEADS=1
@@ -38,10 +38,10 @@ BASE_NUM_LAYERS=1
 BASE_FFN_RATIO=1
 BASE_DROPOUT=0.2
 BASE_LR=1e-3
-BASE_BATCH_SIZE=64
-BASE_MAX_EPOCHS=200
-BASE_PATIENCE=40
-BASE_GRAD_CLIP=1.0
+BASE_BATCH_SIZE=200
+BASE_MAX_EPOCHS=1000
+BASE_PATIENCE=200
+BASE_GRAD_CLIP=5.0
 BASE_SEED=0
 
 COMMON="--dataset ${DATASET} \
@@ -155,29 +155,29 @@ flush_queue() {
 echo "===== GROUP 1 (retry): HOP MODE WINDOW W1 ====="
 echo "===== GROUP 1 (retry): HOP MODE WINDOW W1 ====="
 
-enqueue "C1_sparse_structural_shallow" \
-    --hop_mode ${BASE_HOP_MODE} \
-    --hop_window ${BASE_HOP_WINDOW} \
-    --num_layers 2 \
-    --hidden_dim 160 \
-    --num_heads 20 \
-    --max_hops 20 \
-    --num_global_heads 1 \
-    --norm_type graph \
-    --block_diag_out \
-    --blend_adj_power
+#enqueue "C1_sparse_structural_shallow" \
+#    --hop_mode ${BASE_HOP_MODE} \
+#    --hop_window ${BASE_HOP_WINDOW} \
+#    --num_layers 2 \
+#    --hidden_dim 160 \
+#    --num_heads 20 \
+#    --max_hops 20 \
+#    --num_global_heads 1 \
+#    --norm_type graph \
+#    --block_diag_out \
+#    --blend_adj_power
 
-enqueue "C2_moe_dynamic_shallow" \
-    --hop_mode ${BASE_HOP_MODE} \
-    --hop_window ${BASE_HOP_WINDOW} \
-    --num_layers 2 \
-    --hidden_dim 240 \
-    --num_heads 30 \
-    --num_global_heads 1 \
-    --norm_type graph \
-    --use_moe_gating \
-    --top_k 1 \
-    --block_diag_out
+#enqueue "C2_moe_dynamic_shallow" \
+#    --hop_mode ${BASE_HOP_MODE} \
+#    --hop_window ${BASE_HOP_WINDOW} \
+#    --num_layers 2 \
+#    --hidden_dim 240 \
+#    --num_heads 30 \
+#    --num_global_heads 1 \
+#    --norm_type graph \
+#    --use_moe_gating \
+#    --top_k 1 \
+#    --block_diag_out
 
 #enqueue "C3_cross_hop_laplacian" \
 #    --hop_mode ${BASE_HOP_MODE} \
@@ -195,18 +195,18 @@ enqueue "C2_moe_dynamic_shallow" \
 #    --lap_pe_dim 8
 
 
-enqueue "C4_sparse_structural_shallow" \
-    --hop_mode ${BASE_HOP_MODE} \
-    --hop_window ${BASE_HOP_WINDOW} \
-    --num_layers 3 \
-    --ffn_ratio 1 \
-    --hidden_dim 160 \
-    --num_heads 20 \
-    --max_hops 20 \
-    --num_global_heads 1 \
-    --norm_type graph \
-    --block_diag_out \
-    --blend_adj_power
+#enqueue "C4_sparse_structural_shallow" \
+#    --hop_mode ${BASE_HOP_MODE} \
+#    --hop_window ${BASE_HOP_WINDOW} \
+#    --num_layers 3 \
+#    --ffn_ratio 1 \
+#    --hidden_dim 160 \
+#    --num_heads 20 \
+#    --max_hops 20 \
+#    --num_global_heads 1 \
+#    --norm_type graph \
+#    --block_diag_out \
+#    --blend_adj_power
 
 enqueue "C5_moe_dynamic_shallow" \
     --hop_mode ${BASE_HOP_MODE} \
@@ -219,7 +219,8 @@ enqueue "C5_moe_dynamic_shallow" \
     --norm_type graph \
     --use_moe_gating \
     --top_k 1 \
-    --block_diag_out
+    --block_diag_out \
+    --batch_size 64
 
 #enqueue "C6_cross_hop_laplacian" \
 #    --hop_mode ${BASE_HOP_MODE} \
@@ -239,26 +240,26 @@ enqueue "C5_moe_dynamic_shallow" \
 
 
 # 7. C1 + 40 heads (scaled hidden_dim and max_hops to preserve head capacity)
-enqueue "C1_heads_40_d160" \
-    --num_layers 2 \
-    --hidden_dim 160 \
-    --num_heads 40 \
-    --max_hops 40 \
-    --num_global_heads 1 \
-    --norm_type graph \
-    --block_diag_out \
-    --blend_adj_power
+#enqueue "C1_heads_40_d160" \
+#    --num_layers 2 \
+#    --hidden_dim 160 \
+#    --num_heads 40 \
+#    --max_hops 40 \
+#    --num_global_heads 1 \
+#    --norm_type graph \
+#    --block_diag_out \
+#    --blend_adj_power
 
-enqueue "C_FINAL_ULTIMATE" \
-    --num_layers 2 \
-    --hidden_dim 160 \
-    --num_heads 40 \
-    --max_hops 40 \
-    --ffn_ratio 1 \
-    --num_global_heads 1 \
-    --norm_type graph \
-    --block_diag_out \
-    --use_pos_weight
+#enqueue "C_FINAL_ULTIMATE" \
+#    --num_layers 2 \
+#    --hidden_dim 160 \
+#    --num_heads 40 \
+#    --max_hops 40 \
+#    --ffn_ratio 1 \
+#    --num_global_heads 1 \
+#    --norm_type graph \
+#    --block_diag_out \
+#    --use_pos_weight
     
 flush_queue
 
@@ -271,10 +272,7 @@ echo ""
 echo "Results summary (experiment -> best test AP):"
 echo "--------------------------------------------------------------"
 for name in \
-    C1_sparse_structural_shallow \
-    C2_moe_dynamic_shallow \
-    C3_cross_hop_laplacian \
-    C4_sparse_structural_shallow \
+   C4_sparse_structural_shallow \
     C5_moe_dynamic_shallow \
     C1_heads_40_d160 \
     C_FINAL_ULTIMATE \
@@ -287,3 +285,7 @@ echo "--------------------------------------------------------------"
 echo ""
 echo "Full logs in: ${LOG_DIR}/"
 echo "Checkpoints in: ${CKPT_DIR}/"
+ #   C1_sparse_structural_shallow \
+ #   C2_moe_dynamic_shallow \
+ #   C3_cross_hop_laplacian \
+ 

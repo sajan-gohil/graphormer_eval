@@ -88,7 +88,7 @@ def build_parser():
     p.add_argument("--hidden_dim", type=int, default=128)
     p.add_argument("--num_heads", type=int, default=8,
                    help="Total heads. Must divide hidden_dim.")
-    p.add_argument("--ffn_ratio", type=int, default=1)
+    p.add_argument("--ffn_ratio", type=float, default=1)
     p.add_argument("--num_layers", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.2)
     p.add_argument("--graph_pool", type=str, default="sum",

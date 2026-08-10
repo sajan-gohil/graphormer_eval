@@ -1388,7 +1388,7 @@ class HopMaskedTransformerModel(nn.Module):
         # cheaply decide whether to compute head_valid_mask.
         self._use_cross_hop = dynamic_cross_hop
 
-        ffn_dim = hidden_dim * ffn_ratio
+        ffn_dim = int(hidden_dim * ffn_ratio)
         layers = []
         for layer_idx in range(num_layers):
             membership = (
