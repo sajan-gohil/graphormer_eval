@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from sklearn.metrics import average_precision_score, f1_score
+from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 
 from data import get_dataset_info
 
@@ -131,19 +131,66 @@ class FocalCrossEntropyLoss(nn.Module):
 
 def compute_macro_ap(y_pred: np.ndarray, y_true: np.ndarray) -> float:
     """
-    Compute macro-averaged AP over all classes (LRGB protocol).
+    Compute macro-averaged AP over all classes (LRGB / OGB protocol).
+
+    NaN entries in ``y_true`` are treated as "not measured" and skipped, which
+    is what ogbg-molpcba requires: most (molecule, task) pairs are unlabelled,
+    and ``average_precision_score`` raises on NaN. Columns with no positive or
+    no negative example are skipped, matching OGB's evaluator.
 
     Args:
         y_pred: (N, C) predicted probabilities (after sigmoid).
-        y_true: (N, C) binary ground truth labels.
+        y_true: (N, C) binary ground truth labels, possibly containing NaN.
 
     Returns:
-        Macro-averaged AP score.
+        Macro-averaged AP over the columns that could be scored.
     """
-    # Handle edge cases
     if len(y_pred) == 0:
         return 0.0
-    return average_precision_score(y_true, y_pred, average='macro')
+
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+    if y_true.ndim == 1:
+        y_true = y_true.reshape(-1, 1)
+        y_pred = y_pred.reshape(-1, 1)
+
+    if not np.isnan(y_true).any():
+        return float(average_precision_score(y_true, y_pred, average="macro"))
+
+    scores = []
+    for c in range(y_true.shape[1]):
+        valid = ~np.isnan(y_true[:, c])
+        col = y_true[valid, c]
+        # Need both classes present for AP to be defined.
+        if col.size == 0 or col.sum() == 0 or col.sum() == col.size:
+            continue
+        scores.append(average_precision_score(col, y_pred[valid, c]))
+    return float(np.mean(scores)) if scores else 0.0
+
+
+def compute_rocauc(y_pred: np.ndarray, y_true: np.ndarray) -> float:
+    """Macro-averaged ROC-AUC — ogbg-molhiv standard metric.
+
+    Same NaN handling as ``compute_macro_ap`` so it also works for multi-task
+    OGB molecule datasets.
+    """
+    if len(y_pred) == 0:
+        return 0.0
+
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+    if y_true.ndim == 1:
+        y_true = y_true.reshape(-1, 1)
+        y_pred = y_pred.reshape(-1, 1)
+
+    scores = []
+    for c in range(y_true.shape[1]):
+        valid = ~np.isnan(y_true[:, c])
+        col = y_true[valid, c]
+        if col.size == 0 or col.sum() == 0 or col.sum() == col.size:
+            continue
+        scores.append(roc_auc_score(col, y_pred[valid, c]))
+    return float(np.mean(scores)) if scores else 0.0
 
 
 def compute_per_class_ap(y_pred: np.ndarray, y_true: np.ndarray) -> np.ndarray:
@@ -334,7 +381,16 @@ class Task:
         self.node_encoder = info["node_encoder"]
         self.node_feat_dim = info["node_feat_dim"]
         self.metric_name = info["metric_name"]
+        # ogbg-molpcba leaves most (molecule, task) pairs unmeasured as NaN.
+        # Those positions must be excluded from the loss, not coerced to 0.
+        self.nan_labels = bool(info.get("nan_labels", False))
         self.focal_gamma = focal_gamma
+
+        if self.level == "link":
+            raise NotImplementedError(
+                f"{self.dataset_name} is a link-level task; Task supports "
+                f"'graph' and 'node' only."
+            )
         # Label smoothing replaces hard {0,1} targets with {ε, 1−ε} for
         # multi_label tasks and passes label_smoothing to CrossEntropyLoss for
         # multiclass tasks.  Has no effect on regression.
@@ -410,6 +466,28 @@ class Task:
         """
         if self.task_type == "multi_label":
             y_f = y.float()
+            if logits.shape != y_f.shape:
+                # OGB stores graph targets as (1, T) per graph, so a batch
+                # arrives as (B, T) already; guard the (B*T,) edge case.
+                y_f = y_f.view(logits.shape)
+            if self.nan_labels:
+                # Reduce over measured entries only. Substituting a finite value
+                # at NaN positions keeps the graph clean; the mask then zeroes
+                # their contribution before the mean.
+                valid = ~torch.isnan(y_f)
+                y_safe = torch.where(valid, y_f, torch.zeros_like(y_f))
+                if self.label_smoothing > 0.0:
+                    eps = self.label_smoothing
+                    y_safe = y_safe * (1.0 - 2.0 * eps) + eps
+                per_el = F.binary_cross_entropy_with_logits(
+                    logits, y_safe, reduction="none")
+                if getattr(self.loss_fn, "pos_weight", None) is not None:
+                    pw = self.loss_fn.pos_weight.unsqueeze(0)
+                    per_el = per_el * (pw * y_safe + (1.0 - y_safe))
+                denom = valid.sum()
+                if denom == 0:
+                    return logits.sum() * 0.0
+                return (per_el * valid).sum() / denom
             if self.label_smoothing > 0.0:
                 eps = self.label_smoothing
                 y_f = y_f * (1.0 - 2.0 * eps) + eps
@@ -443,6 +521,8 @@ class Task:
     def compute_metric(self, preds: np.ndarray, labels: np.ndarray) -> float:
         if self.metric_name == "macro_ap":
             return compute_macro_ap(preds, labels)
+        if self.metric_name == "rocauc":
+            return compute_rocauc(preds, labels)
         if self.metric_name == "mae":
             return compute_mae(preds, labels)
         if self.metric_name == "node_f1_macro":
@@ -455,8 +535,9 @@ class Task:
     # --- Friendlier metric direction (higher_is_better) -------------
     @property
     def higher_is_better(self) -> bool:
-        # AP and F1 are higher-is-better; MAE is lower-is-better.
-        return self.metric_name in ("macro_ap", "node_f1_macro", "accuracy")
+        # AP, F1, accuracy and ROC-AUC are higher-is-better; MAE is lower.
+        return self.metric_name in ("macro_ap", "node_f1_macro", "accuracy",
+                                    "rocauc")
 
     @property
     def metric_label(self) -> str:
@@ -465,6 +546,7 @@ class Task:
             "mae": "MAE",
             "node_f1_macro": "F1",
             "accuracy": "Acc",
+            "rocauc": "ROC-AUC",
         }[self.metric_name]
 
 
@@ -492,5 +574,3 @@ def compute_pos_weight(labels: np.ndarray, num_classes: int) -> np.ndarray:
     n_k = labels.sum(axis=0).astype(np.float64)         # positives per class
     n_k = np.clip(n_k, 1.0, None)
     return np.sqrt(N / (num_classes * n_k))
-
-

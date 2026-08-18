@@ -1,0 +1,86 @@
+# vocsuperpixels gcn s2gnn
+# PascalVOC-SP
+#
+# LRGB node classification (~480 superpixels/graph, 21 classes, macro-F1).
+# The VOC/COCO loaders and the VOCNode/VOCEdge encoders already existed in this
+# repo (master_loader.py:136-143, encoder/voc_superpixels_encoder.py); only the
+# configs were missing. `VOCNode` is reused for COCO since both use the same
+# 14-dim superpixel node features.
+#
+# NOTE ON TUNING: dims/depths below are sized to land near the LRGB 500k
+# parameter budget (check the count printed at startup), not copied from a
+# published sweep. The two keys worth sweeping first are
+# `posenc_MagLapPE.max_freqs` and `gnn.spectral.frequency_cutoff`.
+out_dir: tests/results
+metric_best: f1
+wandb:
+  use: True
+  project: vocsuperpixels
+  entity: tum_i26
+dataset:
+  format: PyG-VOCSuperpixels
+  name: edge_wt_region_boundary
+  slic_compactness: 30
+  # `task: graph` + `head: inductive_node` is the GraphGPS convention for
+  # per-node prediction on a set of graphs (same as the CLUSTER configs).
+  task: graph
+  task_type: classification
+  transductive: False
+  split_mode: standard
+  node_encoder: True
+  node_encoder_name: VOCNode+MagLapPE
+  node_encoder_bn: False
+  edge_encoder: True
+  edge_encoder_name: VOCEdge
+  edge_encoder_bn: False
+posenc_MagLapPE:
+  enable: True
+  q: 0.0
+  largest_connected_component: False
+  positional_encoding: False
+  max_freqs: 150
+train:
+  mode: custom
+  batch_size: 50
+  eval_period: 1
+  ckpt_period: 100
+model:
+  type: s2gnn
+  loss_fun: weighted_cross_entropy
+gnn:
+  head: inductive_node
+  layers_pre_mp: 0
+  layers_mp: 4
+  layers_post_mp: 2
+  dim_inner: 200
+  layer_type: gcnconv
+  residual: True
+  stage_type: stack
+  batchnorm: False
+  act: gelu
+  dropout: 0.1
+  agg: mean
+  spectral:
+    # `combine_with_spatial` unset => spatial and spectral filters are stacked
+    # sequentially (Eq. 2), the best variant in the paper's Table 8 ablation
+    # (0.7311 vs 0.6827 for concat on peptides-func).
+    layer_skip: [4]
+    residual: True
+    filter_encoder: basis
+    frequency_cutoff: 0.7
+    feature_transform: glu_0.05
+    filter_variant: ~
+    window: tukey
+    basis_num_gaussians: 60
+    basis_bottleneck: 0.2
+    num_heads_filter_encoder: 100
+    learnable_norm: True
+optim:
+  clip_grad_norm: True
+  optimizer: adamW
+  weight_decay: 0.0
+  base_lr: 0.001
+  max_epoch: 200
+  scheduler: cosine_with_warmup
+  num_warmup_epochs: 5
+device: cuda
