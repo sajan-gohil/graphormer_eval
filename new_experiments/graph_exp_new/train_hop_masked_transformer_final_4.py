@@ -1,4 +1,3 @@
-# train_hop_masked_transformer_final.py
 """
 Training script for the hop-masked transformer model.
 
@@ -38,8 +37,8 @@ import numpy as np
 import torch
 
 from data import DATASET_CHOICES, get_loaders
-from metrics import build_task, compute_pos_weight
-from model_hop_masked_transformer_final_3 import (HopMaskedTransformerModel,
+from metrics import build_task, compute_pos_weight, compute_class_weights
+from model_hop_masked_transformer_final_4 import (HopMaskedTransformerModel,
                                                 set_attn_diagnostics)
 from optim_utils import build_grouped_optimizer_and_scheduler
 
@@ -60,6 +59,48 @@ def _gather_train_labels(loader, num_classes):
         y = y.numpy() if hasattr(y, "numpy") else np.asarray(y)
         rows.append(y.reshape(-1)[:num_classes])
     return np.stack(rows, axis=0)
+
+
+def _gather_node_labels(loader, num_classes):
+    """Collect all per-node class indices from a training loader (multiclass).
+
+    Returns a 1-D int array of every node's label across all training graphs,
+    with padding (-1) removed.
+    """
+    ds = loader.dataset
+    base = getattr(ds, "pyg_dataset", ds)   # unwrap DistMaskDataset
+    rows = []
+    for i in range(len(base)):
+        g = base[i]
+        y = g.y
+        y = y.numpy() if hasattr(y, "numpy") else np.asarray(y)
+        rows.append(y.reshape(-1))
+    labels = np.concatenate(rows, axis=0)
+    return labels[labels >= 0]
+
+
+def build_pos_or_class_weight(args, dataset_info, train_loader, device):
+    """Compute the loss weight vector when --use_pos_weight is set.
+
+    - multi_label -> per-class BCE pos_weight  = sqrt(N/(C*n_k))
+    - multiclass  -> per-class CE class weights = N/(C*n_c), mean-normalised
+                     (routes class weights to node/graph multiclass tasks)
+    Returns a (C,) float tensor on ``device`` or None.
+    """
+    if not args.use_pos_weight:
+        return None
+    ttype = dataset_info["task_type"]
+    C = dataset_info["output_dim"]
+    if ttype == "multi_label":
+        w = compute_pos_weight(_gather_train_labels(train_loader, C), C)
+        print(f"pos_weight (sqrt(N/(C*n_k))): {np.round(w, 3)}", flush=True)
+    elif ttype == "multiclass":
+        w = compute_class_weights(_gather_node_labels(train_loader, C), C)
+        print(f"class_weight N/(C*n_c) mean-norm: {np.round(w, 3)}", flush=True)
+    else:
+        print(f"--use_pos_weight ignored: task_type={ttype} unsupported.", flush=True)
+        return None
+    return torch.as_tensor(w, dtype=torch.float32, device=device)
 
 
 def build_parser():
@@ -396,7 +437,11 @@ def _log_head_stats(epoch, model, gate_weights_mean, args):
     #   self    attention mass staying on the query node
     #   |out|   norm of what the head transports (near 0 = head moves nothing
     #           even if its attention looks healthy)
-    #   live    fraction of query rows where the head had any allowed key
+    #   live    sanity check: rows with any allowed key. 1.0 whenever every
+    #           head's hop set contains hop 0; below 1.0 flags a masking bug
+    #   live_ns rows with a NON-SELF allowed key, i.e. rows where this hop
+    #           actually exists. Every column above is averaged over ONLY those
+    #           rows, so a low live_ns means a small effective sample
     for layer_idx, layer in enumerate(getattr(model, "layers", [])):
         d = getattr(getattr(layer, "attn", None), "_diag", None)
         if d is None:
@@ -414,7 +459,8 @@ def _log_head_stats(epoch, model, gate_weights_mean, args):
                   f"keys={float(d['allowed_keys'][h]):6.2f} "
                   f"self={float(d['self_mass'][h]):.3f} "
                   f"|out|={float(d['out_norm'][h]):.3f} "
-                  f"live={float(d['live_frac'][h]):.3f}", flush=True)
+                  f"live={float(d['live_frac'][h]):.3f} "
+                  f"live_ns={float(d['live_nonself'][h]):.3f}", flush=True)
 
         cd = getattr(getattr(layer, "cross_hop", None), "_diag", None)
         if cd is not None:
@@ -501,18 +547,9 @@ def main():
     )
     dataset_name = dataset_info["name"]
 
-    # Optional per-class pos_weight = sqrt(N / (C * n_k)) for multi-label BCE.
-    pos_weight = None
-    if args.use_pos_weight:
-        if dataset_info["task_type"] != "multi_label":
-            print(f"--use_pos_weight ignored: task_type="
-                  f"{dataset_info['task_type']} is not multi_label.", flush=True)
-        else:
-            num_classes = dataset_info["output_dim"]
-            labels = _gather_train_labels(train_loader, num_classes)
-            pw = compute_pos_weight(labels, num_classes)
-            pos_weight = torch.as_tensor(pw, dtype=torch.float32, device=args.device)
-            print(f"pos_weight (sqrt(N/(C*n_k))): {np.round(pw, 3)}", flush=True)
+    # Optional loss weighting: multi_label -> BCE pos_weight; multiclass ->
+    # inverse-frequency CE class weights (routed to node/graph multiclass).
+    pos_weight = build_pos_or_class_weight(args, dataset_info, train_loader, args.device)
 
     task = build_task(dataset_name, dataset_info=dataset_info, pos_weight=pos_weight,
                       focal_gamma=args.focal_gamma, label_smoothing=args.label_smoothing)
@@ -659,7 +696,7 @@ def main():
     # ------------------------------------------------------------------ #
     if args.checkpoint is not None:
         print(f"Loading checkpoint from: {args.checkpoint}", flush=True)
-        ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
+        ckpt = torch.load(args.checkpoint, map_location=args.device)
 
         # Model weights (required)
         model.load_state_dict(ckpt["model"])
@@ -784,7 +821,7 @@ def main():
     print("\n=== Error-by-diameter analysis ===", flush=True)
     ckpt_path = os.path.join(args.save_dir, f"best_{dataset_name}.pt")
     if os.path.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, map_location=args.device, weights_only=False)
+        ckpt = torch.load(ckpt_path, map_location=args.device)
         model.load_state_dict(ckpt["model"])
         print(f"Loaded best checkpoint (epoch {ckpt.get('epoch', '?')})", flush=True)
     else:
@@ -1070,3 +1107,4 @@ def _plot_error_by_diameter(model, train_loader, val_loader, test_loader,
 
 if __name__ == "__main__":
     main()
+

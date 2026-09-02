@@ -100,16 +100,24 @@ class FocalCrossEntropyLoss(nn.Module):
         gamma: float = 2.0,
         ignore_index: int = -1,
         reduction: str = "mean",
+        weight: torch.Tensor = None,
     ):
         super().__init__()
         self.gamma = gamma
         self.ignore_index = ignore_index
         self.reduction = reduction
+        # (C,) per-class weight vector (inverse-frequency); registered as a
+        # buffer so .to(device) moves it with the module.
+        if weight is not None:
+            self.register_buffer("weight", weight)
+        else:
+            self.weight = None
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         # Per-element CE, ignore_index handled by masking below
         ce = F.cross_entropy(
-            logits, targets, ignore_index=self.ignore_index, reduction="none"
+            logits, targets, weight=self.weight,
+            ignore_index=self.ignore_index, reduction="none"
         )
 
         valid = targets != self.ignore_index   # (N,) or (B,) mask
@@ -419,6 +427,10 @@ class Task:
             # PyTorch's CrossEntropyLoss has native label_smoothing support;
             # FocalCrossEntropyLoss uses hard targets so smoothing is skipped
             # (focal + smoothing interact non-trivially — handle separately).
+            # pos_weight (when provided) carries the (C,) inverse-frequency
+            # class-weight vector for node/graph multiclass tasks — up-weighting
+            # rare classes to close the macro-F1 gap under class imbalance.
+            class_weight = pos_weight
             if _use_focal:
                 if label_smoothing > 0.0:
                     print(f"[Task] label_smoothing={label_smoothing} ignored for "
@@ -426,10 +438,11 @@ class Task:
                           f"smoothing interact non-trivially; use one at a time.",
                           flush=True)
                 self.loss_fn = FocalCrossEntropyLoss(
-                    gamma=focal_gamma, ignore_index=-1
+                    gamma=focal_gamma, ignore_index=-1, weight=class_weight
                 )
             else:
                 self.loss_fn = nn.CrossEntropyLoss(
+                    weight=class_weight,
                     ignore_index=-1, label_smoothing=self.label_smoothing
                 )
         else:
@@ -442,7 +455,6 @@ class Task:
         (batch_or_nodes, num_classes). Some datasets store labels with an
         extra singleton dimension, so flattening keeps loss/metrics aligned.
         """
-        print("METRICS _flatten_label ===================== ", y.dim())
         if y.dim() > 1:
             return y.view(-1)
         return y
@@ -574,3 +586,24 @@ def compute_pos_weight(labels: np.ndarray, num_classes: int) -> np.ndarray:
     n_k = labels.sum(axis=0).astype(np.float64)         # positives per class
     n_k = np.clip(n_k, 1.0, None)
     return np.sqrt(N / (num_classes * n_k))
+
+
+def compute_class_weights(labels: np.ndarray, num_classes: int) -> np.ndarray:
+    """Inverse-frequency class weights for multiclass (node/graph) CE.
+
+    w_c = N / (C * n_c), then normalised to mean 1 so the overall loss scale is
+    unchanged.  Rare classes get up-weighted, which is what macro-F1 rewards.
+
+    labels: 1-D array of integer class indices (padding value -1 already removed
+            by the caller).  n_c = count of class c (clipped to 1 to avoid /0).
+    Returns: (C,) float array of per-class weights.
+    """
+    labels = np.asarray(labels).reshape(-1).astype(np.int64)
+    counts = np.bincount(labels, minlength=num_classes)[:num_classes].astype(np.float64)
+    counts = np.clip(counts, 1.0, None)
+    N = counts.sum()
+    w = N / (num_classes * counts)
+    return w / w.mean()
+
+
+
