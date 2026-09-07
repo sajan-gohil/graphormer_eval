@@ -394,11 +394,10 @@ class Task:
         self.nan_labels = bool(info.get("nan_labels", False))
         self.focal_gamma = focal_gamma
 
-        if self.level == "link":
-            raise NotImplementedError(
-                f"{self.dataset_name} is a link-level task; Task supports "
-                f"'graph' and 'node' only."
-            )
+        # Link-level (PCQM-Contact): pair scoring with BCE on node-pair logits
+        # and OGB filtered-MRR. task_type is "multi_label" so BCEWithLogitsLoss
+        # is built below; the epoch loop drives pair construction + MRR via the
+        # link_* helpers, not the generic logits/y path.
         # Label smoothing replaces hard {0,1} targets with {ε, 1−ε} for
         # multi_label tasks and passes label_smoothing to CrossEntropyLoss for
         # multiclass tasks.  Has no effect on regression.
@@ -542,14 +541,16 @@ class Task:
         if self.metric_name == "accuracy":
             ignore_index = -1 if self.level == "node" else None
             return compute_accuracy(preds, labels, ignore_index=ignore_index)
+        # mrr is computed directly in the link epoch loop (needs per-graph
+        # ranking, not flat preds/labels), so it is not handled here.
         raise ValueError(f"Unknown metric_name: {self.metric_name}")
 
     # --- Friendlier metric direction (higher_is_better) -------------
     @property
     def higher_is_better(self) -> bool:
-        # AP, F1, accuracy and ROC-AUC are higher-is-better; MAE is lower.
+        # AP, F1, accuracy, ROC-AUC and MRR are higher-is-better; MAE is lower.
         return self.metric_name in ("macro_ap", "node_f1_macro", "accuracy",
-                                    "rocauc")
+                                    "rocauc", "mrr")
 
     @property
     def metric_label(self) -> str:
@@ -559,6 +560,7 @@ class Task:
             "node_f1_macro": "F1",
             "accuracy": "Acc",
             "rocauc": "ROC-AUC",
+            "mrr": "MRR",
         }[self.metric_name]
 
 
@@ -604,6 +606,115 @@ def compute_class_weights(labels: np.ndarray, num_classes: int) -> np.ndarray:
     N = counts.sum()
     w = N / (num_classes * counts)
     return w / w.mean()
+
+
+# ===========================================================================
+# Link-level (PCQM-Contact) helpers.
+#
+# The model returns *decoded* per-node embeddings h (global node order aligned
+# with the batch).  A pair (i, j) is scored by a dot product h_i·h_j (matching
+# the repo's GraphGPS `inductive_edge` head with edge_decoding='dot').  Training
+# uses BCE over positive contact pairs + structured negatives; evaluation uses
+# the OGB filtered-MRR that ranks each positive tail against all other nodes in
+# its graph.
+# ===========================================================================
+def link_scores(h: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    """Dot-product logit for each (src, dst) column of edge_index (global idx)."""
+    return (h[edge_index[0]] * h[edge_index[1]]).sum(dim=-1)
+
+
+def _graph_offsets(node_batch: torch.Tensor, B: int) -> torch.Tensor:
+    """Per-graph starting node index in the batched (global) node ordering."""
+    counts = torch.bincount(node_batch, minlength=B)
+    offsets = torch.zeros(B, dtype=torch.long, device=node_batch.device)
+    if B > 1:
+        offsets[1:] = counts.cumsum(0)[:-1]
+    return counts, offsets
+
+
+def build_link_targets(batch, num_neg_per_pos: int = 1):
+    """Build (edge_index_all (2,M) global, labels (M,)) for the BCE link loss.
+
+    Positives are the labeled contact pairs (edge_label == 1).  For each
+    positive (i, j) we sample ``num_neg_per_pos`` negatives (i, k) with k a
+    random node in the *same graph* (structured negative sampling, matching the
+    GraphGPS transform).  Random negatives may occasionally coincide with a true
+    contact — an accepted approximation, as in the reference.
+    """
+    eidx = batch.edge_label_index                    # (2, P) global
+    elab = batch.edge_label.view(-1)                 # (P,)
+    node_batch = batch.batch
+    B = int(node_batch.max().item()) + 1 if node_batch.numel() > 0 else 0
+    counts, offsets = _graph_offsets(node_batch, B)
+    ebatch = node_batch[eidx[0]]                      # graph id per labeled edge
+
+    pos = eidx[:, elab == 1]                          # (2, P+)
+    src_all = [pos[0]]
+    dst_all = [pos[1]]
+    lab_all = [torch.ones(pos.shape[1], device=eidx.device)]
+
+    for g in range(B):
+        p = eidx[:, (ebatch == g) & (elab == 1)]
+        npos = p.shape[1]
+        if npos == 0:
+            continue
+        ng = int(counts[g].item())
+        off = int(offsets[g].item())
+        heads = p[0].repeat_interleave(num_neg_per_pos)
+        rand = torch.randint(ng, (npos * num_neg_per_pos,), device=eidx.device) + off
+        src_all.append(heads)
+        dst_all.append(rand)
+        lab_all.append(torch.zeros(heads.shape[0], device=eidx.device))
+
+    edge_index = torch.stack([torch.cat(src_all), torch.cat(dst_all)], dim=0)
+    labels = torch.cat(lab_all)
+    return edge_index, labels
+
+
+def _eval_mrr(y_pred_pos: torch.Tensor, y_pred_neg: torch.Tensor) -> torch.Tensor:
+    """OGB MRR: reciprocal rank of each positive among [pos, negatives].
+
+    y_pred_pos: (P,);  y_pred_neg: (P, num_neg).  Returns (P,) reciprocal ranks.
+    (Implementation matches graphgps/head/inductive_edge.py::_eval_mrr.)
+    """
+    y_pred = torch.cat([y_pred_pos.view(-1, 1), y_pred_neg], dim=1)
+    argsort = torch.argsort(y_pred, dim=1, descending=True)
+    ranking = torch.nonzero(argsort == 0, as_tuple=False)[:, 1] + 1
+    return 1.0 / ranking.to(torch.float)
+
+
+@torch.no_grad()
+def compute_link_mrr(h: torch.Tensor, batch) -> float:
+    """Filtered MRR over a batch: per graph, rank each positive tail against all
+    other nodes in that graph (self-tail masked out).  Mean reciprocal rank."""
+    eidx = batch.edge_label_index
+    elab = batch.edge_label.view(-1)
+    node_batch = batch.batch
+    B = int(node_batch.max().item()) + 1 if node_batch.numel() > 0 else 0
+    counts, offsets = _graph_offsets(node_batch, B)
+    ebatch = node_batch[eidx[0]]
+
+    rr = []
+    for g in range(B):
+        hg = h[node_batch == g]                      # (ng, d)
+        ng = hg.shape[0]
+        p = eidx[:, (ebatch == g) & (elab == 1)]
+        npos = p.shape[1]
+        if npos == 0 or ng < 2:
+            continue
+        off = int(offsets[g].item())
+        src = p[0] - off
+        dst = p[1] - off
+        pred = hg @ hg.t()                           # (ng, ng)
+        pred_pos = pred[src, dst]                     # (npos,)
+        neg_mask = torch.ones(npos, ng, dtype=torch.bool, device=h.device)
+        neg_mask[torch.arange(npos, device=h.device), dst] = False
+        pred_neg = pred[src][neg_mask].view(npos, -1)  # (npos, ng-1)
+        rr.append(_eval_mrr(pred_pos, pred_neg))
+
+    if not rr:
+        return 0.0
+    return float(torch.cat(rr).mean().item())
 
 
 

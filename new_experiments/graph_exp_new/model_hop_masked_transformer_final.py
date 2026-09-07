@@ -360,6 +360,97 @@ class AttentionReadout(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Attention diagnostics (opt-in; off by default, zero cost when disabled)
+# ---------------------------------------------------------------------------
+# Toggle with ``set_attn_diagnostics(True)``. When on, attention modules stash
+# detached per-head summary statistics in ``module._diag`` after each forward.
+# Nothing is retained across forwards, so memory is bounded by one batch.
+_DIAG_ENABLED = False
+
+
+def set_attn_diagnostics(enabled: bool = True):
+    """Enable/disable per-head attention statistic collection."""
+    global _DIAG_ENABLED
+    _DIAG_ENABLED = enabled
+
+
+def attn_diagnostics_enabled() -> bool:
+    return _DIAG_ENABLED
+
+
+@torch.no_grad()
+def _hop_attn_stats(attn, v, per_head_mask, node_mask):
+    """Per-head statistics for hop-masked attention.
+
+    attn: (B, H, N, N) post-softmax. v: (B, H, N, Dv). Returns a dict of
+    (H,) CPU tensors, averaged over valid query rows and the batch.
+
+    Averages are taken over query rows where the head has at least one
+    non-self allowed key. Rows where its hop shell is empty are excluded:
+    there the softmax has no choice but to put all mass on the self-loop, so
+    including them would report forced behaviour as if it were learned.
+    """
+    B, H, N, _ = attn.shape
+    allowed = (per_head_mask & node_mask[:, None, None, :]
+               & node_mask[:, None, :, None])                  # (B,H,N,N)
+    n_allowed = allowed.sum(-1).float()                        # (B,H,N)
+    live = n_allowed > 0                                       # (B,H,N)
+    # Real (unpadded) query rows, so live_frac reports head idleness rather
+    # than the batch's padding ratio.
+    n_real = node_mask.sum().clamp(min=1).float()
+    # Every head's hop set contains hop 0, so a node is always "live" via its
+    # own self-loop. The informative quantity is whether the head has any
+    # NON-SELF key: that is what distinguishes a working head from one whose
+    # hop simply does not occur in this graph.
+    eye = torch.eye(N, dtype=torch.bool, device=attn.device)
+    nonself = (allowed & ~eye[None, None]).sum(-1) > 0          # (B,H,N)
+
+    # All averaged statistics below are conditioned on `nonself`, NOT on
+    # `live`. On a row where the head's hop shell is empty, self is the only
+    # allowed key, so the softmax is forced to put all mass there: part=1.0,
+    # self=1.0, entropy=0. Those values are structural, not learned. Pooling
+    # them with real rows drags every column toward the degenerate limit and
+    # makes `self` and `part` mutually inconsistent. `live_nonself` reports
+    # what fraction of rows survive this filter; when it is 0 for a head, the
+    # conditioned statistics are undefined and come back as 0.
+    denom = nonself.sum((0, 2)).clamp(min=1).float()           # (H,)
+
+    p = attn.clamp_min(0)
+    ent = -(p * (p + 1e-12).log()).sum(-1)                     # (B,H,N)
+    # Normalised entropy: 1.0 = uniform over the allowed set, 0.0 = one key.
+    ent_norm = ent / n_allowed.clamp(min=2).log()
+    # Participation ratio = effective number of keys actually attended.
+    part = 1.0 / p.pow(2).sum(-1).clamp_min(1e-12)             # (B,H,N)
+    diag_mass = p.diagonal(dim1=-2, dim2=-1)                   # (B,H,N)
+
+    def _m(t):
+        return (t * nonself).sum((0, 2)) / denom
+
+    return {
+        "entropy": _m(ent).cpu(),
+        "entropy_norm": _m(ent_norm).cpu(),
+        "participation": _m(part).cpu(),
+        "allowed_keys": _m(n_allowed).cpu(),
+        # Fraction of the head's attention that never leaves the query node.
+        "self_mass": _m(diag_mass).cpu(),
+        # Norm of what the head actually transports. A head can have healthy
+        # attention yet move nothing if its value vectors are near zero.
+        "out_norm": _m(torch.linalg.norm(torch.matmul(attn, v), dim=-1)).cpu(),
+        "live_frac": (live.sum((0, 2)).float() / n_real).cpu(),
+        "live_nonself": (nonself.sum((0, 2)).float() / n_real).cpu(),
+    }
+
+
+@torch.no_grad()
+def _cross_hop_stats(attn):
+    """Statistics for cross-hop mixing attention. attn: (B, N, Hq, Hk)."""
+    p = attn.clamp_min(0)
+    mix = p.mean((0, 1))                                       # (Hq, Hk)
+    ent = -(p * (p + 1e-12).log()).sum(-1).mean((0, 1))         # (Hq,)
+    return {"mix_matrix": mix.cpu(), "entropy": ent.cpu()}
+
+
+# ---------------------------------------------------------------------------
 # Dynamic cross-hop mixer: self-attention along the hop axis.
 # ---------------------------------------------------------------------------
 class DynamicCrossHopMixer(nn.Module):
@@ -426,14 +517,14 @@ class DynamicCrossHopMixer(nn.Module):
             # Soft, gate-weighted per-hop embedding (resolved at forward time).
             self.hop_mode = "moe"
             self.hop_embedding = nn.Embedding(max_hops, head_dim)
-            scaled_std = 0.02 * (head_dim ** -0.5) 
+            scaled_std = 0.02 * (head_dim ** -0.5)
             nn.init.normal_(self.hop_embedding.weight, mean=0.0, std=scaled_std)
 
         elif hop_membership is not None:
             # Fixed per-head sum over the head's hops.
             self.hop_mode = "membership"
             self.hop_embedding = nn.Embedding(max_hops, head_dim)
-            scaled_std = 0.02 * (head_dim ** -0.5) 
+            scaled_std = 0.02 * (head_dim ** -0.5)
             nn.init.normal_(self.hop_embedding.weight, mean=0.0, std=scaled_std)
 
             self.register_buffer("hop_membership", hop_membership.float())
@@ -447,7 +538,7 @@ class DynamicCrossHopMixer(nn.Module):
         self.q = nn.Linear(head_dim*multiplier, head_dim)
         self.k = nn.Linear(head_dim*multiplier, head_dim)
         self.v = nn.Linear(head_dim*multiplier, head_dim)
- 
+
 
     def forward(self, x: torch.Tensor,
                 gate_weights: Optional[torch.Tensor] = None,
@@ -510,6 +601,8 @@ class DynamicCrossHopMixer(nn.Module):
         attn = F.softmax(attn, dim=-1)
         # Rows where every key is masked produce NaN → replace with 0.
         attn = torch.nan_to_num(attn, nan=0.0)
+        if _DIAG_ENABLED:
+            self._diag = _cross_hop_stats(attn.detach())
         attn = self.drop(attn)
 
         # Mix: (B, N, H, H) @ (B, N, H, Dh) -> (B, N, H, Dh)
@@ -627,7 +720,20 @@ class HopMaskedMHA(nn.Module):
         # Rows with no valid keys produce NaN — replace with zeros so the
         # node simply gets a zero contribution from this head.
         attn = torch.nan_to_num(attn, nan=0.0)
-        attn = self.attn_drop(attn)
+        if _DIAG_ENABLED:
+            self._diag = _hop_attn_stats(attn.detach(), v.detach(),
+                                         per_head_mask, node_mask)
+
+        # Masked attention dropout: only drop within structurally allowed
+        # positions so dropout budget is not wasted on already-zero entries.
+        if self.training and self.attn_drop.p > 0:
+            p = self.attn_drop.p
+            allowed = (per_head_mask
+                       & node_mask[:, None, None, :]
+                       & node_mask[:, None, :, None])
+            keep = torch.rand_like(attn) >= p
+            keep = keep | ~allowed        # never drop disallowed positions
+            attn = attn * keep.to(attn.dtype) / (1 - p)
 
         out = torch.matmul(attn, v)                       # (B, H, N, Dv)
         out = out.transpose(1, 2).reshape(B, N, self.v_dim)  # (B, N, H*Dv)
@@ -1282,6 +1388,7 @@ class HopMaskedTransformerModel(nn.Module):
         # encoder and before the first transformer layer.  Separate from the
         # per-sublayer ``dropout`` so it can be tuned independently.
         self.embed_drop = nn.Dropout(embed_dropout)
+        self.dropout = dropout
 
         # ----- Per-layer hop sets (alternating mode) or shared -----
         if self.use_alternating:
@@ -1430,6 +1537,19 @@ class HopMaskedTransformerModel(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim),
         )
+
+        # Link-level tasks (PCQM-Contact): decode per-node embeddings that are
+        # scored by dot product for pair prediction. Replaces the classifier
+        # head; pair construction + MRR live in the link epoch loop.
+        self.link_head = None
+        if task_level == "link":
+            self.link_head = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
 
         if use_virtual_node:
             self.vn_embed = nn.Parameter(
@@ -1699,12 +1819,20 @@ class HopMaskedTransformerModel(nn.Module):
                 continue
             idx = [k for k in hop_set if k < K_runtime]
             if not idx:
-                # Empty — head sees nothing; softmax row will be NaN→zero.
-                # This happens only if all hops in the set exceed K_runtime,
-                # which is the dataset's actual diameter cap.
+                # Head's hops all exceed graph diameter → promote to global
+                out[:, h] = True
                 continue
             stacked = dist_masks[:, idx].bool().any(dim=1)  # (B, N, N)
             out[:, h] = stacked
+
+        # Per-batch promotion: heads whose mask is identity (only self-loop)
+        # or all-zero have no inter-node information — promote to global.
+        # adj_blend_bias is computed independently from hop_sets and stays as-is.
+        eye = torch.eye(N, device=dist_masks.device, dtype=torch.bool)
+        non_self = out & ~eye[None, None]              # (B, H, N, N)
+        has_nonself = non_self.any(dim=-1).any(dim=-1)  # (B, H)
+        out[~has_nonself] = True
+
         return out
 
     # ----------------------------------------------------------------
@@ -1843,6 +1971,15 @@ class HopMaskedTransformerModel(nn.Module):
                     mask_source, self.per_layer_hop_sets[layer_idx],
                 )
 
+                # Random global head promotion: during training, randomly
+                # make some heads attend globally with prob dropout/2.
+                if self.training and self.dropout > 0:
+                    B_cur = per_head_mask.shape[0]
+                    random_global = torch.rand(
+                        B_cur, self.num_heads, device=x.device,
+                    ) < (self.dropout / 2)
+                    per_head_mask[random_global] = True
+
                 # ── Head validity mask for cross-hop mixer ────────────────
                 # When num_heads > graph diameter, some heads end up with only
                 # the hop-0 self-loop valid (no inter-node pairs at their assigned
@@ -1907,6 +2044,11 @@ class HopMaskedTransformerModel(nn.Module):
             edge_attr = getattr(batch, "edge_attr", None) if self.use_edge_features else None
             node_emb = self.post_gat(node_emb, batch.edge_index, edge_attr=edge_attr)
 
+        if self.task_level == "link":
+            # Decoded per-node embeddings (global node order aligned with the
+            # batch); the epoch loop scores node pairs by dot product.
+            return self.link_head(node_emb), node_emb, aux_loss, _exported_gw
+
         if self.task_level == "node":
             return self.head(node_emb), node_emb, aux_loss, _exported_gw
 
@@ -1927,6 +2069,7 @@ class HopMaskedTransformerModel(nn.Module):
             else:
                 pooled = global_add_pool(node_emb, batch_vec_dense)
         return self.head(pooled), node_emb, aux_loss, _exported_gw
+
 
 
 

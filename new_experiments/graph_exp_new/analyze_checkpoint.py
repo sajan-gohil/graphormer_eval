@@ -56,9 +56,9 @@ from scipy.stats import spearmanr
 
 from data import get_loaders
 from metrics import build_task
-from model_hop_masked_transformer_final import (HopMaskedTransformerModel,
+from model_hop_masked_transformer_final_2 import (HopMaskedTransformerModel,
                                                set_attn_diagnostics)
-from train_hop_masked_transformer_final import _move_batch_to_device
+from train_hop_masked_transformer_final_2 import _move_batch_to_device
 
 
 # ================================================================

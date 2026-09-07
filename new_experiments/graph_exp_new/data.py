@@ -6,6 +6,7 @@ import torch
 import torch_geometric
 from torch_geometric.datasets import LRGBDataset, GNNBenchmarkDataset, ZINC
 from torch_geometric.loader import DataLoader
+from torch_geometric.transforms import Compose
 from torch_geometric.utils import get_laplacian, to_scipy_sparse_matrix
 from scipy.sparse.csgraph import floyd_warshall
 from scipy.sparse.linalg import eigsh
@@ -70,6 +71,9 @@ GRAPH_DATASETS = {
         "node_feat_dim": 14,
         "metric_name": "node_f1_macro",
         "source": "lrgb",
+        # Raw superpixel channels have very different scales (RGB stats vs.
+        # coordinates vs. areas); standardize each channel with train-set stats.
+        "normalize_node_feats": True,
     },
     # COCO-SP: same superpixel featurisation as PascalVOC-SP (14 node feats)
     # but 81 classes and ~113k train graphs. The graph count is what makes the
@@ -82,6 +86,7 @@ GRAPH_DATASETS = {
         "node_feat_dim": 14,
         "metric_name": "node_f1_macro",
         "source": "lrgb",
+        "normalize_node_feats": True,
     },
     # ---- OGB graph-level (molecules; same 9-dim categorical atom features
     # ---- as Peptides, so `atom_categorical` applies unchanged) -------------
@@ -135,19 +140,20 @@ GRAPH_DATASETS = {
         "source": "transductive",
         "transductive": True,
     },
-    # ---- Deferred ----------------------------------------------------------
-    # PCQM-Contact is link-level (rank candidate contact pairs, filtered MRR).
-    # That needs level="link", a pair-scoring head over node embeddings, BCE on
-    # edge_label_index, and the filtered ranking protocol — none of which exist
-    # yet. Registered so --dataset fails with a clear message, not a KeyError.
+    # ---- Link-level (contact-map prediction) -------------------------------
+    # PCQM-Contact: rank candidate contact pairs by 3D proximity, filtered MRR.
+    # Loaded via PyG LRGBDataset; each graph carries edge_label_index/edge_label
+    # (positive contact pairs). The link epoch scores node pairs (dot product),
+    # trains with BCE + structured negatives, and evaluates OGB filtered MRR.
     "PCQM-Contact": {
         "output_dim": 1,
-        "task_type": "multi_label",
+        "task_type": "multi_label",   # BCE on pair logits
         "level": "link",
         "node_encoder": "atom_categorical",
         "node_feat_dim": 9,
         "metric_name": "mrr",
-        "source": "unsupported",
+        "source": "lrgb",
+        "pyg_name": "PCQM-Contact",
     },
     "MNIST": {
         "output_dim": "auto",
@@ -500,6 +506,64 @@ def collate_with_dist_masks(batch, max_hops=40):
 
 
 # ================================================================
+# CHANNEL-WISE FEATURE NORMALIZATION (continuous-feature datasets)
+# ================================================================
+class ChannelwiseNormalize:
+    """Per-channel standardization ``z = (x - mean) / std``.
+
+    ``mean``/``std`` are precomputed from the *training* split and applied to
+    every split. Raw PascalVOC-SP / COCO-SP superpixel channels span very
+    different scales (RGB statistics vs. normalized coordinates vs. pixel
+    areas); a single Linear encoder conditions much better on standardized
+    inputs. Only the first ``len(mean)`` channels are normalized (leaves any
+    appended features untouched).
+    """
+
+    def __init__(self, mean, std):
+        self.mean = torch.as_tensor(mean, dtype=torch.float32)
+        self.std = torch.as_tensor(std, dtype=torch.float32).clamp_min(1e-6)
+
+    def __call__(self, data):
+        x = data.x.float()
+        d = self.mean.numel()
+        if x.size(-1) >= d:
+            x = x.clone()
+            x[:, :d] = (x[:, :d] - self.mean) / self.std
+            data.x = x
+        return data
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(dim={self.mean.numel()})"
+
+
+def _fit_channel_stats(dataset, dim):
+    """Per-channel (mean, std) over all training nodes of ``dataset``.
+
+    Uses the InMemoryDataset's collated ``.x`` when available (one pass, O(1)
+    graph iteration); otherwise falls back to iterating graphs.
+    """
+    store = getattr(dataset, "_data", None) or getattr(dataset, "data", None)
+    if store is not None and getattr(store, "x", None) is not None:
+        X = store.x.float()
+        if X.size(-1) >= dim:
+            X = X[:, :dim]
+            mean = X.mean(dim=0)
+            std = X.std(dim=0, unbiased=False).clamp_min(1e-6)
+            return mean, std
+    n = 0
+    s = torch.zeros(dim)
+    ss = torch.zeros(dim)
+    for i in range(len(dataset)):
+        x = dataset[i].x.float()[:, :dim]
+        n += x.size(0)
+        s += x.sum(dim=0)
+        ss += (x * x).sum(dim=0)
+    mean = s / max(n, 1)
+    std = (ss / max(n, 1) - mean ** 2).clamp_min(1e-12).sqrt().clamp_min(1e-6)
+    return mean, std
+
+
+# ================================================================
 # LAPLACIAN POSITIONAL ENCODING
 # ================================================================
 
@@ -670,6 +734,19 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
         if info.get("node_feat_dim") in ("auto", None):
             info["node_feat_dim"] = inferred if inferred is not None else 1
 
+    # Channel-wise feature standardization for continuous-feature datasets
+    # (PascalVOC-SP / COCO-SP). Stats are fit on the train split only and the
+    # normalization is prepended to each split's transform.
+    if info.get("normalize_node_feats") and info.get("node_encoder") == "linear":
+        dim = int(info["node_feat_dim"])
+        mean, std = _fit_channel_stats(train_ds, dim)
+        norm_t = ChannelwiseNormalize(mean, std)
+        for ds in (train_ds, val_ds, test_ds):
+            base_t = getattr(ds, "transform", None)
+            ds.transform = Compose([norm_t, base_t]) if base_t is not None else norm_t
+        print(f"[{dataset_name}] channel-wise feature normalization applied "
+              f"(train-set mean/std, dim={dim}).", flush=True)
+
     if use_dist_masks:
         # Transductive caches depend on the sampling config, so key on it —
         # otherwise switching --num_parts would silently reuse the wrong cache.
@@ -789,3 +866,4 @@ def collate_with_proxies(batch):
         padded_masks[i, :n] = mask
 
     return pyg_batch, padded_embs, padded_masks, proxy_batch
+

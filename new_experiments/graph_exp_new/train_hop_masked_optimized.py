@@ -27,16 +27,17 @@ import torch
 
 from data import get_loaders
 from metrics import build_task
-from model_hop_masked_transformer_final_4 import set_attn_diagnostics
-from model_hop_masked_transformer_optimized import (
+from model_hop_masked_transformer_final import set_attn_diagnostics
+from model_hop_masked_optimized import (
     OptimizedHopMaskedTransformerModel,
     EMA,
     langevin_noise_,
     build_optimized_optimizer_and_scheduler,
 )
-from train_hop_masked_transformer_final_4 import (
+from train_hop_masked_transformer_final import (
     build_parser,
     run_epoch,               # used for eval passes (optimizer=None)
+    _run_link_epoch,         # link-level train/eval (SAM/EMA/SGLD aware)
     build_pos_or_class_weight,
     _log_head_stats,
     _move_batch_to_device,
@@ -113,6 +114,13 @@ def parse_args():
 def train_one_epoch(model, loader, task, device, optimizer, scheduler,
                     grad_clip, use_sam, ema, sgld):
     """One training epoch. ``sgld`` is a mutable dict {'beta','growth'} or None."""
+    # Link-level tasks: reuse the shared pair-scoring loop (SAM/EMA/SGLD aware).
+    if getattr(task, "level", None) == "link":
+        loss, metric, _ = _run_link_epoch(
+            model, loader, task, device, optimizer=optimizer, scheduler=scheduler,
+            grad_clip=grad_clip, sam=use_sam, ema=ema, sgld=sgld)
+        return loss, metric
+
     model.train()
     losses, preds_acc, labels_acc = [], [], []
 
@@ -195,9 +203,10 @@ def main():
                       focal_gamma=args.focal_gamma, label_smoothing=args.label_smoothing)
     task.loss_fn = task.loss_fn.to(args.device)
 
-    if args.use_normalized_head and task.task_type not in ("multiclass", "multi_label"):
-        print(f"[warn] --use_normalized_head is for classification; task_type="
-              f"{task.task_type}. Disabling it.", flush=True)
+    if args.use_normalized_head and (task.level == "link"
+                                     or task.task_type not in ("multiclass", "multi_label")):
+        print(f"[warn] --use_normalized_head is for classification; "
+              f"level={task.level} task_type={task.task_type}. Disabling it.", flush=True)
         args.use_normalized_head = False
 
     # ---- Optimized model ----

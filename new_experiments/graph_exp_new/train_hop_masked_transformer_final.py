@@ -37,8 +37,9 @@ import numpy as np
 import torch
 
 from data import DATASET_CHOICES, get_loaders
-from metrics import build_task, compute_pos_weight
-from model_hop_masked_transformer_final import HopMaskedTransformerModel
+from metrics import build_task, compute_pos_weight, compute_class_weights
+from model_hop_masked_transformer_final import (HopMaskedTransformerModel,
+                                                set_attn_diagnostics)
 from optim_utils import build_grouped_optimizer_and_scheduler
 
 os.environ["PYTHON_HASH_SEED"] = "42"
@@ -60,6 +61,52 @@ def _gather_train_labels(loader, num_classes):
     return np.stack(rows, axis=0)
 
 
+def _gather_node_labels(loader, num_classes):
+    """Collect all per-node class indices from a training loader (multiclass).
+
+    Returns a 1-D int array of every node's label across all training graphs,
+    with padding (-1) removed.
+    """
+    ds = loader.dataset
+    base = getattr(ds, "pyg_dataset", ds)   # unwrap DistMaskDataset
+    rows = []
+    for i in range(len(base)):
+        g = base[i]
+        y = g.y
+        y = y.numpy() if hasattr(y, "numpy") else np.asarray(y)
+        rows.append(y.reshape(-1))
+    labels = np.concatenate(rows, axis=0)
+    return labels[labels >= 0]
+
+
+def build_pos_or_class_weight(args, dataset_info, train_loader, device):
+    """Compute the loss weight vector when --use_pos_weight is set.
+
+    - multi_label -> per-class BCE pos_weight  = sqrt(N/(C*n_k))
+    - multiclass  -> per-class CE class weights = N/(C*n_c), mean-normalised
+                     (routes class weights to node/graph multiclass tasks)
+    Returns a (C,) float tensor on ``device`` or None.
+    """
+    if not args.use_pos_weight:
+        return None
+    if dataset_info.get("level") == "link":
+        print("--use_pos_weight ignored: link tasks use BCE over sampled pairs.",
+              flush=True)
+        return None
+    ttype = dataset_info["task_type"]
+    C = dataset_info["output_dim"]
+    if ttype == "multi_label":
+        w = compute_pos_weight(_gather_train_labels(train_loader, C), C)
+        print(f"pos_weight (sqrt(N/(C*n_k))): {np.round(w, 3)}", flush=True)
+    elif ttype == "multiclass":
+        w = compute_class_weights(_gather_node_labels(train_loader, C), C)
+        print(f"class_weight N/(C*n_c) mean-norm: {np.round(w, 3)}", flush=True)
+    else:
+        print(f"--use_pos_weight ignored: task_type={ttype} unsupported.", flush=True)
+        return None
+    return torch.as_tensor(w, dtype=torch.float32, device=device)
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="Train hop-masked transformer")
 
@@ -68,7 +115,28 @@ def build_parser():
                    choices=DATASET_CHOICES)
     p.add_argument("--max_hops", type=int, default=40,
                    help="K — total hop levels in the precomputed dist_masks. "
-                        "Use ~12 for PascalVOC-SP.")
+                        "Use ~12 for PascalVOC-SP/COCO-SP and ~8 for the "
+                        "transductive datasets (the collate buffer is "
+                        "B*max_hops*N^2*4 bytes).")
+    # ---- Transductive subgraph sampling (ogbn-arxiv, ogbn-products,
+    # ---- arxiv-year only; ignored for every other dataset) ----------------
+    p.add_argument("--subgraph_mode", type=str, default="partition",
+                   choices=["partition", "egonet"],
+                   help="How to cut a single huge graph into trainable pieces. "
+                        "'partition' mirrors S2GNN (random node partition, "
+                        "induced subgraphs). 'egonet' takes a k-hop "
+                        "neighbourhood per labelled node.")
+    p.add_argument("--num_parts", type=int, default=128,
+                   help="subgraph_mode=partition: number of random parts. "
+                        "Target 1000-2000 nodes/part (arxiv ~128, "
+                        "products ~2048).")
+    p.add_argument("--egonet_hops", type=int, default=2,
+                   help="subgraph_mode=egonet: neighbourhood radius.")
+    p.add_argument("--egonet_max_nodes", type=int, default=1024,
+                   help="subgraph_mode=egonet: cap on nodes per ego net.")
+    p.add_argument("--max_egonet_samples", type=int, default=None,
+                   help="subgraph_mode=egonet: subsample this many seed nodes "
+                        "per split (None = every labelled node).")
     p.add_argument("--use_lap_pe", action="store_true", default=False)
     p.add_argument("--lap_pe_dim", type=int, default=8)
     p.add_argument("--mask_type", type=str, default="shortest_path",
@@ -285,6 +353,68 @@ def _move_batch_to_device(batch, device):
     return pyg_batch.to(device), dist_masks.to(device), node_masks.to(device)
 
 
+def _run_link_epoch(model, loader, task, device, optimizer=None, scheduler=None,
+                    grad_clip=1.0, sam=False, ema=None, sgld=None):
+    """One epoch for link-level tasks (PCQM-Contact).
+
+    The model returns decoded per-node embeddings; pairs are scored by dot
+    product. Train: BCE over positive contact pairs + structured negatives.
+    Metric: OGB filtered MRR (computed every pass so train/val/test all report).
+
+    ``sam`` / ``ema`` / ``sgld`` are only used by the optimized trainer; the base
+    trainer calls this with the defaults.
+    """
+    from metrics import build_link_targets, link_scores, compute_link_mrr
+
+    is_train = optimizer is not None
+    model.train(is_train)
+    losses, mrrs = [], []
+
+    for batch in loader:
+        pyg_batch, dist_masks, node_masks = _move_batch_to_device(batch, device)
+
+        def _forward():
+            h, _, aux, _ = model(pyg_batch, dist_masks, node_masks)
+            edge_index, labels = build_link_targets(pyg_batch, num_neg_per_pos=1)
+            logits = link_scores(h, edge_index)
+            return task.loss_fn(logits, labels.float()) + aux, h
+
+        if is_train:
+            optimizer.zero_grad()
+        with torch.set_grad_enabled(is_train):
+            loss, h = _forward()
+
+        if is_train:
+            loss.backward()
+            if grad_clip is not None and grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+            if sam:
+                def closure():
+                    optimizer.zero_grad()
+                    l, _ = _forward()
+                    l.backward()
+                    if grad_clip is not None and grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    return l
+                optimizer.step(closure)
+            else:
+                optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+            if sgld is not None:
+                from model_hop_masked_optimized import langevin_noise_
+                langevin_noise_(model.parameters(),
+                                lr=optimizer.param_groups[0]["lr"], beta=sgld["beta"])
+                sgld["beta"] *= sgld["growth"]
+            if ema is not None:
+                ema.update(model)
+
+        losses.append(float(loss.item()))
+        mrrs.append(compute_link_mrr(h.detach(), pyg_batch))
+
+    return float(np.mean(losses)), float(np.mean(mrrs)) if mrrs else 0.0, None
+
+
 def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
               grad_clip=1.0, collect_gate_weights=False):
     """Run one epoch.
@@ -297,6 +427,12 @@ def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
         gate-probability distribution averaged over all batches in this epoch
         (and over layers).  Each row sums to ~1 (softmax).
     """
+    # Link-level tasks use a dedicated pair-scoring / MRR loop.
+    if getattr(task, "level", None) == "link":
+        return _run_link_epoch(model, loader, task, device,
+                               optimizer=optimizer, scheduler=scheduler,
+                               grad_clip=grad_clip)
+
     is_train = optimizer is not None
     model.train(is_train)
 
@@ -362,6 +498,51 @@ def _log_head_stats(epoch, model, gate_weights_mean, args):
         With multiple layers each layer's gammas are shown separately.
     """
     prefix = f"[epoch {epoch:03d}]"
+
+    # ── Attention diagnostics ─────────────────────────────────────────────────
+    # Populated only when set_attn_diagnostics(True) was active during the
+    # preceding val pass. Reads whatever the last val batch left in _diag.
+    #
+    #   ent_n   normalised entropy, 1.0 = uniform over allowed keys, 0.0 = one key
+    #   part    participation ratio = effective number of keys attended
+    #   keys    mean allowed keys per query row (structural capacity of the hop)
+    #   self    attention mass staying on the query node
+    #   |out|   norm of what the head transports (near 0 = head moves nothing
+    #           even if its attention looks healthy)
+    #   live    sanity check: rows with any allowed key. 1.0 whenever every
+    #           head's hop set contains hop 0; below 1.0 flags a masking bug
+    #   live_ns rows with a NON-SELF allowed key, i.e. rows where this hop
+    #           actually exists. Every column above is averaged over ONLY those
+    #           rows, so a low live_ns means a small effective sample
+    for layer_idx, layer in enumerate(getattr(model, "layers", [])):
+        d = getattr(getattr(layer, "attn", None), "_diag", None)
+        if d is None:
+            continue
+        hop_sets = getattr(model, "head_hop_sets", None)
+        print(f"{prefix} [layer {layer_idx}] hop-attention per head:", flush=True)
+        for h in range(d["entropy"].numel()):
+            hop_lbl = "global"
+            if hop_sets is not None and h < len(hop_sets):
+                hs = hop_sets[h]
+                hop_lbl = "global" if hs is None else ",".join(map(str, hs))
+            print(f"  head {h:02d} | hops={hop_lbl:<12s} "
+                  f"ent_n={float(d['entropy_norm'][h]):.3f} "
+                  f"part={float(d['participation'][h]):6.2f} "
+                  f"keys={float(d['allowed_keys'][h]):6.2f} "
+                  f"self={float(d['self_mass'][h]):.3f} "
+                  f"|out|={float(d['out_norm'][h]):.3f} "
+                  f"live={float(d['live_frac'][h]):.3f} "
+                  f"live_ns={float(d['live_nonself'][h]):.3f}", flush=True)
+
+        cd = getattr(getattr(layer, "cross_hop", None), "_diag", None)
+        if cd is not None:
+            mix = cd["mix_matrix"]
+            print(f"{prefix} [layer {layer_idx}] cross-hop mixing "
+                  f"(row=query head, col=key head):", flush=True)
+            for h in range(mix.shape[0]):
+                row = " ".join(f"{float(x):.2f}" for x in mix[h])
+                print(f"  head {h:02d} | ent={float(cd['entropy'][h]):.3f} | {row}",
+                      flush=True)
 
     # ── MoE gate distribution ─────────────────────────────────────────────────
     if args.use_moe_gating and gate_weights_mean is not None:
@@ -429,21 +610,18 @@ def main():
         lap_pe_dim=args.lap_pe_dim,
         dataset_name=args.dataset,
         return_info=True,
+        subgraph_mode=args.subgraph_mode,
+        num_parts=args.num_parts,
+        egonet_hops=args.egonet_hops,
+        egonet_max_nodes=args.egonet_max_nodes,
+        max_egonet_samples=args.max_egonet_samples,
+        seed=args.seed,
     )
     dataset_name = dataset_info["name"]
 
-    # Optional per-class pos_weight = sqrt(N / (C * n_k)) for multi-label BCE.
-    pos_weight = None
-    if args.use_pos_weight:
-        if dataset_info["task_type"] != "multi_label":
-            print(f"--use_pos_weight ignored: task_type="
-                  f"{dataset_info['task_type']} is not multi_label.", flush=True)
-        else:
-            num_classes = dataset_info["output_dim"]
-            labels = _gather_train_labels(train_loader, num_classes)
-            pw = compute_pos_weight(labels, num_classes)
-            pos_weight = torch.as_tensor(pw, dtype=torch.float32, device=args.device)
-            print(f"pos_weight (sqrt(N/(C*n_k))): {np.round(pw, 3)}", flush=True)
+    # Optional loss weighting: multi_label -> BCE pos_weight; multiclass ->
+    # inverse-frequency CE class weights (routed to node/graph multiclass).
+    pos_weight = build_pos_or_class_weight(args, dataset_info, train_loader, args.device)
 
     task = build_task(dataset_name, dataset_info=dataset_info, pos_weight=pos_weight,
                       focal_gamma=args.focal_gamma, label_smoothing=args.label_smoothing)
@@ -635,10 +813,9 @@ def main():
 
     # Pre-compute whether head stats should be logged this epoch.
     _log_interval = args.log_head_stats_interval
-    _want_head_stats = (
-        _log_interval > 0
-        and (args.use_moe_gating or args.blend_adj_power)
-    )
+    # Attention diagnostics need no extra flags, so any positive interval now
+    # produces per-head output. The gate/gamma sections still self-gate below.
+    _want_head_stats = _log_interval > 0
 
     for epoch in range(start_epoch, args.max_epochs):
         t0 = time.time()
@@ -648,10 +825,13 @@ def main():
         )
         # Collect gate weights on val pass when it's a logging epoch.
         _collect_gw = _want_head_stats and (epoch % _log_interval == 0)
+        if _collect_gw:
+            set_attn_diagnostics(True)
         va_loss, va_metric, _gw_mean = run_epoch(
             model, val_loader, task, args.device,
             collect_gate_weights=_collect_gw,
         )
+        set_attn_diagnostics(False)
         plateau_scheduler.step(va_metric)
         te_loss, te_metric, _ = run_epoch(model, test_loader, task, args.device)
         dt = time.time() - t0
@@ -778,7 +958,7 @@ def _collect_per_sample_data(model, loader, task, device):
             loss_per = F.binary_cross_entropy_with_logits(
                 logits, y, reduction="none"
             ).mean(dim=-1)
-            
+
             y_trues.append(y.detach().cpu().numpy())
             y_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
         elif task.task_type == "regression":
@@ -866,7 +1046,7 @@ def _plot_error_by_diameter(model, train_loader, val_loader, test_loader,
     # --- Print summary statistics per diameter ---
     all_diameters = np.unique(np.concatenate(
         [train_diameters, val_diameters, test_diameters]))
-    
+
     if has_ap:
         print(f"\n  {'Diam':>5s} | {'Train N':>8s} {'Tr Mean':>9s} {'Tr Med':>8s} {'Tr AP':>8s} "
               f"| {'Val N':>6s} {'Val Mean':>9s} {'Val Med':>8s} {'Val AP':>8s} "
@@ -891,7 +1071,7 @@ def _plot_error_by_diameter(model, train_loader, val_loader, test_loader,
         va_med = np.median(val_losses[va_mask]) if va_n > 0 else float("nan")
         te_mean = np.mean(test_losses[te_mask]) if te_n > 0 else float("nan")
         te_med = np.median(test_losses[te_mask]) if te_n > 0 else float("nan")
-        
+
         if has_ap:
             tr_ap = _safe_ap(train_y[tr_mask], train_p[tr_mask]) if tr_n > 0 else float("nan")
             va_ap = _safe_ap(val_y[va_mask], val_p[va_mask]) if va_n > 0 else float("nan")
@@ -999,3 +1179,4 @@ def _plot_error_by_diameter(model, train_loader, val_loader, test_loader,
 
 if __name__ == "__main__":
     main()
+
