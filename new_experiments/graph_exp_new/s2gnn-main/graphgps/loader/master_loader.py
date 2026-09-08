@@ -768,6 +768,34 @@ def preformat_ZINC(dataset_dir, name):
     return dataset
 
 
+def _standardize_superpixel_features(splits, dim=14):
+    """Channel-wise standardize node features using TRAIN-split statistics.
+
+    ``splits`` = [train, val, test] InMemoryDataset objects (pre-join). Raw
+    VOC/COCO superpixel channels (RGB stats, coordinates, areas) span very
+    different scales; a bare Linear node encoder conditions much better on
+    standardized inputs. Stats are fit on the train split only and applied in
+    place to all three splits' collated node features (no leakage). Mirrors the
+    normalization used in the hop_masked pipeline.
+    """
+    def _store(ds):
+        s = getattr(ds, "_data", None)
+        return s if s is not None else ds.data
+
+    Xtr = _store(splits[0]).x.float()
+    d = min(dim, Xtr.size(-1))
+    mean = Xtr[:, :d].mean(dim=0)
+    std = Xtr[:, :d].std(dim=0, unbiased=False).clamp_min(1e-6)
+    for ds in splits:
+        store = _store(ds)
+        x = store.x.float().clone()
+        x[:, :d] = (x[:, :d] - mean) / std
+        store.x = x
+    logging.info(f"Superpixel channel-wise feature normalization applied "
+                 f"(train-set mean/std, dim={d}).")
+    return mean, std
+
+
 def preformat_VOCSuperpixels(dataset_dir, name, slic_compactness):
     """Load and preformat VOCSuperpixels dataset.
 
@@ -776,13 +804,12 @@ def preformat_VOCSuperpixels(dataset_dir, name, slic_compactness):
     Returns:
         PyG dataset object
     """
-    dataset = join_dataset_splits(
-        [VOCSuperpixels(root=dataset_dir, name=name,
-                        slic_compactness=slic_compactness,
-                        split=split)
-         for split in ['train', 'val', 'test']]
-    )
-    return dataset
+    splits = [VOCSuperpixels(root=dataset_dir, name=name,
+                             slic_compactness=slic_compactness,
+                             split=split)
+              for split in ['train', 'val', 'test']]
+    _standardize_superpixel_features(splits, dim=14)
+    return join_dataset_splits(splits)
 
 
 def preformat_COCOSuperpixels(dataset_dir, name, slic_compactness):
@@ -793,13 +820,12 @@ def preformat_COCOSuperpixels(dataset_dir, name, slic_compactness):
     Returns:
         PyG dataset object
     """
-    dataset = join_dataset_splits(
-        [COCOSuperpixels(root=dataset_dir, name=name,
-                         slic_compactness=slic_compactness,
-                         split=split)
-         for split in ['train', 'val', 'test']]
-    )
-    return dataset
+    splits = [COCOSuperpixels(root=dataset_dir, name=name,
+                              slic_compactness=slic_compactness,
+                              split=split)
+              for split in ['train', 'val', 'test']]
+    _standardize_superpixel_features(splits, dim=14)
+    return join_dataset_splits(splits)
 
 
 def join_dataset_splits(datasets):
@@ -827,3 +853,4 @@ def join_dataset_splits(datasets):
     datasets[0].split_idxs = split_idxs
 
     return datasets[0]
+
