@@ -199,7 +199,18 @@ GRAPH_DATASETS = {
         "output_dim": "auto",
         "task_type": "regression",
         "level": "graph",
-        "node_encoder": "linear",
+        # Atom type (x) and bond type (edge_attr) are single-column
+        # categorical integers (28 atom types, 3 bond orders), not continuous
+        # vectors. "linear" fed the raw integer through nn.Linear(1, hidden),
+        # which imposes a false ordinal relationship between unrelated atom
+        # types. "categorical" routes both through embedding tables instead
+        # (see CategoricalNodeEncoder / CategoricalEdgeEncoder in models.py).
+        # Vocab sizes include a small safety margin over the documented
+        # ranges (atom type 0-27, bond order 1-3); out-of-range indices are
+        # clamped, so the margin only costs a few unused embedding rows.
+        "node_encoder": "categorical",
+        "node_categories": [32],
+        "edge_categories": [8],
         "node_feat_dim": "auto",
         "metric_name": "mae",
         "source": "zinc",
@@ -401,12 +412,16 @@ def precompute_distance_matrices(dataset, cache_dir, split, max_hops=40,
     if os.path.exists(dat_path) and os.path.exists(idx_path):
         with open(idx_path, "rb") as f:
             meta = pickle.load(f)
-        if meta.get("num_graphs") == len(dataset) and meta.get("max_hops") == max_hops:
-            print(f"  Loading cached distance matrices from {dat_path}", flush=True)
+        cached_max_hops = meta.get("max_hops", 0)
+        # Reuse cache if: same graph count AND (exact match OR cached has more hops)
+        if (meta.get("num_graphs") == len(dataset) and
+            cached_max_hops >= max_hops):
+            print(f"  Loading cached distance matrices from {dat_path} "
+                  f"(cached max_hops={cached_max_hops} >= requested {max_hops})", flush=True)
             return MemmapDistStore(dat_path, meta["offsets"], meta["sizes"])
         print(f"  Cache at {dat_path} is stale "
               f"(graphs {meta.get('num_graphs')}->{len(dataset)}, "
-              f"max_hops {meta.get('max_hops')}->{max_hops}); recomputing.",
+              f"max_hops {cached_max_hops}->{max_hops}); recomputing.",
               flush=True)
 
     n_graphs = len(dataset)
@@ -456,32 +471,244 @@ def precompute_distance_matrices(dataset, cache_dir, split, max_hops=40,
     return MemmapDistStore(dat_path, offsets, sizes)
 
 
+def _extract_paths_single(args):
+    """Extract shortest paths for a single graph. Worker function for multiprocessing.
+
+    Returns only path_edges (edge sequences), which is what's needed for embeddings.
+    Drops the redundant full node sequences to save RAM.
+    """
+    i, dist_matrix, edge_index, num_nodes = args
+    _, path_edges = _extract_shortest_paths(dist_matrix, edge_index, num_nodes)
+    # Return only non-empty path edges to save space
+    return {k: v for k, v in path_edges.items() if v}
+
+
+class PathEdgeStore:
+    """Disk-backed store for path edges. Loads per-graph on access (like MemmapDistStore).
+
+    Each graph's path_edges dict is pickled individually and stored sequentially.
+    An index file stores (offset, size) for fast lookup without loading all data.
+    This avoids memory spikes during precomputation and loading.
+    """
+
+    def __init__(self, dat_path, idx_path):
+        """
+        Args:
+            dat_path: binary file with concatenated pickled path_edges dicts
+            idx_path: pickle file with list of (offset, size) tuples
+        """
+        self.dat_path = dat_path
+        self.idx_path = idx_path
+        with open(idx_path, "rb") as f:
+            self.offsets_sizes = pickle.load(f)  # List of (offset, size)
+        self._dat_file = None
+
+    def _ensure_open(self):
+        if self._dat_file is None:
+            self._dat_file = open(self.dat_path, "rb")
+
+    def __len__(self):
+        return len(self.offsets_sizes)
+
+    def __getitem__(self, idx):
+        """Load a single graph's path edges on demand."""
+        self._ensure_open()
+        offset, size = self.offsets_sizes[idx]
+        self._dat_file.seek(offset)
+        data = self._dat_file.read(size)
+        return pickle.loads(data)
+
+    def __del__(self):
+        if self._dat_file is not None:
+            self._dat_file.close()
+
+    def __getstate__(self):
+        # For pickling (multiprocessing): close file handle
+        state = self.__dict__.copy()
+        state["_dat_file"] = None
+        return state
+
+
+def precompute_paths(dataset, dist_store, split="train", cache_dir="cache_dist_masks",
+                     num_workers=8, chunk_size=256):
+    """Precompute and cache shortest path edges for all graphs.
+
+    Streams each graph's path edges directly to disk to avoid memory spikes.
+    Uses structure similar to MemmapDistStore: concatenated pickled objects + index.
+
+    This is critical for large datasets (e.g., Pascal-VOC with 10k+ graphs):
+    - Without streaming: 100GB+ RAM spike when holding all paths in memory
+    - With streaming: Constant ~100MB RAM during precomputation
+
+    Returns:
+        PathEdgeStore with per-graph path_edges dicts indexed for on-demand loading
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    dat_path = os.path.join(cache_dir, f"{split}_path_edges.dat")
+    idx_path = os.path.join(cache_dir, f"{split}_path_edges_index.pkl")
+
+    # Return existing store if cached
+    if os.path.exists(dat_path) and os.path.exists(idx_path):
+        print(f"  Loading cached path edges from {dat_path}", flush=True)
+        return PathEdgeStore(dat_path, idx_path)
+
+    print(f"  Computing and streaming path edges for {len(dataset)} graphs...", flush=True)
+
+    # Suppress transforms during path computation
+    _saved_transform = getattr(dataset, "transform", None)
+    if _saved_transform is not None:
+        dataset.transform = None
+
+    try:
+        offsets_sizes = []
+        # Stream directly to disk with chunked processing
+        with open(dat_path, "wb") as dat_file:
+            current_offset = 0
+
+            # Prepare arguments in chunks
+            payload = [
+                (i, dist_store[i], dataset[i].edge_index, int(dataset[i].num_nodes))
+                for i in range(len(dataset))
+            ]
+
+            with Pool(min(num_workers, max(len(dataset), 1))) as pool:
+                for chunk_idx, path_edges_dict in enumerate(pool.imap(_extract_paths_single, payload,
+                                                                       chunksize=chunk_size)):
+                    # Pickle and write immediately (don't accumulate in RAM)
+                    serialized = pickle.dumps(path_edges_dict)
+                    dat_file.write(serialized)
+
+                    # Record offset and size for this graph
+                    offsets_sizes.append((current_offset, len(serialized)))
+                    current_offset += len(serialized)
+
+                    # Progress feedback
+                    if (chunk_idx + 1) % 1000 == 0:
+                        print(f"    {chunk_idx + 1}/{len(dataset)}", flush=True)
+
+        print(f"    Computed and streamed {len(dataset)} graphs", flush=True)
+    finally:
+        if _saved_transform is not None:
+            dataset.transform = _saved_transform
+
+    # Save index (small, fits in memory)
+    with open(idx_path, "wb") as f:
+        pickle.dump(offsets_sizes, f)
+    print(f"  Saved path edges to {dat_path} ({current_offset / 1e9:.2f} GB) "
+          f"with index at {idx_path}", flush=True)
+    return PathEdgeStore(dat_path, idx_path)
+
+
 class DistMaskDataset(torch.utils.data.Dataset):
-    """Wraps a PyG dataset with a precomputed distance-matrix store."""
-    def __init__(self, pyg_dataset, dist_store):
+    """Wraps a PyG dataset with precomputed distance matrices and optional path edges.
+
+    Supports both LazyPathStore (loads on demand) and list-based path stores.
+    """
+    def __init__(self, pyg_dataset, dist_store, path_store=None):
         assert len(pyg_dataset) == len(dist_store)
         self.pyg_dataset = pyg_dataset
         self.dist_store = dist_store
+        self.path_store = path_store  # Optional LazyPathStore or list of path_edges dicts
 
     def __len__(self):
         return len(self.pyg_dataset)
 
     def __getitem__(self, idx):
-        return self.pyg_dataset[idx], self.dist_store[idx]
+        item = (self.pyg_dataset[idx], self.dist_store[idx])
+        if self.path_store is not None:
+            # Lazy load this graph's path edges on access
+            path_edges = self.path_store[idx]
+            item = item + (path_edges,)
+        return item
 
 
-def collate_with_dist_masks(batch, max_hops=40):
+def _extract_shortest_paths(dist_matrix, edge_index, num_nodes):
+    """Extract all-pairs shortest paths from distance matrix.
+
+    Args:
+        dist_matrix: (N, N) int16 array with distance values (-1 for unreachable)
+        edge_index: (2, E) tensor of edge indices
+        num_nodes: N (number of nodes)
+
+    Returns:
+        paths: dict {(i, j): [n0, n1, ..., nk]} shortest path node sequence
+        path_edges: dict {(i, j): [(u,v), ...]} edge sequence along path
+    """
+    paths = {}
+    path_edges = {}
+
+    # Convert edge_index to adjacency list for easy neighbor lookup
+    adj = [[] for _ in range(num_nodes)]
+    edge_index_np = edge_index.numpy() if hasattr(edge_index, 'numpy') else edge_index
+    for u, v in zip(edge_index_np[0], edge_index_np[1]):
+        adj[int(u)].append(int(v))
+
+    # For each source node
+    for src in range(num_nodes):
+        # BFS to find shortest path to each target
+        visited = [-1] * num_nodes  # -1 = unvisited, otherwise stores parent node
+        queue = [src]
+        visited[src] = src  # parent of src is itself
+
+        while queue:
+            u = queue.pop(0)
+            # Explore neighbors
+            for v in adj[u]:
+                if visited[v] == -1:  # unvisited
+                    visited[v] = u
+                    queue.append(v)
+
+        # Reconstruct paths from src to all targets
+        for dst in range(num_nodes):
+            if visited[dst] == -1:  # unreachable
+                continue
+
+            # Reconstruct path: dst -> parent -> ... -> src
+            path = []
+            node = dst
+            while node != src:
+                path.append(node)
+                node = visited[node]
+            path.append(src)
+            path.reverse()  # now: src -> ... -> dst
+
+            paths[(src, dst)] = path
+
+            # Extract edges along path
+            edges = []
+            for i in range(len(path) - 1):
+                edges.append((path[i], path[i + 1]))
+            path_edges[(src, dst)] = edges
+
+    return paths, path_edges
+
+
+def collate_with_dist_masks(batch, max_hops=40, use_path_embeddings=False):
     """
     Collate function for DistMaskDataset.
     Pads graphs and expands distance matrices into hop masks at the batch's
-    max_N.
+    max_N. Optionally handles precomputed or extracted shortest paths.
+
+    Args:
+        batch: list of (graph, distance_matrix) or (graph, distance_matrix, precomputed_paths) tuples
+        max_hops: maximum hop distance
+        use_path_embeddings: if True, use/extract path data
 
     Returns:
         pyg_batch: batched PyG Data object (standard)
         dist_masks_padded: (B, max_hops, max_N, max_N) float tensor
         node_masks: (B, max_N) boolean tensor
+        path_data: (optional) dict with per-graph path information
     """
-    graphs, dist_list = zip(*batch)
+    # Check if paths are precomputed (3-tuple) or need extraction (2-tuple)
+    has_precomputed_paths = len(batch[0]) == 3 if batch else False
+
+    if has_precomputed_paths:
+        graphs, dist_list, precomp_paths = zip(*batch)
+    else:
+        graphs, dist_list = zip(*batch)
+        precomp_paths = None
+
     pyg_batch = torch_geometric.data.Batch.from_data_list(list(graphs))
 
     B = len(graphs)
@@ -490,19 +717,48 @@ def collate_with_dist_masks(batch, max_hops=40):
     dm_padded = np.zeros((B, max_hops, max_N, max_N), dtype=np.float32)
     node_masks = np.zeros((B, max_N), dtype=np.bool_)
 
+    # Per-graph offsets for mapping node indices in batch
+    node_offsets = [0]
+    for g in graphs:
+        node_offsets.append(node_offsets[-1] + g.num_nodes)
+
+    path_data = None
+    if use_path_embeddings:
+        path_data = {
+            "path_edges": [],  # Only store edges, not full paths (saves RAM)
+            "node_offsets": node_offsets,
+        }
+
     for i, (g, dist) in enumerate(zip(graphs, dist_list)):
         n = int(g.num_nodes)
-        # dist is int16 (n, n) with -1 for unreachable / beyond max_hops.
         K_use = min(int(dist.max()) + 1, max_hops) if dist.size else 0
         for k in range(K_use):
             dm_padded[i, k, :n, :n] = (dist == k)
         node_masks[i, :n] = True
 
-    return (
+        # Use precomputed paths if available, else extract on-the-fly
+        if use_path_embeddings:
+            if has_precomputed_paths:
+                # With LazyPathStore: precomp_paths[i] is already path_edges_dict
+                path_edges = precomp_paths[i]
+            else:
+                # On-the-fly extraction: get only path_edges (drop redundant paths)
+                _, path_edges = _extract_shortest_paths(dist, g.edge_index, n)
+                # Keep only non-empty paths to save memory
+                path_edges = {k: v for k, v in path_edges.items() if v}
+            path_data["path_edges"].append(path_edges)
+
+    result = (
         pyg_batch,
         torch.from_numpy(dm_padded),
         torch.from_numpy(node_masks),
     )
+
+    if use_path_embeddings:
+        pyg_batch.path_data = path_data
+        result = result + (path_data,)
+
+    return result
 
 
 # ================================================================
@@ -650,7 +906,8 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
                 dist_mask_workers=8, use_lap_pe=False, lap_pe_dim=8,
                 dataset_name="Peptides-func", return_info=False,
                 subgraph_mode="partition", num_parts=128, egonet_hops=2,
-                egonet_max_nodes=1024, max_egonet_samples=None, seed=0):
+                egonet_max_nodes=1024, max_egonet_samples=None, seed=0,
+                use_path_embeddings=False):
     """Load train/val/test splits and return loaders + datasets.
 
     Args:
@@ -664,6 +921,8 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
                   graphs are large; consider lowering this (e.g. 12-16) when
                   loading that dataset.
         dist_mask_workers: number of multiprocessing workers for Floyd-Warshall.
+        use_path_embeddings: if True and use_dist_masks is True, extract shortest paths
+                            and return (pyg_batch, dist_masks, node_masks, path_data).
         subgraph_mode: "partition" | "egonet" — only used by transductive
                        single-graph datasets (ogbn-arxiv, ogbn-products,
                        arxiv-year). See ``transductive.py``.
@@ -763,11 +1022,22 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
         test_dm = precompute_distance_matrices(
             test_ds, cache_dir, "test", max_hops, dist_mask_workers)
 
-        train_wrapped = DistMaskDataset(train_ds, train_dm)
-        val_wrapped = DistMaskDataset(val_ds, val_dm)
-        test_wrapped = DistMaskDataset(test_ds, test_dm)
+        # Precompute paths if needed
+        train_paths = None
+        val_paths = None
+        test_paths = None
+        if use_path_embeddings:
+            print("Precomputing shortest paths...", flush=True)
+            train_paths = precompute_paths(train_ds, train_dm, "train", cache_dir, dist_mask_workers)
+            val_paths = precompute_paths(val_ds, val_dm, "val", cache_dir, dist_mask_workers)
+            test_paths = precompute_paths(test_ds, test_dm, "test", cache_dir, dist_mask_workers)
 
-        collate_fn = partial(collate_with_dist_masks, max_hops=max_hops)
+        train_wrapped = DistMaskDataset(train_ds, train_dm, train_paths)
+        val_wrapped = DistMaskDataset(val_ds, val_dm, val_paths)
+        test_wrapped = DistMaskDataset(test_ds, test_dm, test_paths)
+
+        collate_fn = partial(collate_with_dist_masks, max_hops=max_hops,
+                            use_path_embeddings=use_path_embeddings)
 
         # Use standard PyTorch DataLoader (not PyG's) because our custom
         # collate_fn handles batching and PyG's Collater cannot handle the
