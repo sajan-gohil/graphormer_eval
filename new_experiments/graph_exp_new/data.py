@@ -471,132 +471,57 @@ def precompute_distance_matrices(dataset, cache_dir, split, max_hops=40,
     return MemmapDistStore(dat_path, offsets, sizes)
 
 
-def _extract_paths_single(args):
-    """Extract shortest paths for a single graph. Worker function for multiprocessing.
+def _compute_pred_matrix_single(args):
+    """Predecessor matrix for one graph as int16 (-1 = none).
 
-    Returns only path_edges (edge sequences), which is what's needed for embeddings.
-    Drops the redundant full node sequences to save RAM.
+    pred[s, t] is the node before t on a shortest s->t path. Any path is
+    rebuilt from it by walking back from t, so this replaces explicit path lists.
     """
-    i, dist_matrix, edge_index, num_nodes = args
-    _, path_edges = _extract_shortest_paths(dist_matrix, edge_index, num_nodes)
-    # Return only non-empty path edges to save space
-    return {k: v for k, v in path_edges.items() if v}
+    num_nodes, edge_index = args
+    adj = np.zeros((num_nodes, num_nodes), dtype=np.float32)
+    adj[edge_index[0], edge_index[1]] = 1.0
+    _, pred = floyd_warshall(adj, directed=False, unweighted=True,
+                             return_predecessors=True)
+    return np.where(pred < 0, -1, pred).astype(np.int16)
 
 
-class PathEdgeStore:
-    """Disk-backed store for path edges. Loads per-graph on access (like MemmapDistStore).
+def precompute_predecessors(dataset, dist_store, cache_dir, split, num_workers=8,
+                            chunk_size=2048):
+    """Cache per-graph predecessor matrices (same memmap layout as dist store).
 
-    Each graph's path_edges dict is pickled individually and stored sequentially.
-    An index file stores (offset, size) for fast lookup without loading all data.
-    This avoids memory spikes during precomputation and loading.
+    Reuses ``dist_store``'s offsets/sizes, and is chunked so RAM stays bounded.
     """
+    dat_path = os.path.join(cache_dir, f"{split}_pred.dat")
+    offsets, sizes = dist_store.offsets, dist_store.sizes
+    total = int((sizes ** 2).sum())
+    if os.path.exists(dat_path) and os.path.getsize(dat_path) == total * 2:
+        print(f"  Loading cached predecessors from {dat_path}", flush=True)
+        return MemmapDistStore(dat_path, offsets, sizes)
 
-    def __init__(self, dat_path, idx_path):
-        """
-        Args:
-            dat_path: binary file with concatenated pickled path_edges dicts
-            idx_path: pickle file with list of (offset, size) tuples
-        """
-        self.dat_path = dat_path
-        self.idx_path = idx_path
-        with open(idx_path, "rb") as f:
-            self.offsets_sizes = pickle.load(f)  # List of (offset, size)
-        self._dat_file = None
-
-    def _ensure_open(self):
-        if self._dat_file is None:
-            self._dat_file = open(self.dat_path, "rb")
-
-    def __len__(self):
-        return len(self.offsets_sizes)
-
-    def __getitem__(self, idx):
-        """Load a single graph's path edges on demand."""
-        self._ensure_open()
-        offset, size = self.offsets_sizes[idx]
-        self._dat_file.seek(offset)
-        data = self._dat_file.read(size)
-        return pickle.loads(data)
-
-    def __del__(self):
-        if self._dat_file is not None:
-            self._dat_file.close()
-
-    def __getstate__(self):
-        # For pickling (multiprocessing): close file handle
-        state = self.__dict__.copy()
-        state["_dat_file"] = None
-        return state
-
-
-def precompute_paths(dataset, dist_store, split="train", cache_dir="cache_dist_masks",
-                     num_workers=8, chunk_size=256):
-    """Precompute and cache shortest path edges for all graphs.
-
-    Streams each graph's path edges directly to disk to avoid memory spikes.
-    Uses structure similar to MemmapDistStore: concatenated pickled objects + index.
-
-    This is critical for large datasets (e.g., Pascal-VOC with 10k+ graphs):
-    - Without streaming: 100GB+ RAM spike when holding all paths in memory
-    - With streaming: Constant ~100MB RAM during precomputation
-
-    Returns:
-        PathEdgeStore with per-graph path_edges dicts indexed for on-demand loading
-    """
-    os.makedirs(cache_dir, exist_ok=True)
-    dat_path = os.path.join(cache_dir, f"{split}_path_edges.dat")
-    idx_path = os.path.join(cache_dir, f"{split}_path_edges_index.pkl")
-
-    # Return existing store if cached
-    if os.path.exists(dat_path) and os.path.exists(idx_path):
-        print(f"  Loading cached path edges from {dat_path}", flush=True)
-        return PathEdgeStore(dat_path, idx_path)
-
-    print(f"  Computing and streaming path edges for {len(dataset)} graphs...", flush=True)
-
-    # Suppress transforms during path computation
+    n_graphs = len(dataset)
+    print(f"  Computing predecessors for {n_graphs} graphs "
+          f"({total * 2 / 1e9:.2f} GB on disk)...", flush=True)
     _saved_transform = getattr(dataset, "transform", None)
     if _saved_transform is not None:
         dataset.transform = None
-
     try:
-        offsets_sizes = []
-        # Stream directly to disk with chunked processing
-        with open(dat_path, "wb") as dat_file:
-            current_offset = 0
-
-            # Prepare arguments in chunks
-            payload = [
-                (i, dist_store[i], dataset[i].edge_index, int(dataset[i].num_nodes))
-                for i in range(len(dataset))
-            ]
-
-            with Pool(min(num_workers, max(len(dataset), 1))) as pool:
-                for chunk_idx, path_edges_dict in enumerate(pool.imap(_extract_paths_single, payload,
-                                                                       chunksize=chunk_size)):
-                    # Pickle and write immediately (don't accumulate in RAM)
-                    serialized = pickle.dumps(path_edges_dict)
-                    dat_file.write(serialized)
-
-                    # Record offset and size for this graph
-                    offsets_sizes.append((current_offset, len(serialized)))
-                    current_offset += len(serialized)
-
-                    # Progress feedback
-                    if (chunk_idx + 1) % 1000 == 0:
-                        print(f"    {chunk_idx + 1}/{len(dataset)}", flush=True)
-
-        print(f"    Computed and streamed {len(dataset)} graphs", flush=True)
+        mm = np.memmap(dat_path, dtype=np.int16, mode="w+", shape=(total,))
+        with Pool(min(num_workers, max(n_graphs, 1))) as pool:
+            for lo in range(0, n_graphs, chunk_size):
+                hi = min(lo + chunk_size, n_graphs)
+                payload = [(int(sizes[i]), dataset[i].edge_index.numpy())
+                           for i in range(lo, hi)]
+                for j, pm in enumerate(pool.imap(_compute_pred_matrix_single,
+                                                 payload, chunksize=16)):
+                    i = lo + j
+                    mm[offsets[i]:offsets[i] + sizes[i] ** 2] = pm.ravel()
+                print(f"    {hi}/{n_graphs}", flush=True)
+        mm.flush()
+        del mm
     finally:
         if _saved_transform is not None:
             dataset.transform = _saved_transform
-
-    # Save index (small, fits in memory)
-    with open(idx_path, "wb") as f:
-        pickle.dump(offsets_sizes, f)
-    print(f"  Saved path edges to {dat_path} ({current_offset / 1e9:.2f} GB) "
-          f"with index at {idx_path}", flush=True)
-    return PathEdgeStore(dat_path, idx_path)
+    return MemmapDistStore(dat_path, offsets, sizes)
 
 
 class DistMaskDataset(torch.utils.data.Dataset):
@@ -608,7 +533,7 @@ class DistMaskDataset(torch.utils.data.Dataset):
         assert len(pyg_dataset) == len(dist_store)
         self.pyg_dataset = pyg_dataset
         self.dist_store = dist_store
-        self.path_store = path_store  # Optional LazyPathStore or list of path_edges dicts
+        self.path_store = path_store  # Optional predecessor store
 
     def __len__(self):
         return len(self.pyg_dataset)
@@ -620,67 +545,6 @@ class DistMaskDataset(torch.utils.data.Dataset):
             path_edges = self.path_store[idx]
             item = item + (path_edges,)
         return item
-
-
-def _extract_shortest_paths(dist_matrix, edge_index, num_nodes):
-    """Extract all-pairs shortest paths from distance matrix.
-
-    Args:
-        dist_matrix: (N, N) int16 array with distance values (-1 for unreachable)
-        edge_index: (2, E) tensor of edge indices
-        num_nodes: N (number of nodes)
-
-    Returns:
-        paths: dict {(i, j): [n0, n1, ..., nk]} shortest path node sequence
-        path_edges: dict {(i, j): [(u,v), ...]} edge sequence along path
-    """
-    paths = {}
-    path_edges = {}
-
-    # Convert edge_index to adjacency list for easy neighbor lookup
-    adj = [[] for _ in range(num_nodes)]
-    edge_index_np = edge_index.numpy() if hasattr(edge_index, 'numpy') else edge_index
-    for u, v in zip(edge_index_np[0], edge_index_np[1]):
-        adj[int(u)].append(int(v))
-
-    # For each source node
-    for src in range(num_nodes):
-        # BFS to find shortest path to each target
-        visited = [-1] * num_nodes  # -1 = unvisited, otherwise stores parent node
-        queue = [src]
-        visited[src] = src  # parent of src is itself
-
-        while queue:
-            u = queue.pop(0)
-            # Explore neighbors
-            for v in adj[u]:
-                if visited[v] == -1:  # unvisited
-                    visited[v] = u
-                    queue.append(v)
-
-        # Reconstruct paths from src to all targets
-        for dst in range(num_nodes):
-            if visited[dst] == -1:  # unreachable
-                continue
-
-            # Reconstruct path: dst -> parent -> ... -> src
-            path = []
-            node = dst
-            while node != src:
-                path.append(node)
-                node = visited[node]
-            path.append(src)
-            path.reverse()  # now: src -> ... -> dst
-
-            paths[(src, dst)] = path
-
-            # Extract edges along path
-            edges = []
-            for i in range(len(path) - 1):
-                edges.append((path[i], path[i + 1]))
-            path_edges[(src, dst)] = edges
-
-    return paths, path_edges
 
 
 def collate_with_dist_masks(batch, max_hops=40, use_path_embeddings=False):
@@ -722,12 +586,10 @@ def collate_with_dist_masks(batch, max_hops=40, use_path_embeddings=False):
     for g in graphs:
         node_offsets.append(node_offsets[-1] + g.num_nodes)
 
-    path_data = None
+    pred_padded = None
     if use_path_embeddings:
-        path_data = {
-            "path_edges": [],  # Only store edges, not full paths (saves RAM)
-            "node_offsets": node_offsets,
-        }
+        assert has_precomputed_paths, "use_path_embeddings needs a predecessor store"
+        pred_padded = np.full((B, max_N, max_N), -1, dtype=np.int16)
 
     for i, (g, dist) in enumerate(zip(graphs, dist_list)):
         n = int(g.num_nodes)
@@ -736,17 +598,8 @@ def collate_with_dist_masks(batch, max_hops=40, use_path_embeddings=False):
             dm_padded[i, k, :n, :n] = (dist == k)
         node_masks[i, :n] = True
 
-        # Use precomputed paths if available, else extract on-the-fly
         if use_path_embeddings:
-            if has_precomputed_paths:
-                # With LazyPathStore: precomp_paths[i] is already path_edges_dict
-                path_edges = precomp_paths[i]
-            else:
-                # On-the-fly extraction: get only path_edges (drop redundant paths)
-                _, path_edges = _extract_shortest_paths(dist, g.edge_index, n)
-                # Keep only non-empty paths to save memory
-                path_edges = {k: v for k, v in path_edges.items() if v}
-            path_data["path_edges"].append(path_edges)
+            pred_padded[i, :n, :n] = precomp_paths[i]
 
     result = (
         pyg_batch,
@@ -755,6 +608,7 @@ def collate_with_dist_masks(batch, max_hops=40, use_path_embeddings=False):
     )
 
     if use_path_embeddings:
+        path_data = {"pred": torch.from_numpy(pred_padded)}
         pyg_batch.path_data = path_data
         result = result + (path_data,)
 
@@ -1028,9 +882,9 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
         test_paths = None
         if use_path_embeddings:
             print("Precomputing shortest paths...", flush=True)
-            train_paths = precompute_paths(train_ds, train_dm, "train", cache_dir, dist_mask_workers)
-            val_paths = precompute_paths(val_ds, val_dm, "val", cache_dir, dist_mask_workers)
-            test_paths = precompute_paths(test_ds, test_dm, "test", cache_dir, dist_mask_workers)
+            train_paths = precompute_predecessors(train_ds, train_dm, cache_dir, "train", dist_mask_workers)
+            val_paths = precompute_predecessors(val_ds, val_dm, cache_dir, "val", dist_mask_workers)
+            test_paths = precompute_predecessors(test_ds, test_dm, cache_dir, "test", dist_mask_workers)
 
         train_wrapped = DistMaskDataset(train_ds, train_dm, train_paths)
         val_wrapped = DistMaskDataset(val_ds, val_dm, val_paths)

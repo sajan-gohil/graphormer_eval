@@ -1,3 +1,4 @@
+# model_hop_masked_light.py
 """
 Lightweight hop-masked multi-head transformer.
 
@@ -306,7 +307,8 @@ class DynamicCrossHopMixer(nn.Module):
         self.v = nn.Linear(head_dim * multiplier, head_dim)
 
     def forward(self, x: torch.Tensor,
-                head_valid_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+                head_valid_mask: Optional[torch.Tensor] = None,
+                hop_tag: Optional[torch.Tensor] = None) -> torch.Tensor:
         """x: (B, N, H*Dh) -> (B, N, H*Dh) with dynamic cross-hop mixing."""
         B, N, d = x.shape
         x = x.view(B, N, self.H, self.Dh)
@@ -338,6 +340,8 @@ class DynamicCrossHopMixer(nn.Module):
 
         out = torch.einsum('bnhk,bnkd->bnhd', attn, v)
         out = self.out(out)
+        if hop_tag is not None:  # (H, Dh)
+            out = out + hop_tag.view(1, 1, self.H, self.Dh)
 
         if head_valid_mask is not None:
             out = out * head_valid_mask.unsqueeze(1).unsqueeze(-1).to(out.dtype)
@@ -346,59 +350,89 @@ class DynamicCrossHopMixer(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Path-aware embeddings for K and V conditioning.
+# Path-aware embeddings added to K and V.
 # ---------------------------------------------------------------------------
 class PathEmbedder(nn.Module):
-    """Compute path embeddings for conditioning K and V in attention.
+    """Dense (B, N, N, d) path embeddings, shared by all layers and heads.
 
-    For each shortest path i→j with edges [e₁, e₂, ..., eₖ]:
-        embed(eᵢ) = dist_embed[position] + Linear(edge_features || node_src || node_dst)
-        path_embedding[i,j] = mean([embed(e₁), embed(e₂), ..., embed(eₖ)])
+    P[b,s,t] = mean_{r=1..k, edge (u->v) at position r on SP(s,t)}(
+                   W_s x_u + W_t x_v + W_e BondEnc(e_uv) + pos_emb[r-1])
+             + hop_emb[d(s,t)]
+    hop_emb rows: 0..K-1 = distance, K = beyond K-1 / unreachable,
+    K+1 = global-head tag for the cross-hop mixer.
+    Edge term is used whenever batch.edge_attr is present.
     """
 
-    def __init__(self, hidden_dim: int, max_path_length: int = 64,
+    def __init__(self, hidden_dim: int, max_hops: int,
+                 dataset_name: str = "Peptides-func",
                  edge_feat_dim: Optional[int] = None):
         super().__init__()
-        self.hidden_dim = hidden_dim
-        self.max_path_length = max_path_length
+        d, std = hidden_dim, 0.02 * hidden_dim ** -0.5
+        self.K = max_hops
+        self.pos_emb = nn.Embedding(max_hops, d)
+        self.hop_emb = nn.Embedding(max_hops + 2, d)
+        nn.init.normal_(self.pos_emb.weight, std=std)
+        nn.init.normal_(self.hop_emb.weight, std=std)
+        # Linear(e || x_u || x_v) split into blocks.
+        self.W_s = nn.Linear(d, d, bias=False)
+        self.W_t = nn.Linear(d, d)
+        self.W_e = nn.Linear(d, d, bias=False)
+        self.edge_enc = build_bond_encoder(d, dataset_name=dataset_name,
+                                           edge_feat_dim=edge_feat_dim)
 
-        # Distance/position embeddings: one per position in path
-        self.dist_embedding = nn.Embedding(max_path_length, hidden_dim)
-        nn.init.normal_(self.dist_embedding.weight, mean=0.0, std=0.02 * (hidden_dim ** -0.5))
+    def hop_tags(self, hop_sets: List[Optional[List[int]]], H: int) -> torch.Tensor:
+        """(H, Dh): mean hop_emb over each head's hop set, head-h slice."""
+        W = self.hop_emb.weight
+        Dh = W.shape[1] // H
+        M = W.new_zeros(H, self.K + 2)
+        for h, hs in enumerate(hop_sets):
+            idx = [k for k in hs if 0 <= k < self.K] if hs is not None else []
+            if idx:
+                M[h, idx] = 1.0 / len(idx)
+            else:
+                M[h, self.K + 1] = 1.0
+        full = (M @ W).view(H, H, Dh)
+        ar = torch.arange(H, device=W.device)
+        return full[ar, ar]
 
-        # Projection layer: concatenated (edge || node_src || node_dst) → hidden_dim
-        # If no edge features: just (node_src || node_dst)
-        concat_dim = (2 * hidden_dim) + (edge_feat_dim if edge_feat_dim else 0)
-        self.proj = nn.Linear(concat_dim, hidden_dim)
+    def forward(self, x, edge_attr, edge_map, dist_masks, pred, node_mask):
+        B, N, d = x.shape
+        dev = x.device
+        A, C = self.W_s(x), self.W_t(x)
+        pred = pred.to(dev).long()
 
-    def forward(self, edge_features: torch.Tensor, node_src: torch.Tensor,
-                node_dst: torch.Tensor, position: torch.Tensor) -> torch.Tensor:
-        """
-        Compute edge embeddings with position tags.
+        E = None
+        if edge_attr is not None and edge_map is not None:
+            E = self.W_e(self.edge_enc(edge_attr))
+            E = torch.cat([E, E.new_zeros(1, d)])  # index -1 -> zero row
 
-        Args:
-            edge_features: (E, edge_dim) or None
-            node_src: (E, hidden_dim) source node embeddings
-            node_dst: (E, hidden_dim) target node embeddings
-            position: (E,) position indices in path [0, max_path_length)
+        K = dist_masks.shape[1]
+        L = min(K - 1, self.pos_emb.num_embeddings)
+        pos_cum = self.pos_emb.weight[:L].cumsum(0)
+        row_of = torch.full((B, N, N), -1, dtype=torch.long, device=dev)
+        out = x.new_zeros(B, N, N, d)
+        prev = None
+        for k in range(1, L + 1):
+            b, s, t = (dist_masks[:, k] > 0).nonzero(as_tuple=True)
+            if b.numel() == 0:
+                break
+            p = pred[b, s, t]
+            S = A[b, p] + C[b, t]
+            if E is not None:
+                S = S + E[edge_map[b, p, t]]
+            if k > 1:
+                S = S + prev[row_of[b, s, p]]
+            row_of[b, s, t] = torch.arange(b.numel(), device=dev)
+            prev = S
+            out[b, s, t] = (S + pos_cum[k - 1]) / k
 
-        Returns:
-            embeddings: (E, hidden_dim) edge embeddings with position tags
-        """
-        # Concatenate node embeddings
-        concat_list = [node_src, node_dst]
-        if edge_features is not None:
-            concat_list.insert(0, edge_features)
-        x = torch.cat(concat_list, dim=-1)  # (E, concat_dim)
-
-        # Project to hidden_dim
-        proj_x = self.proj(x)  # (E, hidden_dim)
-
-        # Add position embeddings
-        pos_emb = self.dist_embedding(position)  # (E, hidden_dim)
-        embeddings = proj_x + pos_emb
-
-        return embeddings
+        # Pair-distance embedding d(s,t); K = beyond K-1 / unreachable.
+        has = dist_masks.bool().any(1)
+        didx = dist_masks.float().argmax(1)
+        didx[~has] = self.K
+        out = out + self.hop_emb(didx)
+        pair = node_mask[:, :, None] & node_mask[:, None, :]
+        return out * pair.unsqueeze(-1).to(out.dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -450,8 +484,6 @@ class HopMaskedMHA(nn.Module):
         k = self.k_proj(x).view(B, N, H, Dh).transpose(1, 2)  # (B, H, N, Dh)
         v = self.v_proj(x).view(B, N, H, Dh).transpose(1, 2)  # (B, H, N, Dh)
 
-        # Note: path embeddings are added to scores after matmul, see below
-
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(Dh)
 
         scores = scores.masked_fill(~per_head_mask, _NEG_INF)
@@ -465,10 +497,7 @@ class HopMaskedMHA(nn.Module):
 
         # Add path embeddings contribution to scores
         if path_embeddings is not None:
-            # path_embeddings: (B, N, N, hidden_dim)
-            # q: (B, H, N, Dh) where Dh = hidden_dim // H
-            # Reshape path_embeddings to (B, N, N, H, Dh) for per-head computation
-            # Then einsum: q[b,h,i,d] · path_emb[b,i,j,h,d] → (B, H, N, N)
+            # K_ij = k_j + P_ij  =>  extra score term q_i . P_ij (per head slice)
             path_emb_per_head = path_embeddings.view(B, N, N, H, Dh)  # (B, N, N, H, Dh)
             path_scores = torch.einsum('bhid,bijhd->bhij', q, path_emb_per_head) / math.sqrt(Dh)
             scores = scores + path_scores
@@ -491,6 +520,8 @@ class HopMaskedMHA(nn.Module):
             attn = attn * keep.to(attn.dtype) / (1 - p)
 
         out = torch.matmul(attn, v)
+        if path_embeddings is not None:
+            out = out + torch.einsum('bhij,bijhd->bhid', attn, path_emb_per_head)
         out = out.transpose(1, 2).reshape(B, N, d)
         return self.out_proj(out)
 
@@ -531,6 +562,7 @@ class MultiHopMaskedMHA(nn.Module):
         x: torch.Tensor,
         dist_masks: torch.Tensor,
         node_mask: torch.Tensor,
+        path_embeddings: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, N, d = x.shape
         H, Dh = self.num_heads, self.head_dim
@@ -541,6 +573,10 @@ class MultiHopMaskedMHA(nn.Module):
         v = self.v_proj(x).view(B, N, H, Dh).transpose(1, 2)
 
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(Dh)
+        Ph = None
+        if path_embeddings is not None:
+            Ph = path_embeddings.view(B, N, N, H, Dh)
+            scores = scores + torch.einsum('bhid,bijhd->bhij', q, Ph) / math.sqrt(Dh)
 
         key_pad   = (~node_mask).unsqueeze(1).unsqueeze(2)
         query_pad = (~node_mask).unsqueeze(1).unsqueeze(-1)
@@ -554,22 +590,26 @@ class MultiHopMaskedMHA(nn.Module):
             s = s.masked_fill(query_pad, _NEG_INF)
             a = F.softmax(s, dim=-1)
             a = torch.nan_to_num(a, nan=0.0)
-            a = self.attn_drop(a)
-            return torch.matmul(a, v)
+            return self.attn_drop(a)
 
-        out_sum = scores.new_zeros(B, H, N, Dh)
+        # Sum attention weights over views; a@v and a.P are linear in a.
+        a_sum = scores.new_zeros(B, H, N, N)
         count = scores.new_zeros(B, N)
 
         for hop in range(K):
             hop_mask = dist_masks[:, hop] > 0
             if not hop_mask.any():
                 continue
-            out_sum = out_sum + _attend(hop_mask.unsqueeze(1))
+            a_sum = a_sum + _attend(hop_mask.unsqueeze(1))
             count = count + hop_mask.any(dim=-1).to(scores.dtype)
 
         if self.include_global:
-            out_sum = out_sum + _attend(None)
+            a_sum = a_sum + _attend(None)
             count = count + node_mask.to(scores.dtype)
+
+        out_sum = torch.matmul(a_sum, v)
+        if Ph is not None:
+            out_sum = out_sum + torch.einsum('bhij,bijhd->bhid', a_sum, Ph)
 
         if self.readout == "mean":
             denom = count.clamp(min=1.0).view(B, 1, N, 1)
@@ -640,11 +680,13 @@ class HopMaskedTransformerLayer(nn.Module):
                 adj_blend_bias: Optional[torch.Tensor] = None,
                 edge_bias: Optional[torch.Tensor] = None,
                 path_embeddings: Optional[torch.Tensor] = None,
-                head_valid_mask: Optional[torch.Tensor] = None):
+                head_valid_mask: Optional[torch.Tensor] = None,
+                hop_tag: Optional[torch.Tensor] = None):
         """Forward pass."""
         normed = self.norm1(x, node_mask)
         if self.multihop_attn:
-            attn_out = self.attn(normed, per_head_mask_or_dist_masks, node_mask)
+            attn_out = self.attn(normed, per_head_mask_or_dist_masks, node_mask,
+                                 path_embeddings=path_embeddings)
             x = x + self.drop1(attn_out)
         else:
             attn_out = self.attn(normed, per_head_mask_or_dist_masks, node_mask,
@@ -654,7 +696,8 @@ class HopMaskedTransformerLayer(nn.Module):
         if self.use_cross_hop:
             x = x + self.drop_ch(
                 self.cross_hop(self.norm_ch(x, node_mask),
-                               head_valid_mask=head_valid_mask)
+                               head_valid_mask=head_valid_mask,
+                               hop_tag=hop_tag)
             )
         x = x + self.drop2(self.ffn(self.norm2(x, node_mask)))
         return x
@@ -856,7 +899,8 @@ class HopMaskedTransformerModel(nn.Module):
         if use_path_embeddings:
             self.path_embedder = PathEmbedder(
                 hidden_dim=hidden_dim,
-                max_path_length=max_hops,  # Conservative upper bound
+                max_hops=max_hops,
+                dataset_name=dataset_name,
                 edge_feat_dim=edge_feat_dim,
             )
 
@@ -1079,74 +1123,17 @@ class HopMaskedTransformerModel(nn.Module):
 
         return out
 
-    def _build_path_embeddings(self, batch, node_embeddings: torch.Tensor,
-                              edge_features: Optional[torch.Tensor] = None) -> Optional[torch.Tensor]:
-        """Build path embeddings for K/V conditioning.
-
-        Args:
-            batch: PyG batch with path_data attribute (if use_path_embeddings=True)
-            node_embeddings: (N_total, hidden_dim) node embeddings from encoder
-            edge_features: (E_total, edge_dim) or None
-
-        Returns:
-            path_embeddings: (B, N_max, N_max, hidden_dim) tensor, or None
-        """
-        if not self.use_path_embeddings or not hasattr(batch, 'path_data'):
-            return None
-
-        path_data = batch.path_data
-        path_edges_per_graph = path_data["path_edges"]
-        node_offsets = path_data["node_offsets"]
-
-        B = len(path_edges_per_graph)
-        device = node_embeddings.device
-        N_max = batch.num_nodes // B if B > 0 else 0  # approximate, may be padded
-
-        # Use actual max N from batch
-        max_n = max((node_offsets[i+1] - node_offsets[i]) for i in range(B))
-        path_embeddings = torch.zeros(B, max_n, max_n, self.hidden_dim, device=device)
-
-        for graph_idx in range(B):
-            path_edges_dict = path_edges_per_graph[graph_idx]
-            offset = node_offsets[graph_idx]
-            n_graph = node_offsets[graph_idx + 1] - offset
-
-            # For each path in this graph
-            for (src, dst), edges_on_path in path_edges_dict.items():
-                if not edges_on_path:  # direct self-loop or unreachable
-                    continue
-
-                # Compute embeddings for each edge on the path
-                edge_embeddings = []
-                for pos, (u, v) in enumerate(edges_on_path):
-                    # Get global indices
-                    u_global = offset + u
-                    v_global = offset + v
-                    node_src_emb = node_embeddings[u_global]
-                    node_dst_emb = node_embeddings[v_global]
-
-                    # Get edge features if available
-                    edge_emb_input = None
-                    if edge_features is not None:
-                        # Find edge in global edge list
-                        # This is tricky; for now, assume we can find it by searching
-                        # In practice, we'd need to pass edge indices per path
-                        # For MVP, skip edge features on paths
-                        pass
-
-                    # Compute edge embedding: dist_embed[pos] + Linear(edge || node_src || node_dst)
-                    pos_tensor = torch.tensor([pos % self.path_embedder.max_path_length],
-                                             dtype=torch.long, device=device)
-                    edge_emb = self.path_embedder(edge_emb_input, node_src_emb.unsqueeze(0),
-                                                 node_dst_emb.unsqueeze(0), pos_tensor)
-                    edge_embeddings.append(edge_emb.squeeze(0))
-
-                # Average path embedding
-                if edge_embeddings:
-                    path_emb = torch.stack(edge_embeddings).mean(dim=0)
-                    path_embeddings[graph_idx, src, dst] = path_emb
-
-        return path_embeddings
+    def _build_edge_map(self, batch, B: int, N: int) -> torch.Tensor:
+        """(B, N, N) long: index of edge (u->v) in batch.edge_index, -1 if none."""
+        bv, ei = batch.batch, batch.edge_index
+        offsets = torch.zeros(B, dtype=torch.long, device=bv.device)
+        if B > 1:
+            offsets[1:] = torch.bincount(bv, minlength=B)[:-1].cumsum(0)
+        g = bv[ei[0]]
+        m = torch.full((B, N, N), -1, dtype=torch.long, device=bv.device)
+        m[g, ei[0] - offsets[g], ei[1] - offsets[g]] = torch.arange(
+            ei.shape[1], device=bv.device)
+        return m
 
     def encode_dense(self, batch):
         h = self.encoder(batch.x, batch.edge_index, batch.edge_attr, lap_pe=None)
@@ -1178,17 +1165,29 @@ class HopMaskedTransformerModel(nn.Module):
 
         x = dense_x
 
-        # Compute path embeddings once (only for deterministic hop-masked path)
+        # Path embeddings: built once, shared by all layers (both attention modes).
         path_embeddings = None
-        if self.use_path_embeddings and not self.multihop_attn:
-            # Get encoder node embeddings (sparse format)
-            node_embeddings_sparse = self.encoder(batch.x, batch.edge_index, batch.edge_attr, lap_pe=None)
-            path_embeddings = self._build_path_embeddings(batch, node_embeddings_sparse,
-                                                         edge_features=batch.edge_attr)
+        hop_tags = [None] * len(self.layers)
+        if self.use_path_embeddings:
+            edge_attr = getattr(batch, "edge_attr", None)
+            edge_map = (self._build_edge_map(batch, B_orig, N_orig)
+                        if edge_attr is not None else None)
+            path_embeddings = self.path_embedder(
+                dense_x, edge_attr, edge_map, dist_masks,
+                batch.path_data["pred"], nm)
+            if self._use_cross_hop:
+                if self.multihop_attn:
+                    all_hops = [list(range(dist_masks.shape[1]))] * self.num_heads
+                    tag = self.path_embedder.hop_tags(all_hops, self.num_heads)
+                    hop_tags = [tag] * len(self.layers)
+                else:
+                    hop_tags = [self.path_embedder.hop_tags(hs, self.num_heads)
+                                for hs in self.per_layer_hop_sets]
 
         if self.multihop_attn:
-            for layer in self.layers:
-                x = layer(x, mask_source, nm)
+            for layer_idx, layer in enumerate(self.layers):
+                x = layer(x, mask_source, nm, path_embeddings=path_embeddings,
+                          hop_tag=hop_tags[layer_idx])
             aux_loss = x.new_tensor(0.0)
         else:
             adj_power_mats = None
@@ -1228,7 +1227,8 @@ class HopMaskedTransformerModel(nn.Module):
 
                 x = layer(x, per_head_mask, nm, adj_blend_bias=adj_blend_bias_layer,
                          edge_bias=edge_bias_layer, path_embeddings=path_embeddings,
-                         head_valid_mask=head_valid_mask)
+                         head_valid_mask=head_valid_mask,
+                         hop_tag=hop_tags[layer_idx])
             aux_loss = x.new_tensor(0.0)
 
         node_emb = x[nm]

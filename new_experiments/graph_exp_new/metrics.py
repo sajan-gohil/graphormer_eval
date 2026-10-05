@@ -590,23 +590,16 @@ def compute_pos_weight(labels: np.ndarray, num_classes: int) -> np.ndarray:
     return np.sqrt(N / (num_classes * n_k))
 
 
-def compute_class_weights(labels: np.ndarray, num_classes: int) -> np.ndarray:
-    """Inverse-frequency class weights for multiclass (node/graph) CE.
-
-    w_c = N / (C * n_c), then normalised to mean 1 so the overall loss scale is
-    unchanged.  Rare classes get up-weighted, which is what macro-F1 rewards.
-
-    labels: 1-D array of integer class indices (padding value -1 already removed
-            by the caller).  n_c = count of class c (clipped to 1 to avoid /0).
-    Returns: (C,) float array of per-class weights.
-    """
-    labels = np.asarray(labels).reshape(-1).astype(np.int64)
-    counts = np.bincount(labels, minlength=num_classes)[:num_classes].astype(np.float64)
-    counts = np.clip(counts, 1.0, None)
-    N = counts.sum()
-    w = N / (num_classes * counts)
-    return w / w.mean()
-
+def compute_class_weights(labels, num_classes, mode="sqrt", cap=10.0):
+    counts = np.clip(np.bincount(np.asarray(labels).reshape(-1).astype(np.int64),
+                                 minlength=num_classes)[:num_classes].astype(np.float64), 1.0, None)
+    r = counts.sum() / (num_classes * counts)          # inverse frequency
+    w = {"inv": r, "sqrt": np.sqrt(r)}[mode]
+    w = w / w.mean()
+    if cap:                                            # cap max/min ratio to `cap`
+        w = np.clip(w, 1.0/np.sqrt(cap), np.sqrt(cap))
+        w = w / w.mean()
+    return w
 
 # ===========================================================================
 # Link-level (PCQM-Contact) helpers.
