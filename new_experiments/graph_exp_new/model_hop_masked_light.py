@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from torch_geometric.utils import to_dense_batch
 from torch_geometric.nn import global_add_pool, global_mean_pool, GATv2Conv
 
-from models import build_node_encoder, build_bond_encoder
+from models import build_node_encoder, build_bond_encoder, LinearBondEncoder
 
 
 _NEG_INF = float("-inf")
@@ -379,6 +379,10 @@ class PathEmbedder(nn.Module):
         self.W_e = nn.Linear(d, d, bias=False)
         self.edge_enc = build_bond_encoder(d, dataset_name=dataset_name,
                                            edge_feat_dim=edge_feat_dim)
+        # Continuous edge features: W_e(GELU(Linear(e))) = 2-layer MLP.
+        # Categorical encoders (embedding lookups) stay W_e(Emb(e)).
+        self.edge_act = (nn.GELU() if isinstance(self.edge_enc, LinearBondEncoder)
+                         else nn.Identity())
 
     def hop_tags(self, hop_sets: List[Optional[List[int]]], H: int) -> torch.Tensor:
         """(H, Dh): mean hop_emb over each head's hop set, head-h slice."""
@@ -403,7 +407,7 @@ class PathEmbedder(nn.Module):
 
         E = None
         if edge_attr is not None and edge_map is not None:
-            E = self.W_e(self.edge_enc(edge_attr))
+            E = self.W_e(self.edge_act(self.edge_enc(edge_attr)))
             E = torch.cat([E, E.new_zeros(1, d)])  # index -1 -> zero row
 
         K = dist_masks.shape[1]
