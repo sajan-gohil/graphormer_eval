@@ -355,9 +355,9 @@ class DynamicCrossHopMixer(nn.Module):
 class PathEmbedder(nn.Module):
     """Dense (B, N, N, d) path embeddings, shared by all layers and heads.
 
-    P[b,s,t] = mean_{r=1..k, edge (u->v) at position r on SP(s,t)}(
+    P[b,s,t] = LayerNorm( (1/sqrt(k)) * sum_{r=1..k, edge (u->v) at position r on SP(s,t)}(
                    W_s x_u + W_t x_v + W_e BondEnc(e_uv) + pos_emb[r-1])
-             + hop_emb[d(s,t)]
+             + hop_emb[d(s,t)] )
     hop_emb rows: 0..K-1 = distance, K = beyond K-1 / unreachable,
     K+1 = global-head tag for the cross-hop mixer.
     Edge term is used whenever batch.edge_attr is present.
@@ -379,6 +379,7 @@ class PathEmbedder(nn.Module):
         self.W_e = nn.Linear(d, d, bias=False)
         self.edge_enc = build_bond_encoder(d, dataset_name=dataset_name,
                                            edge_feat_dim=edge_feat_dim)
+        self.norm = nn.LayerNorm(d)  # scale of P set here; per-layer gate in MHA
         # Continuous edge features: W_e(GELU(Linear(e))) = 2-layer MLP.
         # Categorical encoders (embedding lookups) stay W_e(Emb(e)).
         self.edge_act = (nn.GELU() if isinstance(self.edge_enc, LinearBondEncoder)
@@ -428,15 +429,38 @@ class PathEmbedder(nn.Module):
                 S = S + prev[row_of[b, s, p]]
             row_of[b, s, t] = torch.arange(b.numel(), device=dev)
             prev = S
-            out[b, s, t] = (S + pos_cum[k - 1]) / k
+            out[b, s, t] = (S + pos_cum[k - 1]) / math.sqrt(k)
 
         # Pair-distance embedding d(s,t); K = beyond K-1 / unreachable.
         has = dist_masks.bool().any(1)
         didx = dist_masks.float().argmax(1)
         didx[~has] = self.K
-        out = out + self.hop_emb(didx)
+        out = self.norm(out + self.hop_emb(didx))
         pair = node_mask[:, :, None] & node_mask[:, None, :]
         return out * pair.unsqueeze(-1).to(out.dtype)
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics: per-head ||k||, ||P||, output-norm share (eval only).
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def _accumulate_attn_stats(mod, k, out, node_mask, pair_mask,
+                           P_raw=None, path_v=None):
+    """k, out, path_v: (B,H,N,Dh); P_raw: (B,N,N,H,Dh) before gate;
+    pair_mask: (B,H|1,N,N) bool of attended pairs."""
+    nm = node_mask[:, None, :].to(k.dtype)                       # (B,1,N)
+    st = mod.stats
+    st["n_nodes"] = st.get("n_nodes", 0.0) + nm.sum().item()
+    def acc(key, val):
+        st[key] = st.get(key, 0) + val.detach().float().cpu()
+    acc("k_norm", (k.norm(dim=-1) * nm).sum((0, 2)))
+    acc("out_norm", (out.norm(dim=-1) * nm).sum((0, 2)))
+    if P_raw is not None:
+        pm = pair_mask.expand(-1, k.shape[1], -1, -1).to(k.dtype)
+        pn = P_raw.norm(dim=-1).permute(0, 3, 1, 2)              # (B,H,N,N)
+        acc("p_norm", (pn * pm).sum((0, 2, 3)))
+        acc("p_cnt", pm.sum((0, 2, 3)))
+        acc("pv_norm", (path_v.norm(dim=-1) * nm).sum((0, 2)))
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +471,7 @@ class HopMaskedMHA(nn.Module):
 
     def __init__(self, hidden_dim: int, num_heads: int, dropout: float = 0.0,
                  block_diag_out: bool = False, blend_adj_power: bool = False,
-                 use_edge_bias: bool = False):
+                 use_edge_bias: bool = False, use_path_gate: bool = False):
         super().__init__()
         if hidden_dim % num_heads != 0:
             raise ValueError(
@@ -471,6 +495,12 @@ class HopMaskedMHA(nn.Module):
             self.adj_blend_gamma = nn.Parameter(torch.zeros(num_heads))
 
         self.use_edge_bias = use_edge_bias
+
+        # Per-layer gate on P, starts at 0 ("scale" -> excluded from weight decay).
+        if use_path_gate:
+            self.path_gate_scale = nn.Parameter(torch.zeros(1))
+        self.collect_stats = False
+        self.stats = {}
 
     def forward(
         self,
@@ -501,8 +531,9 @@ class HopMaskedMHA(nn.Module):
 
         # Add path embeddings contribution to scores
         if path_embeddings is not None:
-            # K_ij = k_j + P_ij  =>  extra score term q_i . P_ij (per head slice)
-            path_emb_per_head = path_embeddings.view(B, N, N, H, Dh)  # (B, N, N, H, Dh)
+            # K_ij = k_j + g*P_ij  =>  extra score term q_i . g*P_ij (per head slice)
+            P_raw = path_embeddings.view(B, N, N, H, Dh)  # (B, N, N, H, Dh)
+            path_emb_per_head = self.path_gate_scale * P_raw
             path_scores = torch.einsum('bhid,bijhd->bhij', q, path_emb_per_head) / math.sqrt(Dh)
             scores = scores + path_scores
 
@@ -524,8 +555,15 @@ class HopMaskedMHA(nn.Module):
             attn = attn * keep.to(attn.dtype) / (1 - p)
 
         out = torch.matmul(attn, v)
+        path_v = None
         if path_embeddings is not None:
-            out = out + torch.einsum('bhij,bijhd->bhid', attn, path_emb_per_head)
+            path_v = torch.einsum('bhij,bijhd->bhid', attn, path_emb_per_head)
+            out = out + path_v
+        if self.collect_stats:
+            pairs = (per_head_mask & node_mask[:, None, None, :]
+                     & node_mask[:, None, :, None])
+            _accumulate_attn_stats(self, k, out, node_mask, pairs,
+                                   P_raw if path_v is not None else None, path_v)
         out = out.transpose(1, 2).reshape(B, N, d)
         return self.out_proj(out)
 
@@ -538,7 +576,7 @@ class MultiHopMaskedMHA(nn.Module):
 
     def __init__(self, hidden_dim: int, num_heads: int, dropout: float = 0.0,
                  block_diag_out: bool = False, readout: str = "sum",
-                 include_global: bool = True):
+                 include_global: bool = True, use_path_gate: bool = False):
         super().__init__()
         if hidden_dim % num_heads != 0:
             raise ValueError(
@@ -561,6 +599,12 @@ class MultiHopMaskedMHA(nn.Module):
             self.out_proj = nn.Linear(hidden_dim, hidden_dim)
         self.attn_drop = nn.Dropout(dropout)
 
+        # Per-layer gate on P, starts at 0 ("scale" -> excluded from weight decay).
+        if use_path_gate:
+            self.path_gate_scale = nn.Parameter(torch.zeros(1))
+        self.collect_stats = False
+        self.stats = {}
+
     def forward(
         self,
         x: torch.Tensor,
@@ -579,7 +623,8 @@ class MultiHopMaskedMHA(nn.Module):
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(Dh)
         Ph = None
         if path_embeddings is not None:
-            Ph = path_embeddings.view(B, N, N, H, Dh)
+            P_raw = path_embeddings.view(B, N, N, H, Dh)
+            Ph = self.path_gate_scale * P_raw
             scores = scores + torch.einsum('bhid,bijhd->bhij', q, Ph) / math.sqrt(Dh)
 
         key_pad   = (~node_mask).unsqueeze(1).unsqueeze(2)
@@ -612,12 +657,21 @@ class MultiHopMaskedMHA(nn.Module):
             count = count + node_mask.to(scores.dtype)
 
         out_sum = torch.matmul(a_sum, v)
+        path_v = None
         if Ph is not None:
-            out_sum = out_sum + torch.einsum('bhij,bijhd->bhid', a_sum, Ph)
+            path_v = torch.einsum('bhij,bijhd->bhid', a_sum, Ph)
+            out_sum = out_sum + path_v
 
         if self.readout == "mean":
             denom = count.clamp(min=1.0).view(B, 1, N, 1)
             out_sum = out_sum / denom
+            if path_v is not None:
+                path_v = path_v / denom
+
+        if self.collect_stats:
+            pairs = (node_mask[:, None, None, :] & node_mask[:, None, :, None])
+            _accumulate_attn_stats(self, k, out_sum, node_mask, pairs,
+                                   P_raw if path_v is not None else None, path_v)
 
         out = out_sum.transpose(1, 2).reshape(B, N, d)
         return self.out_proj(out)
@@ -643,6 +697,7 @@ class HopMaskedTransformerLayer(nn.Module):
         multihop_attn: bool = False,
         multihop_readout: str = "sum",
         multihop_include_global: bool = True,
+        use_path_gate: bool = False,
     ):
         super().__init__()
         self.multihop_attn = multihop_attn
@@ -653,11 +708,13 @@ class HopMaskedTransformerLayer(nn.Module):
                 hidden_dim, num_heads, dropout,
                 block_diag_out=block_diag_out,
                 readout=multihop_readout, include_global=multihop_include_global,
+                use_path_gate=use_path_gate,
             )
         else:
             self.attn = HopMaskedMHA(
                 hidden_dim, num_heads, dropout, block_diag_out=block_diag_out,
                 blend_adj_power=blend_adj_power, use_edge_bias=use_edge_bias,
+                use_path_gate=use_path_gate,
             )
         self.drop1 = nn.Dropout(dropout)
 
@@ -924,6 +981,7 @@ class HopMaskedTransformerModel(nn.Module):
                     multihop_attn=multihop_attn,
                     multihop_readout=multihop_readout,
                     multihop_include_global=multihop_include_global,
+                    use_path_gate=use_path_embeddings,
                 )
             )
         self.layers = nn.ModuleList(layers)

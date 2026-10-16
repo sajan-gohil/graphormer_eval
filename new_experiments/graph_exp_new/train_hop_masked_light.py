@@ -213,6 +213,56 @@ def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
     return float(np.mean(losses)), float(metric)
 
 
+@torch.no_grad()
+def attn_diagnostics(model, loader, device, tag, max_batches=10):
+    """Per layer/head: ||k||, ||P|| (after LayerNorm), gate g, ||g*P||/||k||,
+    head share of attention-output norm, and share of the V path term."""
+    mods = [layer.attn for layer in model.layers]
+    was_training = model.training
+    model.eval()
+    for m in mods:
+        m.collect_stats, m.stats = True, {}
+    for i, batch in enumerate(loader):
+        if i >= max_batches:
+            break
+        pyg_batch, dist_masks, node_masks, path_data = _move_batch_to_device(batch, device)
+        if path_data is not None:
+            pyg_batch.path_data = path_data
+        model(pyg_batch, dist_masks, node_masks)
+    for m in mods:
+        m.collect_stats = False
+    model.train(was_training)
+
+    print(f"\n=== attention diagnostics [{tag}] ({max_batches} batches) ===", flush=True)
+    for li, m in enumerate(mods):
+        st, n = m.stats, max(m.stats.get("n_nodes", 1.0), 1.0)
+        k_n = st["k_norm"] / n
+        out_n = st["out_norm"] / n
+        share = out_n / out_n.sum().clamp_min(1e-12)
+        has_p = "p_norm" in st
+        g = m.path_gate_scale.item() if hasattr(m, "path_gate_scale") else None
+        hdr = f"layer {li}" + (f" | gate g = {g:+.4f}" if g is not None else "")
+        print(hdr, flush=True)
+        print(f"  {'head':>4} {'hops':>14} {'|k|':>8} {'|P|':>8} {'|gP|/|k|':>9} "
+              f"{'out share':>9} {'Pv/out':>7}", flush=True)
+        hop_sets = (model.per_layer_hop_sets[li] if not model.multihop_attn
+                    else ["all"] * len(k_n))
+        for h in range(len(k_n)):
+            hs = hop_sets[h]
+            hs = "GLOBAL" if hs is None else str(hs)
+            if has_p:
+                p_n = (st["p_norm"][h] / st["p_cnt"][h].clamp_min(1.0)).item()
+                ratio = abs(g) * p_n / max(k_n[h].item(), 1e-12)
+                pv = (st["pv_norm"][h] / n / out_n[h].clamp_min(1e-12)).item()
+                ptxt = f"{p_n:>8.3f} {ratio:>9.4f}"
+                pvtxt = f"{pv:>7.3f}"
+            else:
+                ptxt, pvtxt = f"{'-':>8} {'-':>9}", f"{'-':>7}"
+            print(f"  {h:>4} {hs[:14]:>14} {k_n[h].item():>8.3f} {ptxt} "
+                  f"{share[h].item():>9.3f} {pvtxt}", flush=True)
+    print(flush=True)
+
+
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
@@ -353,6 +403,8 @@ def main():
         print(f"  Resuming from epoch {start_epoch} "
               f"(best_val={best_val:.4f} at epoch {best_epoch})", flush=True)
 
+    attn_diagnostics(model, val_loader, args.device, tag=f"start (epoch {start_epoch})")
+
     for epoch in range(start_epoch, args.max_epochs):
         t0 = time.time()
         tr_loss, tr_metric = run_epoch(
@@ -408,6 +460,11 @@ def main():
 
     print(f"BEST: val {ml} {best_val:.4f} | test {ml} {best_test:.4f} "
           f"(epoch {best_epoch})", flush=True)
+
+    best_path = os.path.join(args.save_dir, f"best_{dataset_name}.pt")
+    if os.path.exists(best_path):
+        model.load_state_dict(torch.load(best_path, map_location=args.device)["model"])
+        attn_diagnostics(model, val_loader, args.device, tag=f"best (epoch {best_epoch})")
 
 
 if __name__ == "__main__":
