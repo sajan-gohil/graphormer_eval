@@ -153,6 +153,8 @@ def build_parser():
     p.add_argument("--save_dir", type=str, default="checkpoints_hop_masked_light")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--checkpoint", type=str, default=None)
+    p.add_argument("--amp", action="store_true", default=False,
+                   help="bf16 autocast for the forward pass (CUDA only).")
     return p
 
 
@@ -165,33 +167,49 @@ def parse_args():
     return args
 
 
-def _move_batch_to_device(batch, device):
-    # batch can be (pyg_batch, dist_masks, node_masks) or
-    #             (pyg_batch, dist_masks, node_masks, path_data)
+def _move_batch_to_device(batch, device, max_hops):
+    # batch can be (pyg_batch, dist, node_masks) or
+    #             (pyg_batch, dist, node_masks, path_data)
+    # dist: int16 (B, N, N) distance index (-1 = none); the one-hot float
+    # (B, K, N, N) hop masks are built on the device.
     if len(batch) == 4:
-        pyg_batch, dist_masks, node_masks, path_data = batch
-        return pyg_batch.to(device), dist_masks.to(device), node_masks.to(device), path_data
+        pyg_batch, dist, node_masks, path_data = batch
     else:
-        pyg_batch, dist_masks, node_masks = batch
-        return pyg_batch.to(device), dist_masks.to(device), node_masks.to(device), None
+        pyg_batch, dist, node_masks = batch
+        path_data = None
+    # path_data stays on CPU (the model moves what it needs); drop the copy the
+    # collate attached to the batch so Batch.to() doesn't transfer it too.
+    if getattr(pyg_batch, "path_data", None) is not None:
+        del pyg_batch.path_data
+    dist = dist.to(device, non_blocking=True)
+    if dist.dim() == 3:
+        hops = torch.arange(max_hops, device=device, dtype=dist.dtype)
+        dist_masks = (dist.unsqueeze(1) == hops.view(1, -1, 1, 1)).float()
+    else:
+        dist_masks = dist
+    return pyg_batch.to(device), dist_masks, node_masks.to(device), path_data
 
 
 def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
-              grad_clip=1.0):
+              grad_clip=1.0, amp=False):
     """Run one epoch. Returns (loss, metric)."""
     is_train = optimizer is not None
     model.train(is_train)
 
     losses, preds_acc, labels_acc = [], [], []
     for batch in loader:
-        pyg_batch, dist_masks, node_masks, path_data = _move_batch_to_device(batch, device)
+        pyg_batch, dist_masks, node_masks, path_data = _move_batch_to_device(
+            batch, device, model.max_hops)
         # Attach path_data to batch if present
         if path_data is not None:
             pyg_batch.path_data = path_data
         if is_train:
             optimizer.zero_grad()
         with torch.set_grad_enabled(is_train):
-            logits, _, aux_loss, _ = model(pyg_batch, dist_masks, node_masks)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
+                                enabled=amp and str(device).startswith("cuda")):
+                logits, _, aux_loss, _ = model(pyg_batch, dist_masks, node_masks)
+            logits, aux_loss = logits.float(), aux_loss.float()
             task_loss = task.loss(logits, pyg_batch.y)
             loss = task_loss + aux_loss
 
@@ -225,7 +243,8 @@ def attn_diagnostics(model, loader, device, tag, max_batches=10):
     for i, batch in enumerate(loader):
         if i >= max_batches:
             break
-        pyg_batch, dist_masks, node_masks, path_data = _move_batch_to_device(batch, device)
+        pyg_batch, dist_masks, node_masks, path_data = _move_batch_to_device(
+            batch, device, model.max_hops)
         if path_data is not None:
             pyg_batch.path_data = path_data
         model(pyg_batch, dist_masks, node_masks)
@@ -281,6 +300,7 @@ def main():
         return_info=True,
         seed=args.seed,
         use_path_embeddings=args.use_path_embeddings,
+        dist_as_index=True,
     )
     dataset_name = dataset_info["name"]
 
@@ -410,10 +430,13 @@ def main():
         tr_loss, tr_metric = run_epoch(
             model, train_loader, task, args.device,
             optimizer=optimizer, scheduler=scheduler, grad_clip=args.grad_clip,
+            amp=args.amp,
         )
-        va_loss, va_metric = run_epoch(model, val_loader, task, args.device)
+        va_loss, va_metric = run_epoch(model, val_loader, task, args.device,
+                                       amp=args.amp)
         plateau_scheduler.step(va_metric)
-        te_loss, te_metric = run_epoch(model, test_loader, task, args.device)
+        te_loss, te_metric = run_epoch(model, test_loader, task, args.device,
+                                       amp=args.amp)
         dt = time.time() - t0
 
         improved = (
