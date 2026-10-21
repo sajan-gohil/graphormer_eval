@@ -153,6 +153,10 @@ def build_parser():
     p.add_argument("--save_dir", type=str, default="checkpoints_hop_masked_light")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--checkpoint", type=str, default=None)
+    p.add_argument("--random_global_prob", type=float, default=None,
+                   help="Train-time prob. of promoting each (graph, head) to "
+                        "global attention per layer (hop-masked mode). "
+                        "Default: dropout/2. 0 disables.")
     p.add_argument("--amp", action="store_true", default=False,
                    help="bf16 autocast for the forward pass (CUDA only).")
     return p
@@ -190,13 +194,26 @@ def _move_batch_to_device(batch, device, max_hops):
     return pyg_batch.to(device), dist_masks, node_masks.to(device), path_data
 
 
+def _predict_on_device(task, logits):
+    """Same output as task.predict, but stays on the device (no per-batch sync)."""
+    logits = logits.detach()
+    if task.task_type == "multi_label":
+        return torch.sigmoid(logits)
+    if task.task_type == "regression":
+        return logits
+    if task.task_type == "multiclass":
+        return logits.argmax(dim=-1)
+    raise ValueError(f"Unknown task_type: {task.task_type}")
+
+
 def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
               grad_clip=1.0, amp=False):
     """Run one epoch. Returns (loss, metric)."""
     is_train = optimizer is not None
     model.train(is_train)
 
-    losses, preds_acc, labels_acc = [], [], []
+    # Loss / predictions / labels stay on the device; one transfer per epoch.
+    loss_sum, n_batches, preds_acc, labels_acc = None, 0, [], []
     for batch in loader:
         pyg_batch, dist_masks, node_masks, path_data = _move_batch_to_device(
             batch, device, model.max_hops)
@@ -221,14 +238,16 @@ def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
             if scheduler is not None:
                 scheduler.step()
 
-        losses.append(task_loss.item())
-        preds_acc.append(task.predict(logits))
-        labels_acc.append(task.labels_to_numpy(pyg_batch.y))
+        tl = task_loss.detach()
+        loss_sum = tl if loss_sum is None else loss_sum + tl
+        n_batches += 1
+        preds_acc.append(_predict_on_device(task, logits))
+        labels_acc.append(pyg_batch.y.detach())
 
-    y_pred = np.concatenate(preds_acc, axis=0)
-    y_true = np.concatenate(labels_acc, axis=0)
+    y_pred = torch.cat(preds_acc, dim=0).cpu().numpy()
+    y_true = torch.cat(labels_acc, dim=0).cpu().numpy()
     metric = task.compute_metric(y_pred, y_true)
-    return float(np.mean(losses)), float(metric)
+    return float(loss_sum.item() / max(n_batches, 1)), float(metric)
 
 
 @torch.no_grad()
@@ -282,12 +301,8 @@ def attn_diagnostics(model, loader, device, tag, max_batches=10):
     print(flush=True)
 
 
-def main():
-    args = parse_args()
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-
-    os.makedirs(args.save_dir, exist_ok=True)
+def build_data_task_model(args):
+    """Loaders, task and model from parsed args (shared with the profiler)."""
     train_loader, val_loader, test_loader, _, _, _, dataset_info = get_loaders(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -345,7 +360,20 @@ def main():
         multihop_readout=args.multihop_readout,
         multihop_include_global=not args.multihop_no_global,
         use_path_embeddings=args.use_path_embeddings,
+        random_global_prob=args.random_global_prob,
     ).to(args.device)
+    return train_loader, val_loader, test_loader, dataset_info, task, model
+
+
+def main():
+    args = parse_args()
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+    os.makedirs(args.save_dir, exist_ok=True)
+    (train_loader, val_loader, test_loader, dataset_info, task,
+     model) = build_data_task_model(args)
+    dataset_name = dataset_info["name"]
 
     if args.multihop_attn:
         print(f"Multi-hop attention: H×K views, readout={args.multihop_readout}",

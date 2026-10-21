@@ -127,6 +127,7 @@ for i, d_ in enumerate(dists):
     n = graphs[i].num_nodes
     dist_idx[i, :n, :n] = torch.from_numpy(np.where(d_ < K, d_, -1).astype(np.int16))
 _, dm_built, _, _ = _move_batch_to_device((batch, dist_idx, nm), "cpu", K)
+batch.path_data = {"pred": pred}  # _move_batch_to_device removes it
 assert torch.equal(dm_built, dm), "hop masks differ"
 print("device-built hop masks == collate masks")
 
@@ -177,4 +178,57 @@ for mask_type in ("shortest_path", "adj_power"):
     adj = m._build_adj_power_masks(src)
     assert (m._build_adj_blend_bias_from_power(adj, hs) - ref_blend(adj, hs, H)).abs().max() < 1e-6
     print(f"vectorized per-head mask / blend bias == loop ({mask_type})")
+
+# --- adj_power (torch.where) == old boolean-index version; hop_tags == old ---
+def ref_adj_power(dmask, self_loops, k_cap):
+    B_, K_, N_, _ = dmask.shape
+    eye = torch.eye(N_, dtype=torch.bool)
+    out = torch.zeros(B_, K_, N_, N_)
+    out[:, 0] = eye.float()
+    A = dmask[:, 1] > 0
+    base_f = ((A | eye) if self_loops else A).float()
+    cur_f, seen = base_f.clone(), eye.expand(B_, -1, -1).clone()
+    reach = eye.expand(B_, -1, -1).float()
+    k_max = min(K_ - 1, k_cap)
+    for k in range(1, k_max + 1):
+        cb = cur_f > 0
+        reach = reach + cb.float()
+        new = cb & ~seen
+        sc = torch.zeros(B_, N_, N_)
+        sc[cb] = 1.0 / reach[cb]
+        sc[new] = 1.0
+        out[:, k] = sc
+        seen = seen | cb
+        if k < k_max:
+            cur_f = torch.bmm(cur_f, base_f)
+    return out
+
+for self_loops in (False, True):
+    m = HopMaskedTransformerModel(hidden_dim=D, num_heads=H, num_layers=1, max_hops=K,
+                                  output_dim=3, dataset_name="Peptides-func",
+                                  mask_type="adj_power", adj_self_loops=self_loops)
+    ref = ref_adj_power(dm, self_loops, m._max_hop_index)
+    new = m._build_adj_power_masks(dm)
+    assert (new - ref).abs().max().item() < 1e-6, self_loops
+    # Rebuilding from the adj_power output is idempotent (reuse is exact).
+    assert (m._build_adj_power_masks(new) - new).abs().max().item() < 1e-6, self_loops
+print("adj_power torch.where == boolean-index version; rebuild idempotent")
+
+def ref_hop_tags(pe_, hop_sets, H_):
+    W = pe_.hop_emb.weight
+    M = W.new_zeros(H_, pe_.K + 2)
+    for h, hs in enumerate(hop_sets):
+        idx = [k for k in hs if 0 <= k < pe_.K] if hs is not None else []
+        if idx:
+            M[h, idx] = 1.0 / len(idx)
+        else:
+            M[h, pe_.K + 1] = 1.0
+    full = (M @ W).view(H_, H_, -1)
+    ar = torch.arange(H_)
+    return full[ar, ar]
+
+hs = model.head_hop_sets
+assert (pe.hop_tags(hs, H) - ref_hop_tags(pe, hs, H)).abs().max().item() < 1e-6
+assert (pe.hop_tags(list(hs), H) - ref_hop_tags(pe, hs, H)).abs().max().item() < 1e-6
+print("hop_tags (cached) == old")
 

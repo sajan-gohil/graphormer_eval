@@ -380,25 +380,36 @@ class PathEmbedder(nn.Module):
         self.edge_enc = build_bond_encoder(d, dataset_name=dataset_name,
                                            edge_feat_dim=edge_feat_dim)
         self.norm = nn.LayerNorm(d)  # scale of P set here; per-layer gate in MHA
+        self._tag_cache = {}  # hop-set content -> (H, K+2) membership (not saved)
         # Continuous edge features: W_e(GELU(Linear(e))) = 2-layer MLP.
         # Categorical encoders (embedding lookups) stay W_e(Emb(e)).
         self.edge_act = (nn.GELU() if isinstance(self.edge_enc, LinearBondEncoder)
                          else nn.Identity())
 
     def hop_tags(self, hop_sets: List[Optional[List[int]]], H: int) -> torch.Tensor:
-        """(H, Dh): mean hop_emb over each head's hop set, head-h slice."""
+        """(H, Dh): mean hop_emb over each head's hop set, head-h slice.
+
+        The (H, K+2) membership matrix is built once per distinct hop-set
+        content and device (cache keyed by content, so lists rebuilt each
+        forward still hit). Only the small einsum runs per forward.
+        """
         W = self.hop_emb.weight
         Dh = W.shape[1] // H
-        M = W.new_zeros(H, self.K + 2)
-        for h, hs in enumerate(hop_sets):
-            idx = [k for k in hs if 0 <= k < self.K] if hs is not None else []
-            if idx:
-                M[h, idx] = 1.0 / len(idx)
-            else:
-                M[h, self.K + 1] = 1.0
-        full = (M @ W).view(H, H, Dh)
-        ar = torch.arange(H, device=W.device)
-        return full[ar, ar]
+        key = (tuple(None if hs is None else tuple(hs) for hs in hop_sets),
+               H, str(W.device))
+        M = self._tag_cache.get(key)
+        if M is None:
+            M = torch.zeros(H, self.K + 2)
+            for h, hs in enumerate(hop_sets):
+                idx = [k for k in hs if 0 <= k < self.K] if hs is not None else []
+                if idx:
+                    M[h, idx] = 1.0 / len(idx)
+                else:
+                    M[h, self.K + 1] = 1.0
+            M = M.to(W.device)
+            self._tag_cache[key] = M
+        # tag_h = M[h] @ W[:, h*Dh:(h+1)*Dh]
+        return torch.einsum("hk,khd->hd", M.to(W.dtype), W.view(-1, H, Dh))
 
     def forward(self, x, edge_attr, edge_map, dist_masks, pred, node_mask,
                 levels=None):
@@ -930,6 +941,7 @@ class HopMaskedTransformerModel(nn.Module):
         multihop_include_global: bool = True,
         embed_dropout: float = 0.0,
         use_path_embeddings: bool = False,
+        random_global_prob: Optional[float] = None,
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -953,6 +965,10 @@ class HopMaskedTransformerModel(nn.Module):
         self.use_edge_bias = use_edge_bias
         self.embed_drop = nn.Dropout(embed_dropout)
         self.dropout = dropout
+        # Training-time augmentation: each (graph, head) is promoted to global
+        # attention with this probability, per layer. None -> dropout / 2.
+        self.random_global_prob = (dropout / 2 if random_global_prob is None
+                                   else random_global_prob)
 
         # Hop-to-head assignment
         if self.use_alternating:
@@ -1032,7 +1048,7 @@ class HopMaskedTransformerModel(nn.Module):
             )
 
         self._use_cross_hop = dynamic_cross_hop
-        self._member_cache = {}  # (id(hop_sets), K, device, excl) -> (M, glob)
+        self._member_cache = {}  # (hop-set content, K, device, excl) -> (M, glob)
 
         ffn_dim = int(hidden_dim * ffn_ratio)
         layers = []
@@ -1085,7 +1101,9 @@ class HopMaskedTransformerModel(nn.Module):
         M[h, k] = number of times hop k appears in head h's set (k < K, and
         k > 0 if exclude_self). glob[h] = set is None or has no hop < K.
         """
-        key = (id(hop_sets), K, str(device), exclude_self)
+        # Keyed by content: an id() key can be reused by a new list after GC.
+        key = (tuple(None if hs is None else tuple(hs) for hs in hop_sets),
+               K, str(device), exclude_self)
         hit = self._member_cache.get(key)
         if hit is None:
             H = self.num_heads
@@ -1203,16 +1221,16 @@ class HopMaskedTransformerModel(nn.Module):
         reach_count = eye.unsqueeze(0).expand(B, -1, -1).float()
         for k in range(1, k_max + 1):
             cur_bool = cur_f > 0
-            reach_count = reach_count + cur_bool.float()
+            reach_count = reach_count + cur_bool.float()          # >= 1 everywhere
             new_mask = cur_bool & ~seen
-            old_mask = cur_bool &  seen
-            scores = torch.zeros(B, N, N, device=dist_masks.device, dtype=torch.float32)
-            scores[cur_bool] =  1.0 / reach_count[cur_bool]
-            scores[new_mask] = 1.0
-            out[:, k] = scores
+            # new pairs -> 1, revisited pairs -> 1/reach_count, unreached -> 0
+            out[:, k] = torch.where(
+                new_mask, 1.0,
+                torch.where(cur_bool, reach_count.reciprocal(), 0.0))
             seen = seen | cur_bool
             if k < k_max:
-                cur_f = torch.bmm(cur_f, base_f)
+                with torch.autocast(dist_masks.device.type, enabled=False):
+                    cur_f = torch.bmm(cur_f, base_f)
         return out
 
     def _build_hop_membership(
@@ -1297,10 +1315,18 @@ class HopMaskedTransformerModel(nn.Module):
 
         B_orig, N_orig = dense_x.shape[:2]
 
+        # adj_power matrices, built at most once. When mask_type == "adj_power"
+        # mask_source already is them (rebuilding from mask_source[:, 1] gives
+        # the same result, so reusing it is exact).
+        adj_power_mats = None
+        if self.blend_adj_power:
+            adj_power_mats = (mask_source if self.mask_type == "adj_power"
+                              else self._build_adj_power_masks(mask_source))
+
         adj_blend_bias = None
         if self.blend_adj_power and not self.use_alternating:
-            adj_blend_bias = self._build_adj_blend_bias(
-                mask_source, self.head_hop_sets
+            adj_blend_bias = self._build_adj_blend_bias_from_power(
+                adj_power_mats, self.head_hop_sets
             )
 
         edge_bias = None
@@ -1347,10 +1373,6 @@ class HopMaskedTransformerModel(nn.Module):
                           hop_tag=hop_tags[layer_idx], hop_index=hop_index)
             aux_loss = x.new_tensor(0.0)
         else:
-            adj_power_mats = None
-            if self.use_alternating and self.blend_adj_power:
-                adj_power_mats = self._build_adj_power_masks(mask_source)
-
             base_masks = {}
             for layer_idx, layer in enumerate(self.layers):
                 # Build once per distinct hop-set list; layers share it.
@@ -1359,12 +1381,12 @@ class HopMaskedTransformerModel(nn.Module):
                     base_masks[id(hs)] = self._build_per_head_mask(mask_source, hs)
                 per_head_mask = base_masks[id(hs)]
 
-                if self.training and self.dropout > 0:
+                if self.training and self.random_global_prob > 0:
                     per_head_mask = per_head_mask.clone()  # modified in place below
                     B_cur = per_head_mask.shape[0]
                     random_global = torch.rand(
                         B_cur, self.num_heads, device=x.device,
-                    ) < (self.dropout / 2)
+                    ) < self.random_global_prob
                     per_head_mask[random_global] = True
 
                 head_valid_mask = None

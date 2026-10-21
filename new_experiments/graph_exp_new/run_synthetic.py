@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import time
 from functools import partial
@@ -117,9 +118,16 @@ def train_one_seed(args, info, loaders, seed):
               f"best val {best['val']:.4f} (ep {best['epoch']})", flush=True)
         if since >= args.patience:
             break
-    if args.diagnostics and best_state is not None:
+    if best_state is not None:
         model.load_state_dict(best_state)
-        attn_diagnostics(model, loaders["val"], args.device, tag=f"seed {seed} best")
+        # Path-gate value per layer (0 at init): shows whether P is used at all.
+        best["path_gates"] = [round(float(l.attn.path_gate_scale.item()), 5)
+                              for l in model.layers
+                              if hasattr(l.attn, "path_gate_scale")]
+        if best["path_gates"]:
+            print(f"seed {seed} path gates (best ckpt): {best['path_gates']}", flush=True)
+        if args.diagnostics:
+            attn_diagnostics(model, loaders["val"], args.device, tag=f"seed {seed} best")
     return best
 
 
@@ -130,6 +138,10 @@ def main():
     p.add_argument("--results", type=str, default=None,
                    help="Append one JSON line per run (config + mean/std)")
     p.add_argument("--diagnostics", action="store_true", default=False)
+    p.add_argument("--auto_max_hops", action="store_true", default=False,
+                   help="max_hops = clamp(ceil(diameter) + 1, max_dist + 1, "
+                        "--max_hops_cap) from the dataset's meta.json")
+    p.add_argument("--max_hops_cap", type=int, default=48)
     p.set_defaults(dataset="Peptides-func")  # unused; dataset comes from --data
     args = p.parse_args()
     if args.device is None:
@@ -137,10 +149,16 @@ def main():
 
     with open(os.path.join(args.data, "meta.json")) as f:
         meta = json.load(f)
-    k = 1 if meta["task"] == 2 else meta["k"]
-    if k >= args.max_hops:
-        raise ValueError(f"max_hops={args.max_hops} must exceed the s->t distance k={k}: "
-                         f"pairs at distance >= max_hops get no hop mask or path.")
+    # Largest source-target distance in the dataset (older metas: k).
+    max_dist = int(meta.get("max_dist", 1 if meta["task"] == 2 else meta["k"]))
+    if args.auto_max_hops:
+        diam = meta.get("stats", {}).get("diameter") or max_dist
+        args.max_hops = int(min(max(math.ceil(diam) + 1, max_dist + 1), args.max_hops_cap))
+        print(f"auto max_hops = {args.max_hops} (diameter ~{diam}, max s-t distance "
+              f"{max_dist}, cap {args.max_hops_cap})", flush=True)
+    if max_dist >= args.max_hops:
+        raise ValueError(f"max_hops={args.max_hops} must exceed the largest s->t distance "
+                         f"{max_dist}: pairs at distance >= max_hops get no hop mask or path.")
     info = register(meta)
     loaders, _ = build_loaders(args.data, args)
 
