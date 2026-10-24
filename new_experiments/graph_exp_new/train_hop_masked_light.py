@@ -153,7 +153,7 @@ def build_parser():
     p.add_argument("--save_dir", type=str, default="checkpoints_hop_masked_light")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--checkpoint", type=str, default=None)
-    p.add_argument("--random_global_prob", type=float, default=None,
+    p.add_argument("--random_global_prob", type=float, default=0,
                    help="Train-time prob. of promoting each (graph, head) to "
                         "global attention per layer (hop-masked mode). "
                         "Default: dropout/2. 0 disables.")
