@@ -1,3 +1,4 @@
+# optim_utils.py
 import math
 from typing import Iterable, List, Sequence, Tuple
 
@@ -5,7 +6,9 @@ import torch
 
 
 RECURRENT_PARAM_NAMES = ("B_re", "B_im", "nu_log", "theta_log", "gamma_log")
-NO_DECAY_KEYWORDS = ("embedding", "bias", "scale", "norm")
+# "_emb." matches embedding tables named *_emb (e.g. pos_emb, hop_emb) without
+# matching module names such as "path_embedder".
+NO_DECAY_KEYWORDS = ("embedding", "bias", "scale", "norm", "_emb.")
 
 
 def split_parameter_groups(
@@ -138,3 +141,4 @@ def build_reduce_on_plateau_scheduler(
         factor=factor,
         threshold=threshold,
     )
+

@@ -61,7 +61,10 @@ for multihop in (False, True):
     dense_x, _ = model.encode_dense(batch)
     em = model._build_edge_map(batch, B, N)
     P = pe(dense_x, batch.edge_attr, em, dm, pred, nm)
-    Eemb = pe.W_e(pe.edge_act(pe.edge_enc(batch.edge_attr)))
+    Ein = pe.edge_pos_in_e(pe.edge_act(pe.edge_enc(batch.edge_attr)))
+    edge_pos = lambda b_, u_, w_, r: pe.edge_pos_out(torch.nn.functional.gelu(
+        pe.W_s(dense_x[b_, u_]) + Ein[em[b_, u_, w_]] + pe.W_t(dense_x[b_, w_])
+        + pe.edge_pos_in_p(pe.pos_emb.weight[r])))     # MLP([x_u ; e ; x_v ; pos_r])
     max_err = 0.0
     for b in range(B):
         n = graphs[b].num_nodes
@@ -76,8 +79,7 @@ for multihop in (False, True):
                     path = path[::-1]
                     acc = torch.zeros(D)
                     for r, (u, w) in enumerate(zip(path[:-1], path[1:])):
-                        acc += (pe.W_s(dense_x[b, u]) + pe.W_t(dense_x[b, w])
-                                + Eemb[em[b, u, w]] + pe.pos_emb.weight[r])
+                        acc += edge_pos(b, u, w, r)
                     ref = ref + acc / dst ** 0.5
                 ref = pe.norm(ref)
                 max_err = max(max_err, (P[b, s, t] - ref).abs().max().item())
@@ -97,7 +99,8 @@ for multihop in (False, True):
     logits, *_ = model(batch, dm, nm)
     logits.sum().backward()
     for name in ("path_embedder.pos_emb.weight", "path_embedder.hop_emb.weight",
-                 "path_embedder.W_e.weight", "path_embedder.W_s.weight"):
+                 "path_embedder.edge_pos_in_e.weight", "path_embedder.edge_pos_out.weight",
+                 "path_embedder.W_s.weight"):
         gr = dict(model.named_parameters())[name].grad
         assert gr is not None and gr.abs().sum() > 0, name
     print(f"multihop={multihop}: P max err {max_err:.2e}, logits {tuple(logits.shape)}, grads ok")

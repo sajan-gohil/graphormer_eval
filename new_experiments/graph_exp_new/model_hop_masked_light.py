@@ -355,9 +355,14 @@ class DynamicCrossHopMixer(nn.Module):
 class PathEmbedder(nn.Module):
     """Dense (B, N, N, d) path embeddings, shared by all layers and heads.
 
-    P[b,s,t] = LayerNorm( (1/sqrt(k)) * sum_{r=1..k, edge (u->v) at position r on SP(s,t)}(
-                   W_s x_u + W_t x_v + W_e BondEnc(e_uv) + pos_emb[r-1])
+    P[b,s,t] = LayerNorm( (1/sqrt(k)) * sum_{r=1..k, edge (u->v) at position r on SP(s,t)}
+                   MLP([x_u ; BondEnc(e_uv) ; x_v ; pos_emb[r-1]])
              + hop_emb[d(s,t)] )
+    The per-edge MLP binds endpoint nodes and edge content to their position
+    before the sum (a plain sum of position-added terms is invariant to
+    reordering the edges). Without edge features the BondEnc(e) input is 0.
+    The MLP input depends only on (edge, r), so it is computed per level for
+    all edges and gathered by edge id, not per (s, t) pair.
     hop_emb rows: 0..K-1 = distance, K = beyond K-1 / unreachable,
     K+1 = global-head tag for the cross-hop mixer.
     Edge term is used whenever batch.edge_attr is present.
@@ -373,18 +378,28 @@ class PathEmbedder(nn.Module):
         self.hop_emb = nn.Embedding(max_hops + 2, d)
         nn.init.normal_(self.pos_emb.weight, std=std)
         nn.init.normal_(self.hop_emb.weight, std=std)
-        # Linear(e || x_u || x_v) split into blocks.
+        # MLP([x_u ; e ; x_v ; pos_r]); first layer split per input block:
+        # W1 [x_u; e; x_v; pos] = W_s x_u + W1_e e + W_t x_v + W1_p pos.
         self.W_s = nn.Linear(d, d, bias=False)
         self.W_t = nn.Linear(d, d)
-        self.W_e = nn.Linear(d, d, bias=False)
+        self.edge_pos_in_e = nn.Linear(d, d, bias=False)
+        self.edge_pos_in_p = nn.Linear(d, d, bias=False)
+        self.edge_pos_out = nn.Linear(d, d)
         self.edge_enc = build_bond_encoder(d, dataset_name=dataset_name,
                                            edge_feat_dim=edge_feat_dim)
         self.norm = nn.LayerNorm(d)  # scale of P set here; per-layer gate in MHA
         self._tag_cache = {}  # hop-set content -> (H, K+2) membership (not saved)
-        # Continuous edge features: W_e(GELU(Linear(e))) = 2-layer MLP.
-        # Categorical encoders (embedding lookups) stay W_e(Emb(e)).
+        # Continuous edge features: GELU after the Linear bond encoder.
+        # Categorical encoders (embedding lookups) are used as is.
         self.edge_act = (nn.GELU() if isinstance(self.edge_enc, LinearBondEncoder)
                          else nn.Identity())
+
+    def _edge_pos_terms(self, Ein: torch.Tensor, Pin: torch.Tensor, k: int):
+        """MLP([x_u ; e ; x_v ; pos_{k-1}]) for every edge (E+1, d); Ein holds the
+        first-layer edge + node blocks; last row (no edge) = 0."""
+        h = F.gelu(Ein + Pin[k - 1])
+        T = self.edge_pos_out(h)
+        return torch.cat([T, T.new_zeros(1, T.shape[1])])
 
     def hop_tags(self, hop_sets: List[Optional[List[int]]], H: int) -> torch.Tensor:
         """(H, Dh): mean hop_emb over each head's hop set, head-h slice.
@@ -412,21 +427,31 @@ class PathEmbedder(nn.Module):
         return torch.einsum("hk,khd->hd", M.to(W.dtype), W.view(-1, H, Dh))
 
     def forward(self, x, edge_attr, edge_map, dist_masks, pred, node_mask,
-                levels=None):
+                levels=None, edge_coords=None):
         """levels: optional per-level index lists from data._path_levels.
-        If given, no per-level nonzero() (GPU->CPU sync) is needed."""
+        If given, no per-level nonzero() (GPU->CPU sync) is needed.
+        edge_map: (B, N, N) edge id of (u->v), -1 if none.
+        edge_coords: optional (g, u, v) dense coordinates of each edge id;
+        derived from edge_map if omitted (one nonzero())."""
         B, N, d = x.shape
         dev = x.device
-        A, C = self.W_s(x).float(), self.W_t(x).float()
-
-        E = None
-        if edge_attr is not None and edge_map is not None:
-            E = self.W_e(self.edge_act(self.edge_enc(edge_attr))).float()
-            E = torch.cat([E, E.new_zeros(1, d)])  # index -1 -> zero row
 
         K = dist_masks.shape[1]
         L = min(K - 1, self.pos_emb.num_embeddings)
-        pos_cum = self.pos_emb.weight[:L].cumsum(0)
+
+        # First-layer input of MLP([x_u ; e ; x_v ; pos]) per edge (E, d); the
+        # position block is added per level in _edge_pos_terms.
+        if edge_coords is None:
+            # Assumes no duplicate (u, v) edges (each edge id appears in edge_map).
+            g, u, v = (edge_map >= 0).nonzero(as_tuple=True)
+            order = edge_map[g, u, v].argsort()
+            g, u, v = g[order], u[order], v[order]
+        else:
+            g, u, v = edge_coords
+        Ein = (self.W_s(x[g, u]) + self.W_t(x[g, v])).float()
+        if edge_attr is not None:
+            Ein = Ein + self.edge_pos_in_e(self.edge_act(self.edge_enc(edge_attr))).float()
+        Pin = self.edge_pos_in_p(self.pos_emb.weight[:L]).float()
         out = x.new_zeros(B, N, N, d, dtype=torch.float32)
         prev = None
         if levels is not None and levels["ptr"].numel() - 1 == L:
@@ -439,13 +464,11 @@ class PathEmbedder(nn.Module):
                 if hi == lo:
                     break
                 b, s, t, p = lb[lo:hi], ls[lo:hi], lt[lo:hi], lp[lo:hi]
-                S = A[b, p] + C[b, t]
-                if E is not None:
-                    S = S + E[edge_map[b, p, t]]
+                S = self._edge_pos_terms(Ein, Pin, k)[edge_map[b, p, t]]
                 if k > 1:
                     S = S + prev[lpar[lo:hi] - ptr[k - 2]]  # parent is in level k-1
                 prev = S
-                out[b, s, t] = (S + pos_cum[k - 1]) / math.sqrt(k)
+                out[b, s, t] = S / math.sqrt(k)
         else:
             pred = pred.to(dev).long()
             row_of = torch.full((B, N, N), -1, dtype=torch.long, device=dev)
@@ -454,14 +477,12 @@ class PathEmbedder(nn.Module):
                 if b.numel() == 0:
                     break
                 p = pred[b, s, t]
-                S = A[b, p] + C[b, t]
-                if E is not None:
-                    S = S + E[edge_map[b, p, t]]
+                S = self._edge_pos_terms(Ein, Pin, k)[edge_map[b, p, t]]
                 if k > 1:
                     S = S + prev[row_of[b, s, p]]
                 row_of[b, s, t] = torch.arange(b.numel(), device=dev)
                 prev = S
-                out[b, s, t] = (S + pos_cum[k - 1]) / math.sqrt(k)
+                out[b, s, t] = S / math.sqrt(k)
 
         # Pair-distance embedding d(s,t); K = beyond K-1 / unreachable.
         has = dist_masks.bool().any(1)
@@ -1285,16 +1306,21 @@ class HopMaskedTransformerModel(nn.Module):
 
         return out
 
-    def _build_edge_map(self, batch, B: int, N: int) -> torch.Tensor:
-        """(B, N, N) long: index of edge (u->v) in batch.edge_index, -1 if none."""
+    @staticmethod
+    def _dense_edge_coords(batch, B: int):
+        """(graph, src_local, dst_local) of each edge in batch.edge_index."""
         bv, ei = batch.batch, batch.edge_index
         offsets = torch.zeros(B, dtype=torch.long, device=bv.device)
         if B > 1:
             offsets[1:] = torch.bincount(bv, minlength=B)[:-1].cumsum(0)
         g = bv[ei[0]]
-        m = torch.full((B, N, N), -1, dtype=torch.long, device=bv.device)
-        m[g, ei[0] - offsets[g], ei[1] - offsets[g]] = torch.arange(
-            ei.shape[1], device=bv.device)
+        return g, ei[0] - offsets[g], ei[1] - offsets[g]
+
+    def _build_edge_map(self, batch, B: int, N: int) -> torch.Tensor:
+        """(B, N, N) long: index of edge (u->v) in batch.edge_index, -1 if none."""
+        g, u, v = self._dense_edge_coords(batch, B)
+        m = torch.full((B, N, N), -1, dtype=torch.long, device=g.device)
+        m[g, u, v] = torch.arange(g.numel(), device=g.device)
         return m
 
     def encode_dense(self, batch):
@@ -1340,12 +1366,12 @@ class HopMaskedTransformerModel(nn.Module):
         hop_tags = [None] * len(self.layers)
         if self.use_path_embeddings:
             edge_attr = getattr(batch, "edge_attr", None)
-            edge_map = (self._build_edge_map(batch, B_orig, N_orig)
-                        if edge_attr is not None else None)
+            edge_map = self._build_edge_map(batch, B_orig, N_orig)
             path_embeddings = self.path_embedder(
                 dense_x, edge_attr, edge_map, dist_masks,
                 batch.path_data["pred"], nm,
-                levels=batch.path_data.get("levels"))
+                levels=batch.path_data.get("levels"),
+                edge_coords=self._dense_edge_coords(batch, B_orig))
             if torch.is_autocast_enabled():
                 # Cast once; otherwise every einsum would make its own bf16 copy.
                 amp_dtype = (torch.get_autocast_dtype("cuda")
