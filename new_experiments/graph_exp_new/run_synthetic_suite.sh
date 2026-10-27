@@ -36,7 +36,7 @@ set -uo pipefail
 OUT=${OUT:-synthetic}                 # dataset root
 LOGS=${LOGS:-synthetic_logs_v2}
 RESULTS=${RESULTS:-synthetic_results_v2.jsonl}
-SEEDS=${SEEDS:-0,1,2}
+SEEDS=${SEEDS:-1}
 NUM_TRAIN=${NUM_TRAIN:-2000}
 NUM_VAL=${NUM_VAL:-500}
 NUM_TEST=${NUM_TEST:-500}
@@ -69,14 +69,14 @@ HEADS=${HEADS:-8}
 LAYERS=${LAYERS:-4}
 EPOCHS=${EPOCHS:-100}
 PATIENCE=${PATIENCE:-20}
-BATCH=${BATCH:-32}
+BATCH=${BATCH:-128}
 # Smaller batches for large graphs (dense (B, K, N, N) masks and (B, N, N, d) P).
-BATCH_LARGE=${BATCH_LARGE:-8}         # avg_nodes >= LARGE_N
+BATCH_LARGE=${BATCH_LARGE:-32}         # avg_nodes >= LARGE_N
 LARGE_N=${LARGE_N:-400}
 LR=${LR:-1e-3}
 DROPOUT=${DROPOUT:-0.1}
 WORKERS=${WORKERS:-4}
-EXTRA=${EXTRA:-}                      # extra flags for every run, e.g. "--amp"
+EXTRA=${EXTRA:-"--amp"}                      # extra flags for every run, e.g. "--amp"
 
 COMMON="--seeds $SEEDS --auto_max_hops --max_hops_cap $MAX_HOPS --hidden_dim $HIDDEN --num_heads $HEADS \
 --num_layers $LAYERS --max_epochs $EPOCHS --patience $PATIENCE \

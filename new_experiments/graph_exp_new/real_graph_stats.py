@@ -13,13 +13,34 @@ Writes real_graph_stats.json and prints a table. Datasets that fail to load
 import argparse
 import json
 import traceback
+import warnings
 
 import numpy as np
+import torch
 from torch_geometric.utils import to_undirected
 
 from synthetic_suite import graph_stats
 
 ROOT = "./data"
+
+# Harmless warnings from ogb's dependencies (must be set before importing ogb).
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
+warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
+
+# torch >= 2.6 loads with weights_only=True; OGB's processed files pickle PyG
+# Data classes, so allowlist them (files are produced locally by OGB/PyG).
+from torch_geometric.data.data import DataEdgeAttr, DataTensorAttr
+from torch_geometric.data.storage import GlobalStorage
+torch.serialization.add_safe_globals([DataEdgeAttr, DataTensorAttr, GlobalStorage])
+
+# OGB asks "Will you proceed? (y/N)" for downloads > 1 GB via input(), which
+# fails without a terminal (OSError: Bad file descriptor). Answer yes.
+try:
+    import ogb.graphproppred.dataset_pyg as _ogbg
+    import ogb.nodeproppred.dataset_pyg as _ogbn
+    _ogbg.decide_download = _ogbn.decide_download = lambda url: True
+except ImportError:
+    pass
 
 
 def _ds():
