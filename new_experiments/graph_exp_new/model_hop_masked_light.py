@@ -352,6 +352,19 @@ class DynamicCrossHopMixer(nn.Module):
 # ---------------------------------------------------------------------------
 # Path-aware embeddings added to K and V.
 # ---------------------------------------------------------------------------
+def parse_path_node_terms(spec: str) -> frozenset:
+    """'all' -> {edge, src, dst}; otherwise a comma list of edge, src, dst."""
+    allowed = ("edge", "src", "dst")
+    if spec.strip() == "all":
+        return frozenset(allowed)
+    terms = [t.strip() for t in spec.split(",") if t.strip()]
+    bad = [t for t in terms if t not in allowed]
+    if bad or not terms:
+        raise ValueError(f"path_node_terms must be 'all' or a comma list of "
+                         f"{allowed}; got {spec!r}")
+    return frozenset(terms)
+
+
 class PathEmbedder(nn.Module):
     """Dense (B, N, N, d) path embeddings, shared by all layers and heads.
 
@@ -363,6 +376,8 @@ class PathEmbedder(nn.Module):
     reordering the edges). Without edge features the BondEnc(e) input is 0.
     The MLP input depends only on (edge, r), so it is computed per level for
     all edges and gathered by edge id, not per (s, t) pair.
+    path_node_terms selects the MLP inputs besides pos: 'all' or a comma list
+    of edge, src, dst (an omitted input contributes 0).
     hop_emb rows: 0..K-1 = distance, K = beyond K-1 / unreachable,
     K+1 = global-head tag for the cross-hop mixer.
     Edge term is used whenever batch.edge_attr is present.
@@ -370,8 +385,12 @@ class PathEmbedder(nn.Module):
 
     def __init__(self, hidden_dim: int, max_hops: int,
                  dataset_name: str = "Peptides-func",
-                 edge_feat_dim: Optional[int] = None):
+                 edge_feat_dim: Optional[int] = None,
+                 path_node_terms: str = "all"):
         super().__init__()
+        # Which inputs enter MLP([x_u ; e ; x_v ; pos]): "all" or a comma list of
+        # edge, src, dst (pos is always used).
+        self.terms = parse_path_node_terms(path_node_terms)
         d, std = hidden_dim, 0.02 * hidden_dim ** -0.5
         self.K = max_hops
         self.pos_emb = nn.Embedding(max_hops, d)
@@ -448,8 +467,12 @@ class PathEmbedder(nn.Module):
             g, u, v = g[order], u[order], v[order]
         else:
             g, u, v = edge_coords
-        Ein = (self.W_s(x[g, u]) + self.W_t(x[g, v])).float()
-        if edge_attr is not None:
+        Ein = self.W_t.bias.float().expand(g.numel(), d)   # first-layer bias
+        if "src" in self.terms:
+            Ein = Ein + F.linear(x[g, u], self.W_s.weight).float()
+        if "dst" in self.terms:
+            Ein = Ein + F.linear(x[g, v], self.W_t.weight).float()
+        if "edge" in self.terms and edge_attr is not None:
             Ein = Ein + self.edge_pos_in_e(self.edge_act(self.edge_enc(edge_attr))).float()
         Pin = self.edge_pos_in_p(self.pos_emb.weight[:L]).float()
         out = x.new_zeros(B, N, N, d, dtype=torch.float32)
@@ -963,6 +986,7 @@ class HopMaskedTransformerModel(nn.Module):
         embed_dropout: float = 0.0,
         use_path_embeddings: bool = False,
         random_global_prob: Optional[float] = None,
+        path_node_terms: str = "all",
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -1066,6 +1090,7 @@ class HopMaskedTransformerModel(nn.Module):
                 max_hops=max_hops,
                 dataset_name=dataset_name,
                 edge_feat_dim=edge_feat_dim,
+                path_node_terms=path_node_terms,
             )
 
         self._use_cross_hop = dynamic_cross_hop

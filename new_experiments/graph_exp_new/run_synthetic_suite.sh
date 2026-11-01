@@ -36,7 +36,7 @@ set -uo pipefail
 OUT=${OUT:-synthetic}                 # dataset root
 LOGS=${LOGS:-synthetic_logs_v2}
 RESULTS=${RESULTS:-synthetic_results_v2.jsonl}
-SEEDS=${SEEDS:-1}
+SEEDS=${SEEDS:-0,1,2}
 NUM_TRAIN=${NUM_TRAIN:-2000}
 NUM_VAL=${NUM_VAL:-500}
 NUM_TEST=${NUM_TEST:-500}
@@ -69,14 +69,14 @@ HEADS=${HEADS:-8}
 LAYERS=${LAYERS:-4}
 EPOCHS=${EPOCHS:-100}
 PATIENCE=${PATIENCE:-20}
-BATCH=${BATCH:-128}
+BATCH=${BATCH:-32}
 # Smaller batches for large graphs (dense (B, K, N, N) masks and (B, N, N, d) P).
-BATCH_LARGE=${BATCH_LARGE:-32}         # avg_nodes >= LARGE_N
+BATCH_LARGE=${BATCH_LARGE:-8}         # avg_nodes >= LARGE_N
 LARGE_N=${LARGE_N:-400}
 LR=${LR:-1e-3}
 DROPOUT=${DROPOUT:-0.1}
 WORKERS=${WORKERS:-4}
-EXTRA=${EXTRA:-"--amp"}                      # extra flags for every run, e.g. "--amp"
+EXTRA=${EXTRA:-}                      # extra flags for every run, e.g. "--amp"
 
 COMMON="--seeds $SEEDS --auto_max_hops --max_hops_cap $MAX_HOPS --hidden_dim $HIDDEN --num_heads $HEADS \
 --num_layers $LAYERS --max_epochs $EPOCHS --patience $PATIENCE \
@@ -207,7 +207,9 @@ path, heads = sys.argv[1], int(sys.argv[2])
 
 def ablation(a):
     if a.get("use_path_embeddings"):
-        return "full" if a.get("use_edge_features") else "path_only"
+        name = "full" if a.get("use_edge_features") else "path_only"
+        terms = a.get("path_node_terms", "all")
+        return name if terms == "all" else f"{name}[{terms}]"
     if a.get("num_post_gat_layers", 0) > 0:
         return "hop_edge_gat"
     if a.get("use_edge_features"):
@@ -226,6 +228,7 @@ for line in open(path):
     g = [abs(v) for run in r.get("runs", []) for v in run.get("path_gates", [])]
     if g:
         gates[r["dataset"]][abl] = max(g)
+cols += sorted({a for v in table.values() for a in v} - set(cols))
 
 w = max([len(k) for k in table] + [10])
 print(f"\n{'dataset':<{w}}  " + "  ".join(f"{c:>13}" for c in cols))

@@ -61,6 +61,10 @@ abl_flags() {
     hop_mask)     echo "" ;;
     hop_edge)     echo "--use_edge_features" ;;
     path_only)    echo "--use_path_embeddings --diagnostics" ;;
+    # Per-edge path MLP inputs (pos always used); default 'all' = edge,src,dst.
+    path_edge)     echo "--use_path_embeddings --path_node_terms edge --diagnostics" ;;
+    path_edge_src) echo "--use_path_embeddings --path_node_terms edge,src --diagnostics" ;;
+    path_edge_dst) echo "--use_path_embeddings --path_node_terms edge,dst --diagnostics" ;;
     full)         echo "--use_edge_features --use_path_embeddings --diagnostics" ;;
     hop_edge_gat) echo "--use_edge_features --num_post_gat_layers 2" ;;
   esac
@@ -169,7 +173,9 @@ path, prev_path, heads = sys.argv[1], sys.argv[2], int(sys.argv[3])
 
 def ablation(a):
     if a.get("use_path_embeddings"):
-        return "full" if a.get("use_edge_features") else "path_only"
+        name = "full" if a.get("use_edge_features") else "path_only"
+        terms = a.get("path_node_terms", "all")
+        return name if terms == "all" else f"{name}[{terms}]"
     if a.get("num_post_gat_layers", 0) > 0:
         return "hop_edge_gat"
     if a.get("use_edge_features"):
@@ -189,6 +195,7 @@ def load(p):
 cur, prev = load(path), load(prev_path)
 cols = ["node_only", "hop_mask", "hop_edge", "path_only", "full", "hop_edge_gat"]
 cols = [c for c in cols if any(c in v for v in cur.values())]
+cols += sorted({a for v in cur.values() for a in v} - set(cols))
 
 def cell(r):
     return f"{r['test_mean']:.3f}±{r['test_std']:.3f}" if r else "-"
@@ -235,4 +242,4 @@ if gates:
     for ds in sorted(gates):
         print(f"  {ds:<{w}}  {gates[ds]:.4f}")
 EOF
-
+ 

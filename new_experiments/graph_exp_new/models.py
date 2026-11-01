@@ -1,6 +1,7 @@
 # models.py
 import math
 import warnings
+from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -73,12 +74,55 @@ class LinearBondEncoder(nn.Module):
         return self.proj(x)
 
 
+class CategoricalEdgeEncoder(nn.Module):
+    """Generic categorical edge/bond encoder.
+
+    Like ``BondEncoder`` (sums per-column integer-feature embeddings) but
+    takes an explicit list of per-column vocabulary sizes instead of the
+    hardcoded OGB ``FULL_BOND_FEATURE_DIMS``. For datasets whose edge_attr is
+    a single categorical column (e.g. ZINC's bond order), pass e.g.
+    ``categories=[8]``. Robust to a 1-D ``edge_attr`` (unsqueezed to a single
+    column) and clamps out-of-range indices so a slightly conservative vocab
+    size never crashes.
+    """
+
+    def __init__(self, hidden_dim: int, categories: List[int]):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.feature_embeddings = nn.ModuleList([
+            nn.Embedding(num_embeddings=v, embedding_dim=hidden_dim)
+            for v in categories
+        ])
+        for emb in self.feature_embeddings:
+            nn.init.normal_(emb.weight, std=0.01)
+
+    def forward(self, edge_attr: torch.Tensor) -> torch.Tensor:
+        if edge_attr.dim() == 1:
+            edge_attr = edge_attr.unsqueeze(-1)
+        n_cols = min(edge_attr.size(-1), len(self.feature_embeddings))
+        h = 0
+        for i in range(n_cols):
+            emb = self.feature_embeddings[i]
+            feat_i = edge_attr[:, i].long().clamp(min=0, max=emb.num_embeddings - 1)
+            h = h + emb(feat_i)
+        return h
+
+
 def build_bond_encoder(hidden_dim, dataset_name="Peptides-func", edge_feat_dim=None):
     """Factory: categorical BondEncoder for molecular (atom_categorical)
-    datasets, LinearBondEncoder otherwise."""
+    datasets, CategoricalEdgeEncoder for datasets with categorical
+    edge_attr (e.g. ZINC bond order), LinearBondEncoder otherwise."""
     info = get_dataset_info(dataset_name)
     if info["node_encoder"] == "atom_categorical":
         return BondEncoder(hidden_dim)
+    if info["node_encoder"] == "categorical":
+        edge_categories = info.get("edge_categories")
+        if not edge_categories:
+            raise ValueError(
+                f"{dataset_name}: node_encoder='categorical' requires "
+                f"'edge_categories' in GRAPH_DATASETS to build a bond encoder."
+            )
+        return CategoricalEdgeEncoder(hidden_dim, categories=edge_categories)
     in_dim = edge_feat_dim if edge_feat_dim not in (None, "auto") else hidden_dim
     return LinearBondEncoder(in_dim=in_dim, hidden_dim=hidden_dim)
 
@@ -232,22 +276,95 @@ class LinearNodeEncoder(nn.Module):
         return h
 
 
+class CategoricalNodeEncoder(nn.Module):
+    """Generic categorical node encoder for non-OGB datasets whose node
+    features are categorical integer columns (e.g. ZINC's single atom-type
+    column), as opposed to the fixed 9-column OGB layout ``NodeEncoder``
+    assumes or the continuous features ``LinearNodeEncoder`` assumes.
+
+    Sums per-column embeddings (same pattern as ``NodeEncoder``/``BondEncoder``)
+    instead of projecting the raw integer through a Linear layer, which would
+    impose a false ordinal/continuous relationship between unrelated
+    categories.
+    """
+
+    def __init__(self, hidden_dim: int, categories: List[int], lap_pe_dim: int = 0,
+                 use_edge_features: bool = False, edge_categories: Optional[List[int]] = None):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.feature_embeddings = nn.ModuleList([
+            nn.Embedding(num_embeddings=v, embedding_dim=hidden_dim)
+            for v in categories
+        ])
+        for emb in self.feature_embeddings:
+            nn.init.normal_(emb.weight, std=0.01)
+        self.post = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+        )
+
+        self.lap_pe_dim = lap_pe_dim
+        if lap_pe_dim > 0:
+            self.lap_pe_encoder = nn.Linear(lap_pe_dim, hidden_dim)
+
+        self.use_edge_features = use_edge_features
+        if use_edge_features:
+            if not edge_categories:
+                raise ValueError(
+                    "CategoricalNodeEncoder(use_edge_features=True) requires "
+                    "edge_categories (the dataset's 'edge_categories' registry entry)."
+                )
+            self.bond_encoder = CategoricalEdgeEncoder(hidden_dim, categories=edge_categories)
+
+    def forward(self, x, edge_index, edge_attr, lap_pe=None):
+        if x.dim() == 1:
+            x = x.unsqueeze(-1)
+        h = 0
+        for i, emb in enumerate(self.feature_embeddings):
+            feat_i = x[:, i].long().clamp(min=0, max=emb.num_embeddings - 1)
+            h = h + emb(feat_i)
+        h = self.post(h)
+
+        if self.use_edge_features and edge_attr is not None and edge_index is not None:
+            edge_emb = self.bond_encoder(edge_attr)
+            h = aggregate_edges_to_nodes(h, edge_index, edge_emb)
+
+        if self.lap_pe_dim > 0 and lap_pe is not None:
+            h = h + self.lap_pe_encoder(lap_pe)
+        return h
+
+
 def build_node_encoder(hidden_dim, lap_pe_dim=0, dataset_name="Peptides-func",
                        node_feat_dim=None, use_edge_features=False,
                        edge_feat_dim=None):
     """Factory: pick the right node encoder for a registered dataset.
 
     Reads ``data.GRAPH_DATASETS[dataset_name]`` to decide between the
-    Peptides-style categorical encoder and a learnable Linear projection
-    for continuous features (e.g. PascalVOC-SP). Other call sites should
-    use this rather than instantiating ``NodeEncoder`` directly so that
-    flipping ``--dataset`` re-routes to the correct encoder automatically.
+    Peptides-style OGB categorical encoder, a generic categorical encoder
+    (e.g. ZINC's atom-type column), and a learnable Linear projection for
+    continuous features (e.g. PascalVOC-SP). Other call sites should use
+    this rather than instantiating an encoder directly so that flipping
+    ``--dataset`` re-routes to the correct encoder automatically.
     """
     info = get_dataset_info(dataset_name)
     kind = info["node_encoder"]
     if kind == "atom_categorical":
         return NodeEncoder(hidden_dim, lap_pe_dim=lap_pe_dim,
                            use_edge_features=use_edge_features)
+    if kind == "categorical":
+        categories = info.get("node_categories")
+        if not categories:
+            raise ValueError(
+                f"{dataset_name}: node_encoder='categorical' requires "
+                f"'node_categories' in GRAPH_DATASETS to build a node encoder."
+            )
+        return CategoricalNodeEncoder(
+            hidden_dim,
+            categories=categories,
+            lap_pe_dim=lap_pe_dim,
+            use_edge_features=use_edge_features,
+            edge_categories=info.get("edge_categories") if use_edge_features else None,
+        )
     if kind == "linear":
         # Precedence: explicit arg > registry info > hidden_dim fallback.
         if node_feat_dim not in (None, "auto"):
@@ -1108,5 +1225,4 @@ class GREDHybridTransformer(nn.Module):
         if return_attention:
             return logits, node_emb, attentions
         return logits, node_emb
-
 

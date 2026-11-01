@@ -134,6 +134,9 @@ def build_parser():
     # Path-aware embeddings
     p.add_argument("--use_path_embeddings", action="store_true", default=False,
                    help="Enable path-aware embeddings for K/V conditioning in attention.")
+    p.add_argument("--path_node_terms", type=str, default="all",
+                   help="Inputs of the per-edge path MLP besides position: 'all' "
+                        "or a comma list of edge,src,dst (e.g. 'edge' or 'edge,dst').")
 
     # Training
     p.add_argument("--lr", type=float, default=1e-3)
@@ -153,7 +156,7 @@ def build_parser():
     p.add_argument("--save_dir", type=str, default="checkpoints_hop_masked_light")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--checkpoint", type=str, default=None)
-    p.add_argument("--random_global_prob", type=float, default=0,
+    p.add_argument("--random_global_prob", type=float, default=None,
                    help="Train-time prob. of promoting each (graph, head) to "
                         "global attention per layer (hop-masked mode). "
                         "Default: dropout/2. 0 disables.")
@@ -361,6 +364,7 @@ def build_data_task_model(args):
         multihop_include_global=not args.multihop_no_global,
         use_path_embeddings=args.use_path_embeddings,
         random_global_prob=args.random_global_prob,
+        path_node_terms=args.path_node_terms,
     ).to(args.device)
     return train_loader, val_loader, test_loader, dataset_info, task, model
 
