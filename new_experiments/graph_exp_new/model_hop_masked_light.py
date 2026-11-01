@@ -1120,12 +1120,15 @@ class HopMaskedTransformerModel(nn.Module):
         if graph_pool == "attention":
             self.readout = AttentionReadout(hidden_dim, num_heads, dropout=dropout)
 
+        # Link tasks (PCQM-Contact): the head decodes per-node embeddings
+        # (hidden_dim) that the link epoch scores by dot product.
+        head_out = hidden_dim if task_level == "link" else output_dim
         self.head = nn.Sequential(
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, output_dim),
+            nn.Linear(hidden_dim, head_out),
         )
 
         if num_post_gat_layers > 0:
@@ -1471,7 +1474,7 @@ class HopMaskedTransformerModel(nn.Module):
             edge_attr = getattr(batch, "edge_attr", None) if self.use_edge_features else None
             node_emb = self.post_gat(node_emb, batch.edge_index, edge_attr=edge_attr)
 
-        if self.task_level == "node":
+        if self.task_level in ("node", "link"):
             return self.head(node_emb), node_emb, aux_loss, None
 
         B = dense_x.shape[0]

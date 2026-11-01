@@ -13,6 +13,12 @@ from scipy.sparse.linalg import eigsh
 from functools import partial
 from multiprocessing import Pool
 
+# torch >= 2.6 loads with weights_only=True; OGB's processed files pickle PyG
+# Data classes, so allowlist them (files are produced locally by OGB/PyG).
+from torch_geometric.data.data import DataEdgeAttr, DataTensorAttr
+from torch_geometric.data.storage import GlobalStorage
+torch.serialization.add_safe_globals([DataEdgeAttr, DataTensorAttr, GlobalStorage])
+
 
 # ================================================================
 # GRAPH DATASET REGISTRY (LRGB + GNNBenchmark + ZINC)

@@ -65,6 +65,10 @@ def build_pos_or_class_weight(args, dataset_info, train_loader, device):
     """Compute loss weights when --use_pos_weight is set."""
     if not args.use_pos_weight:
         return None
+    if dataset_info.get("level") == "link":
+        print("--use_pos_weight ignored: link tasks use BCE over sampled pairs.",
+              flush=True)
+        return None
     ttype = dataset_info["task_type"]
     C = dataset_info["output_dim"]
     if ttype == "multi_label":
@@ -209,9 +213,53 @@ def _predict_on_device(task, logits):
     raise ValueError(f"Unknown task_type: {task.task_type}")
 
 
+def _run_link_epoch(model, loader, task, device, optimizer=None, scheduler=None,
+                    grad_clip=1.0, amp=False):
+    """One epoch for link-level tasks (PCQM-Contact), as in
+    train_hop_masked_transformer_final._run_link_epoch: the model returns
+    decoded per-node embeddings; pairs are scored by dot product. Train: BCE
+    over positive contact pairs + 1 structured negative per positive (random
+    node of the same graph). Metric: OGB filtered MRR, mean over batches."""
+    from metrics import build_link_targets, link_scores, compute_link_mrr
+
+    is_train = optimizer is not None
+    model.train(is_train)
+    losses, mrrs = [], []
+    for batch in loader:
+        pyg_batch, dist_masks, node_masks, path_data = _move_batch_to_device(
+            batch, device, model.max_hops)
+        if path_data is not None:
+            pyg_batch.path_data = path_data
+        if is_train:
+            optimizer.zero_grad()
+        with torch.set_grad_enabled(is_train):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
+                                enabled=amp and str(device).startswith("cuda")):
+                h, _, aux_loss, _ = model(pyg_batch, dist_masks, node_masks)
+            h, aux_loss = h.float(), aux_loss.float()
+            edge_index, labels = build_link_targets(pyg_batch, num_neg_per_pos=1)
+            logits = link_scores(h, edge_index)
+            loss = task.loss_fn(logits, labels.float()) + aux_loss
+
+        if is_train:
+            loss.backward()
+            if grad_clip is not None and grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+
+        losses.append(float(loss.item()))
+        mrrs.append(compute_link_mrr(h.detach(), pyg_batch))
+    return float(np.mean(losses)), float(np.mean(mrrs)) if mrrs else 0.0
+
+
 def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
               grad_clip=1.0, amp=False):
     """Run one epoch. Returns (loss, metric)."""
+    if getattr(task, "level", None) == "link":
+        return _run_link_epoch(model, loader, task, device, optimizer=optimizer,
+                               scheduler=scheduler, grad_clip=grad_clip, amp=amp)
     is_train = optimizer is not None
     model.train(is_train)
 
