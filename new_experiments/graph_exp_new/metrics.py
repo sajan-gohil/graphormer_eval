@@ -324,6 +324,8 @@ def compute_mae(y_pred: np.ndarray, y_true: np.ndarray) -> float:
     """Mean Absolute Error — LRGB Peptides-struct standard metric."""
     if y_pred.size == 0:
         return 0.0
+    if y_pred.shape != y_true.shape and y_pred.size == y_true.size:
+        y_true = y_true.reshape(y_pred.shape)  # avoid (N,1) vs (N,) broadcasting
     return float(np.mean(np.abs(y_pred.astype(np.float64)
                                 - y_true.astype(np.float64))))
 
@@ -504,7 +506,10 @@ class Task:
                 y_f = y_f * (1.0 - 2.0 * eps) + eps
             return self.loss_fn(logits, y_f)
         if self.task_type == "regression":
-            return self.loss_fn(logits, y.float())
+            y = y.float()
+            if y.shape != logits.shape and y.numel() == logits.numel():
+                y = y.view_as(logits)          # e.g. ZINC: y (B,) vs logits (B, 1)
+            return self.loss_fn(logits, y)
         if self.task_type == "multiclass":
             y = y.long()
             y = self._flatten_labels(y)
@@ -590,16 +595,23 @@ def compute_pos_weight(labels: np.ndarray, num_classes: int) -> np.ndarray:
     return np.sqrt(N / (num_classes * n_k))
 
 
-def compute_class_weights(labels, num_classes, mode="sqrt", cap=10.0):
-    counts = np.clip(np.bincount(np.asarray(labels).reshape(-1).astype(np.int64),
-                                 minlength=num_classes)[:num_classes].astype(np.float64), 1.0, None)
-    r = counts.sum() / (num_classes * counts)          # inverse frequency
-    w = {"inv": r, "sqrt": np.sqrt(r)}[mode]
-    w = w / w.mean()
-    if cap:                                            # cap max/min ratio to `cap`
-        w = np.clip(w, 1.0/np.sqrt(cap), np.sqrt(cap))
-        w = w / w.mean()
-    return w
+def compute_class_weights(labels: np.ndarray, num_classes: int) -> np.ndarray:
+    """Inverse-frequency class weights for multiclass (node/graph) CE.
+
+    w_c = N / (C * n_c), then normalised to mean 1 so the overall loss scale is
+    unchanged.  Rare classes get up-weighted, which is what macro-F1 rewards.
+
+    labels: 1-D array of integer class indices (padding value -1 already removed
+            by the caller).  n_c = count of class c (clipped to 1 to avoid /0).
+    Returns: (C,) float array of per-class weights.
+    """
+    labels = np.asarray(labels).reshape(-1).astype(np.int64)
+    counts = np.bincount(labels, minlength=num_classes)[:num_classes].astype(np.float64)
+    counts = np.clip(counts, 1.0, None)
+    N = counts.sum()
+    w = N / (num_classes * counts)
+    return w / w.mean()
+
 
 # ===========================================================================
 # Link-level (PCQM-Contact) helpers.

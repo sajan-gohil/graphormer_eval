@@ -81,6 +81,8 @@ def build_model(args, info):
         multihop_include_global=not args.multihop_no_global,
         use_path_embeddings=args.use_path_embeddings,
         path_node_terms=args.path_node_terms,
+        linear_head=args.linear_head,
+        one_linear=args.one_linear,
     ).to(args.device)
 
 

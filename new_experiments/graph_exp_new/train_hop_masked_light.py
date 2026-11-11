@@ -141,6 +141,13 @@ def build_parser():
     p.add_argument("--path_node_terms", type=str, default="all",
                    help="Inputs of the per-edge path MLP besides position: 'all' "
                         "or a comma list of edge,src,dst (e.g. 'edge' or 'edge,dst').")
+    p.add_argument("--linear_head", action="store_true", default=False,
+                   help="Output head = LayerNorm -> Dropout -> one Linear "
+                        "(default: 2-layer MLP head).")
+    p.add_argument("--one_linear", action="store_true", default=False,
+                   help="Single-layer intermediate MLPs: path term GELU(W[x_u;e;x_v;pos]) "
+                        "and one Linear as the cross-hop mixer output "
+                        "(default: 2 layers with GELU).")
 
     # Training
     p.add_argument("--lr", type=float, default=1e-3)
@@ -413,6 +420,8 @@ def build_data_task_model(args):
         use_path_embeddings=args.use_path_embeddings,
         random_global_prob=args.random_global_prob,
         path_node_terms=args.path_node_terms,
+        linear_head=args.linear_head,
+        one_linear=args.one_linear,
     ).to(args.device)
     return train_loader, val_loader, test_loader, dataset_info, task, model
 

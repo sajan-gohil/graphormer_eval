@@ -280,11 +280,15 @@ class DynamicCrossHopMixer(nn.Module):
 
     def __init__(self, num_heads: int, head_dim: int, dropout: float = 0.0,
                  use_hop_embedding: bool = False, max_hops: Optional[int] = None,
-                 hop_membership: Optional[torch.Tensor] = None):
+                 hop_membership: Optional[torch.Tensor] = None,
+                 one_linear: bool = False):
         super().__init__()
         self.H = num_heads
         self.Dh = head_dim
-        self.out = nn.Linear(head_dim, head_dim)
+        # Output projection: Linear -> GELU -> Linear (default) or one Linear.
+        self.out = (nn.Linear(head_dim, head_dim) if one_linear else
+                    nn.Sequential(nn.Linear(head_dim, head_dim), nn.GELU(),
+                                  nn.Linear(head_dim, head_dim)))
         self.drop = nn.Dropout(dropout)
         self.hop_tag_drop = nn.Dropout(dropout)
         self.scale = head_dim ** -0.5
@@ -376,6 +380,7 @@ class PathEmbedder(nn.Module):
     reordering the edges). Without edge features the BondEnc(e) input is 0.
     The MLP input depends only on (edge, r), so it is computed per level for
     all edges and gathered by edge id, not per (s, t) pair.
+    one_linear=True drops the MLP's output layer: GELU(W[x_u ; e ; x_v ; pos]).
     path_node_terms selects the MLP inputs besides pos: 'all' or a comma list
     of edge, src, dst (an omitted input contributes 0).
     hop_emb rows: 0..K-1 = distance, K = beyond K-1 / unreachable,
@@ -386,7 +391,8 @@ class PathEmbedder(nn.Module):
     def __init__(self, hidden_dim: int, max_hops: int,
                  dataset_name: str = "Peptides-func",
                  edge_feat_dim: Optional[int] = None,
-                 path_node_terms: str = "all"):
+                 path_node_terms: str = "all",
+                 one_linear: bool = False):
         super().__init__()
         # Which inputs enter MLP([x_u ; e ; x_v ; pos]): "all" or a comma list of
         # edge, src, dst (pos is always used).
@@ -403,7 +409,9 @@ class PathEmbedder(nn.Module):
         self.W_t = nn.Linear(d, d)
         self.edge_pos_in_e = nn.Linear(d, d, bias=False)
         self.edge_pos_in_p = nn.Linear(d, d, bias=False)
-        self.edge_pos_out = nn.Linear(d, d)
+        # one_linear: term = GELU(W[x_u ; e ; x_v ; pos]) (no output layer; the
+        # GELU is kept so content stays bound to position).
+        self.edge_pos_out = None if one_linear else nn.Linear(d, d)
         self.edge_enc = build_bond_encoder(d, dataset_name=dataset_name,
                                            edge_feat_dim=edge_feat_dim)
         self.norm = nn.LayerNorm(d)  # scale of P set here; per-layer gate in MHA
@@ -417,7 +425,7 @@ class PathEmbedder(nn.Module):
         """MLP([x_u ; e ; x_v ; pos_{k-1}]) for every edge (E+1, d); Ein holds the
         first-layer edge + node blocks; last row (no edge) = 0."""
         h = F.gelu(Ein + Pin[k - 1])
-        T = self.edge_pos_out(h)
+        T = h if self.edge_pos_out is None else self.edge_pos_out(h)
         return torch.cat([T, T.new_zeros(1, T.shape[1])])
 
     def hop_tags(self, hop_sets: List[Optional[List[int]]], H: int) -> torch.Tensor:
@@ -817,6 +825,7 @@ class HopMaskedTransformerLayer(nn.Module):
         multihop_include_global: bool = True,
         use_path_gate: bool = False,
         multihop_grouped: bool = False,
+        one_linear: bool = False,
     ):
         super().__init__()
         self.multihop_attn = multihop_attn
@@ -843,7 +852,7 @@ class HopMaskedTransformerLayer(nn.Module):
             self.norm_ch = build_norm(norm_type, hidden_dim)
             self.cross_hop = DynamicCrossHopMixer(
                 num_heads=num_heads, head_dim=head_dim, dropout=dropout,
-                use_hop_embedding=False,
+                use_hop_embedding=False, one_linear=one_linear,
             )
             self.drop_ch = nn.Dropout(dropout)
 
@@ -987,6 +996,8 @@ class HopMaskedTransformerModel(nn.Module):
         use_path_embeddings: bool = False,
         random_global_prob: Optional[float] = None,
         path_node_terms: str = "all",
+        linear_head: bool = False,
+        one_linear: bool = False,
     ):
         super().__init__()
         if hidden_dim % num_heads != 0:
@@ -1091,6 +1102,7 @@ class HopMaskedTransformerModel(nn.Module):
                 dataset_name=dataset_name,
                 edge_feat_dim=edge_feat_dim,
                 path_node_terms=path_node_terms,
+                one_linear=one_linear,
             )
 
         self._use_cross_hop = dynamic_cross_hop
@@ -1112,6 +1124,7 @@ class HopMaskedTransformerModel(nn.Module):
                     multihop_include_global=multihop_include_global,
                     use_path_gate=use_path_embeddings,
                     multihop_grouped=(multihop_attn and mask_type == "shortest_path"),
+                    one_linear=one_linear,
                 )
             )
         self.layers = nn.ModuleList(layers)
@@ -1123,13 +1136,20 @@ class HopMaskedTransformerModel(nn.Module):
         # Link tasks (PCQM-Contact): the head decodes per-node embeddings
         # (hidden_dim) that the link epoch scores by dot product.
         head_out = hidden_dim if task_level == "link" else output_dim
-        self.head = nn.Sequential(
-            nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, head_out),
-        )
+        if linear_head:          # single linear layer (after LayerNorm + Dropout)
+            self.head = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, head_out),
+            )
+        else:
+            self.head = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, head_out),
+            )
 
         if num_post_gat_layers > 0:
             self.post_gat = PostGATv2Block(
