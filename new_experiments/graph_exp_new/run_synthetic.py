@@ -31,7 +31,8 @@ from metrics import build_task
 from model_hop_masked_light import HopMaskedTransformerModel
 from optim_utils import build_grouped_optimizer_and_scheduler
 from synthetic_suite import SyntheticPathDataset
-from train_hop_masked_light import attn_diagnostics, build_parser, run_epoch
+from train_hop_masked_light import (attn_diagnostics, build_parser, run_epoch,
+                                    build_optimizer_and_schedulers)
 
 SYN_NAME = "Synthetic-Path"
 
@@ -83,6 +84,13 @@ def build_model(args, info):
         path_node_terms=args.path_node_terms,
         linear_head=args.linear_head,
         one_linear=args.one_linear,
+        random_mask=args.random_mask,
+        one_linear_path=args.one_linear_path,
+        one_linear_crosshop=args.one_linear_crosshop,
+        head_dropout=args.head_dropout,
+        head_norm=args.head_norm,
+        final_norm=args.final_norm,
+        path_norm=args.path_norm,
     ).to(args.device)
 
 
@@ -92,14 +100,8 @@ def train_one_seed(args, info, loaders, seed):
     task = build_task(SYN_NAME, dataset_info=info)
     task.loss_fn = task.loss_fn.to(args.device)
     model = build_model(args, info)
-    total_steps = max(args.max_epochs * len(loaders["train"]), 1)
-    optimizer, scheduler = build_grouped_optimizer_and_scheduler(
-        named_parameters=list(model.named_parameters()), lr_max=args.lr,
-        lr_min=args.lr_min, weight_decay=args.weight_decay,
-        total_steps=total_steps, warmup_ratio=args.warmup_ratio)
-    plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=args.reduce_lr_patience,
-        min_lr=args.lr_min)
+    optimizer, scheduler, plateau = build_optimizer_and_schedulers(
+        model, args, len(loaders["train"]), higher_is_better=True)
 
     best = {"val": -1.0, "test": None, "train": None, "epoch": -1}
     best_state, since = None, 0
@@ -109,7 +111,8 @@ def train_one_seed(args, info, loaders, seed):
                           scheduler=scheduler, grad_clip=args.grad_clip, amp=args.amp)
         _, va = run_epoch(model, loaders["val"], task, args.device, amp=args.amp)
         _, te = run_epoch(model, loaders["test"], task, args.device, amp=args.amp)
-        plateau.step(va)
+        if plateau is not None:
+            plateau.step(va)
         if va > best["val"]:
             best = {"val": va, "test": te, "train": tr, "epoch": epoch}
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}

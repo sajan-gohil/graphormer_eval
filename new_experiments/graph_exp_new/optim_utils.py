@@ -142,3 +142,34 @@ def build_reduce_on_plateau_scheduler(
         threshold=threshold,
     )
 
+
+class WarmupOnlyScheduler:
+    """Linear warmup from lr_min to lr over ``warmup_steps``, then stops changing
+    the learning rate, so a ReduceLROnPlateau on the same optimizer is not
+    overwritten (a LambdaLR that keeps stepping resets lr = base_lr * lambda
+    on every step)."""
+
+    def __init__(self, optimizer: torch.optim.Optimizer, warmup_steps: int,
+                 lr_min: float):
+        self.warmup_steps = max(1, int(warmup_steps))
+        lambdas = []
+        for group in optimizer.param_groups:
+            base_lr = float(group["lr"])
+            r = min(1.0, max(0.0, lr_min / max(base_lr, 1e-12)))
+            lambdas.append(lambda s, r=r, w=self.warmup_steps:
+                           r + (1.0 - r) * min(1.0, (s + 1) / w) if s < w else 1.0)
+        self.inner = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambdas)
+        self.n = 0
+
+    def step(self):
+        if self.n < self.warmup_steps:
+            self.inner.step()
+            self.n += 1
+
+    def state_dict(self):
+        return {"inner": self.inner.state_dict(), "n": self.n}
+
+    def load_state_dict(self, sd):
+        self.inner.load_state_dict(sd["inner"])
+        self.n = sd["n"]
+

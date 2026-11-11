@@ -392,8 +392,14 @@ class PathEmbedder(nn.Module):
                  dataset_name: str = "Peptides-func",
                  edge_feat_dim: Optional[int] = None,
                  path_node_terms: str = "all",
-                 one_linear: bool = False):
+                 one_linear: bool = False,
+                 path_norm: str = "sum"):
         super().__init__()
+        # Where the LayerNorm sits: "sum" (after the path sum; cancels the
+        # 1/sqrt(k) scale), "term" (on each per-edge term before the sum) or "none".
+        if path_norm not in ("sum", "term", "none"):
+            raise ValueError(f"path_norm must be sum|term|none, got {path_norm!r}")
+        self.path_norm = path_norm
         # Which inputs enter MLP([x_u ; e ; x_v ; pos]): "all" or a comma list of
         # edge, src, dst (pos is always used).
         self.terms = parse_path_node_terms(path_node_terms)
@@ -426,6 +432,8 @@ class PathEmbedder(nn.Module):
         first-layer edge + node blocks; last row (no edge) = 0."""
         h = F.gelu(Ein + Pin[k - 1])
         T = h if self.edge_pos_out is None else self.edge_pos_out(h)
+        if self.path_norm == "term":
+            T = self.norm(T)
         return torch.cat([T, T.new_zeros(1, T.shape[1])])
 
     def hop_tags(self, hop_sets: List[Optional[List[int]]], H: int) -> torch.Tensor:
@@ -519,7 +527,9 @@ class PathEmbedder(nn.Module):
         has = dist_masks.bool().any(1)
         didx = dist_masks.float().argmax(1)
         didx[~has] = self.K
-        out = self.norm(out + self.hop_emb(didx))
+        out = out + self.hop_emb(didx)
+        if self.path_norm == "sum":
+            out = self.norm(out)
         pair = node_mask[:, :, None] & node_mask[:, None, :]
         return out * pair.unsqueeze(-1).to(out.dtype)
 
@@ -998,8 +1008,18 @@ class HopMaskedTransformerModel(nn.Module):
         path_node_terms: str = "all",
         linear_head: bool = False,
         one_linear: bool = False,
+        random_mask: str = "off",
+        one_linear_path: bool = False,
+        one_linear_crosshop: bool = False,
+        head_dropout: Optional[float] = None,
+        head_norm: str = "layer",
+        final_norm: bool = False,
+        path_norm: str = "sum",
     ):
         super().__init__()
+        # --one_linear sets both; the two specific flags set one each.
+        one_linear_path = one_linear or one_linear_path
+        one_linear_crosshop = one_linear or one_linear_crosshop
         if hidden_dim % num_heads != 0:
             raise ValueError(
                 f"hidden_dim={hidden_dim} must be divisible by num_heads={num_heads}"
@@ -1008,6 +1028,15 @@ class HopMaskedTransformerModel(nn.Module):
             raise ValueError(
                 "multihop_attn and blend_adj_power are mutually exclusive"
             )
+        if random_mask not in ("off", "fixed", "resample"):
+            raise ValueError(f"random_mask must be off|fixed|resample, got {random_mask!r}")
+        if random_mask != "off" and (mask_type != "shortest_path" or blend_adj_power):
+            raise ValueError("random_mask needs mask_type=shortest_path and no "
+                             "blend_adj_power (both read the true adjacency)")
+        # Ablation: build attention masks from key-shuffled hop masks (same number
+        # of keys per head and query, keys drawn from any hop). Path embeddings,
+        # hop tags and edge maps keep the true distances.
+        self.random_mask = random_mask
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
         self.max_hops = max_hops
@@ -1102,7 +1131,8 @@ class HopMaskedTransformerModel(nn.Module):
                 dataset_name=dataset_name,
                 edge_feat_dim=edge_feat_dim,
                 path_node_terms=path_node_terms,
-                one_linear=one_linear,
+                one_linear=one_linear_path,
+                path_norm=path_norm,
             )
 
         self._use_cross_hop = dynamic_cross_hop
@@ -1124,7 +1154,7 @@ class HopMaskedTransformerModel(nn.Module):
                     multihop_include_global=multihop_include_global,
                     use_path_gate=use_path_embeddings,
                     multihop_grouped=(multihop_attn and mask_type == "shortest_path"),
-                    one_linear=one_linear,
+                    one_linear=one_linear_crosshop,
                 )
             )
         self.layers = nn.ModuleList(layers)
@@ -1136,20 +1166,27 @@ class HopMaskedTransformerModel(nn.Module):
         # Link tasks (PCQM-Contact): the head decodes per-node embeddings
         # (hidden_dim) that the link epoch scores by dot product.
         head_out = hidden_dim if task_level == "link" else output_dim
-        if linear_head:          # single linear layer (after LayerNorm + Dropout)
+        if head_norm not in ("layer", "none"):
+            raise ValueError(f"head_norm must be layer|none, got {head_norm!r}")
+        h_drop = dropout if head_dropout is None else head_dropout
+        h_norm = nn.LayerNorm(hidden_dim) if head_norm == "layer" else nn.Identity()
+        if linear_head:          # single linear layer (after norm + dropout)
             self.head = nn.Sequential(
-                nn.LayerNorm(hidden_dim),
-                nn.Dropout(dropout),
+                h_norm,
+                nn.Dropout(h_drop),
                 nn.Linear(hidden_dim, head_out),
             )
         else:
             self.head = nn.Sequential(
-                nn.LayerNorm(hidden_dim),
+                h_norm,
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.GELU(),
-                nn.Dropout(dropout),
+                nn.Dropout(h_drop),
                 nn.Linear(hidden_dim, head_out),
             )
+        # Optional LayerNorm on node embeddings after the (pre-norm) stack,
+        # i.e. before pooling, so graph size stays in the pooled magnitude.
+        self.final_norm = nn.LayerNorm(hidden_dim) if final_norm else None
 
         if num_post_gat_layers > 0:
             self.post_gat = PostGATv2Block(
@@ -1364,6 +1401,43 @@ class HopMaskedTransformerModel(nn.Module):
         g = bv[ei[0]]
         return g, ei[0] - offsets[g], ei[1] - offsets[g]
 
+    def _shuffle_mask_keys(self, dist_masks, nm, batch):
+        """Permute each query's keys (real, non-self nodes only) at random.
+
+        Returns dist_masks[b, :, i, perm[b, i, j]]: every head keeps exactly its
+        number of keys per query, but they are drawn from any hop; self and
+        padding stay fixed. 'fixed': the permutation is a deterministic hash of
+        the graph's structure (same masks every epoch and in eval);
+        'resample': redrawn every forward pass.
+        """
+        B, K, N, _ = dist_masks.shape
+        dev = dist_masks.device
+        i = torch.arange(N, device=dev)
+        if self.random_mask == "resample":
+            r = torch.rand(B, N, N, device=dev, dtype=torch.float64)
+        else:
+            # Per-graph seed from node/edge counts and an order-free edge checksum.
+            bv, ei = batch.batch, batch.edge_index
+            n_b = torch.bincount(bv, minlength=B)
+            off = torch.zeros(B, dtype=torch.long, device=dev)
+            if B > 1:
+                off[1:] = n_b[:-1].cumsum(0)
+            g = bv[ei[0]]
+            s, t = ei[0] - off[g], ei[1] - off[g]
+            chk = torch.zeros(B, dtype=torch.long, device=dev).scatter_add_(
+                0, g, (s * 7919 + t * 104729) % 1000003)
+            e_b = torch.bincount(g, minlength=B)
+            seed = ((n_b * 31 + e_b * 131 + chk) % 1048573).double()
+            x = (seed.view(B, 1, 1) * 12.9898 + i.view(1, N, 1) * 78.233
+                 + i.view(1, 1, N) * 37.719)
+            r = torch.frac(torch.sin(x) * 43758.5453).abs()
+        free = nm[:, None, :] & nm[:, :, None] & ~torch.eye(N, dtype=torch.bool, device=dev)
+        rank = i.double().view(1, 1, N) / N
+        nat = torch.where(free, rank, 2.0 + rank).argsort(-1)       # free keys first, in order
+        rnd = torch.where(free, r, 2.0 + rank).argsort(-1)          # free keys first, shuffled
+        perm = i.view(1, 1, N).expand(B, N, N).clone().scatter_(-1, nat, rnd)
+        return dist_masks.gather(-1, perm.unsqueeze(1).expand(B, K, N, N))
+
     def _build_edge_map(self, batch, B: int, N: int) -> torch.Tensor:
         """(B, N, N) long: index of edge (u->v) in batch.edge_index, -1 if none."""
         g, u, v = self._dense_edge_coords(batch, B)
@@ -1386,6 +1460,8 @@ class HopMaskedTransformerModel(nn.Module):
             if self.mask_type == "adj_power"
             else dist_masks
         )
+        if self.random_mask != "off":
+            mask_source = self._shuffle_mask_keys(dist_masks, nm, batch)
 
         B_orig, N_orig = dense_x.shape[:2]
 
@@ -1438,9 +1514,9 @@ class HopMaskedTransformerModel(nn.Module):
         if self.multihop_attn:
             hop_index = None
             if self.mask_type == "shortest_path":
-                K_rt = dist_masks.shape[1]
-                has = dist_masks.bool().any(1)
-                hop_index = dist_masks.float().argmax(1)
+                K_rt = mask_source.shape[1]          # mask_source (shuffled if random_mask)
+                has = mask_source.bool().any(1)
+                hop_index = mask_source.float().argmax(1)
                 hop_index[~has] = K_rt
             for layer_idx, layer in enumerate(self.layers):
                 x = layer(x, mask_source, nm, path_embeddings=path_embeddings,
@@ -1488,6 +1564,8 @@ class HopMaskedTransformerModel(nn.Module):
                          hop_tag=hop_tags[layer_idx])
             aux_loss = x.new_tensor(0.0)
 
+        if self.final_norm is not None:
+            x = self.final_norm(x)
         node_emb = x[nm]
 
         if self.post_gat is not None:

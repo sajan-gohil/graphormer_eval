@@ -25,7 +25,7 @@ import torch
 from data import DATASET_CHOICES, get_loaders
 from metrics import build_task, compute_pos_weight, compute_class_weights
 from model_hop_masked_light import HopMaskedTransformerModel
-from optim_utils import build_grouped_optimizer_and_scheduler
+from optim_utils import build_grouped_optimizer_and_scheduler, WarmupOnlyScheduler
 
 os.environ["PYTHON_HASH_SEED"] = "42"
 torch.manual_seed(42)
@@ -148,6 +148,24 @@ def build_parser():
                    help="Single-layer intermediate MLPs: path term GELU(W[x_u;e;x_v;pos]) "
                         "and one Linear as the cross-hop mixer output "
                         "(default: 2 layers with GELU).")
+    p.add_argument("--one_linear_path", action="store_true", default=False,
+                   help="Single-layer path term only: GELU(W[x_u;e;x_v;pos]).")
+    p.add_argument("--one_linear_crosshop", action="store_true", default=False,
+                   help="Single Linear as the cross-hop mixer output only.")
+    p.add_argument("--head_dropout", type=float, default=None,
+                   help="Dropout inside the output head (default: --dropout).")
+    p.add_argument("--head_norm", choices=["layer", "none"], default="layer",
+                   help="Norm at the start of the output head (after pooling).")
+    p.add_argument("--final_norm", action="store_true", default=False,
+                   help="LayerNorm on node embeddings after the last layer "
+                        "(before pooling).")
+    p.add_argument("--path_norm", choices=["sum", "term", "none"], default="sum",
+                   help="Path-embedding LayerNorm: after the path sum (default; "
+                        "cancels the 1/sqrt(k) scale), on each edge term, or none.")
+    p.add_argument("--random_mask", choices=["off", "fixed", "resample"], default="off",
+                   help="Ablation: shuffle each query's keys before building hop masks, "
+                        "so heads see the same number of nodes but from any hop. "
+                        "fixed = same per graph every epoch; resample = new every pass.")
 
     # Training
     p.add_argument("--lr", type=float, default=1e-3)
@@ -156,6 +174,16 @@ def build_parser():
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--max_epochs", type=int, default=500)
     p.add_argument("--patience", type=int, default=40)
+    p.add_argument("--lr_scheduler", choices=["cosine", "plateau", "constant"],
+                   default="cosine",
+                   help="cosine: per-step warmup + cosine to lr_min over "
+                        "--cosine_epochs. plateau: warmup, then ReduceLROnPlateau "
+                        "(factor 0.5, --reduce_lr_patience). constant: warmup, then "
+                        "constant lr. (Before this flag both cosine and plateau were "
+                        "created; the cosine step overwrote the plateau cuts.)")
+    p.add_argument("--cosine_epochs", type=int, default=None,
+                   help="Cosine length in epochs (default: --max_epochs). Set it near "
+                        "where early stopping usually ends a run.")
     p.add_argument("--reduce_lr_patience", type=int, default=10)
     p.add_argument("--warmup_ratio", type=float, default=0.01)
     p.add_argument("--grad_clip", type=float, default=5.0)
@@ -359,6 +387,33 @@ def attn_diagnostics(model, loader, device, tag, max_batches=10):
     print(flush=True)
 
 
+def build_optimizer_and_schedulers(model, args, steps_per_epoch, higher_is_better):
+    """(optimizer, per-step scheduler, plateau scheduler or None) for
+    --lr_scheduler cosine | plateau | constant. Only one scheduler sets the lr
+    after warmup, so plateau cuts are not overwritten."""
+    spe = max(steps_per_epoch, 1)
+    horizon = (args.cosine_epochs or args.max_epochs) if args.lr_scheduler == "cosine" \
+        else args.max_epochs
+    total_steps = max(horizon * spe, 1)
+    optimizer, scheduler = build_grouped_optimizer_and_scheduler(
+        named_parameters=list(model.named_parameters()), lr_max=args.lr,
+        lr_min=args.lr_min, weight_decay=args.weight_decay,
+        total_steps=total_steps, warmup_ratio=args.warmup_ratio)
+    plateau = None
+    if args.lr_scheduler != "cosine":
+        # Replace the cosine LambdaLR by a warmup that stops after warmup.
+        for g in optimizer.param_groups:
+            g["lr"] = g["initial_lr"]
+        scheduler = WarmupOnlyScheduler(
+            optimizer, warmup_steps=int(args.warmup_ratio * total_steps),
+            lr_min=args.lr_min)
+        if args.lr_scheduler == "plateau":
+            plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="max" if higher_is_better else "min", factor=0.5,
+                patience=args.reduce_lr_patience, min_lr=args.lr_min)
+    return optimizer, scheduler, plateau
+
+
 def build_data_task_model(args):
     """Loaders, task and model from parsed args (shared with the profiler)."""
     train_loader, val_loader, test_loader, _, _, _, dataset_info = get_loaders(
@@ -422,6 +477,13 @@ def build_data_task_model(args):
         path_node_terms=args.path_node_terms,
         linear_head=args.linear_head,
         one_linear=args.one_linear,
+        random_mask=args.random_mask,
+        one_linear_path=args.one_linear_path,
+        one_linear_crosshop=args.one_linear_crosshop,
+        head_dropout=args.head_dropout,
+        head_norm=args.head_norm,
+        final_norm=args.final_norm,
+        path_norm=args.path_norm,
     ).to(args.device)
     return train_loader, val_loader, test_loader, dataset_info, task, model
 
@@ -447,24 +509,11 @@ def main():
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"trainable params: {n_params/1e6:.3f}M", flush=True)
 
-    total_steps = max(args.max_epochs * len(train_loader), 1)
-    optimizer, scheduler = build_grouped_optimizer_and_scheduler(
-        named_parameters=list(model.named_parameters()),
-        lr_max=args.lr,
-        lr_min=args.lr_min,
-        weight_decay=args.weight_decay,
-        total_steps=total_steps,
-        warmup_ratio=args.warmup_ratio,
-    )
-
-    plateau_mode = "max" if task.higher_is_better else "min"
-    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode=plateau_mode,
-        factor=0.5,
-        patience=args.reduce_lr_patience,
-        min_lr=args.lr_min,
-    )
+    optimizer, scheduler, plateau_scheduler = build_optimizer_and_schedulers(
+        model, args, len(train_loader), task.higher_is_better)
+    print(f"lr scheduler: {args.lr_scheduler}"
+          + (f" (cosine over {args.cosine_epochs or args.max_epochs} epochs)"
+             if args.lr_scheduler == "cosine" else ""), flush=True)
 
     best_val = -float("inf") if task.higher_is_better else float("inf")
     best_test = None
@@ -494,7 +543,7 @@ def main():
             print(f"  ✓ step-scheduler fast-forwarded ({completed_steps} steps)",
                   flush=True)
 
-        if "plateau_scheduler" in ckpt:
+        if plateau_scheduler is not None and ckpt.get("plateau_scheduler"):
             plateau_scheduler.load_state_dict(ckpt["plateau_scheduler"])
             print("  ✓ plateau-scheduler state loaded", flush=True)
 
@@ -523,7 +572,8 @@ def main():
         )
         va_loss, va_metric = run_epoch(model, val_loader, task, args.device,
                                        amp=args.amp)
-        plateau_scheduler.step(va_metric)
+        if plateau_scheduler is not None:
+            plateau_scheduler.step(va_metric)
         te_loss, te_metric = run_epoch(model, test_loader, task, args.device,
                                        amp=args.amp)
         dt = time.time() - t0
@@ -542,7 +592,8 @@ def main():
                     "model": model.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
-                    "plateau_scheduler": plateau_scheduler.state_dict(),
+                    "plateau_scheduler": (plateau_scheduler.state_dict()
+                                          if plateau_scheduler is not None else None),
                     "args": vars(args),
                     "epoch": epoch,
                     "best_val": best_val,
@@ -557,7 +608,7 @@ def main():
 
         ml = task.metric_label
         print(
-            f"epoch {epoch:03d} | {dt:5.1f}s | "
+            f"epoch {epoch:03d} | {dt:5.1f}s | lr {optimizer.param_groups[0]['lr']:.2e} | "
             f"train loss {tr_loss:.4f} {ml} {tr_metric:.4f} | "
             f"val loss {va_loss:.4f} {ml} {va_metric:.4f} | "
             f"test loss {te_loss:.4f} {ml} {te_metric:.4f} | "
