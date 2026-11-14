@@ -175,7 +175,7 @@ def build_parser():
     p.add_argument("--max_epochs", type=int, default=500)
     p.add_argument("--patience", type=int, default=40)
     p.add_argument("--lr_scheduler", choices=["cosine", "plateau", "constant"],
-                   default="cosine",
+                   default="plateau",
                    help="cosine: per-step warmup + cosine to lr_min over "
                         "--cosine_epochs. plateau: warmup, then ReduceLROnPlateau "
                         "(factor 0.5, --reduce_lr_patience). constant: warmup, then "
@@ -184,7 +184,7 @@ def build_parser():
     p.add_argument("--cosine_epochs", type=int, default=None,
                    help="Cosine length in epochs (default: --max_epochs). Set it near "
                         "where early stopping usually ends a run.")
-    p.add_argument("--reduce_lr_patience", type=int, default=10)
+    p.add_argument("--reduce_lr_patience", type=int, default=50)
     p.add_argument("--warmup_ratio", type=float, default=0.01)
     p.add_argument("--grad_clip", type=float, default=5.0)
     p.add_argument("--num_workers", type=int, default=4)
