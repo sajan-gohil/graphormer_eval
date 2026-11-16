@@ -141,6 +141,10 @@ def build_parser():
     p.add_argument("--path_node_terms", type=str, default="all",
                    help="Inputs of the per-edge path MLP besides position: 'all' "
                         "or a comma list of edge,src,dst (e.g. 'edge' or 'edge,dst').")
+    p.add_argument("--path_ties", type=str, default="single",
+                   choices=["single", "uniform"],
+                   help="Path embedding over tied shortest paths: 'single' = one "
+                        "Floyd-Warshall path; 'uniform' = average over all shortest paths.")
     p.add_argument("--linear_head", action="store_true", default=False,
                    help="Output head = LayerNorm -> Dropout -> one Linear "
                         "(default: 2-layer MLP head).")
@@ -175,7 +179,7 @@ def build_parser():
     p.add_argument("--max_epochs", type=int, default=500)
     p.add_argument("--patience", type=int, default=40)
     p.add_argument("--lr_scheduler", choices=["cosine", "plateau", "constant"],
-                   default="plateau",
+                   default="cosine",
                    help="cosine: per-step warmup + cosine to lr_min over "
                         "--cosine_epochs. plateau: warmup, then ReduceLROnPlateau "
                         "(factor 0.5, --reduce_lr_patience). constant: warmup, then "
@@ -184,7 +188,7 @@ def build_parser():
     p.add_argument("--cosine_epochs", type=int, default=None,
                    help="Cosine length in epochs (default: --max_epochs). Set it near "
                         "where early stopping usually ends a run.")
-    p.add_argument("--reduce_lr_patience", type=int, default=50)
+    p.add_argument("--reduce_lr_patience", type=int, default=10)
     p.add_argument("--warmup_ratio", type=float, default=0.01)
     p.add_argument("--grad_clip", type=float, default=5.0)
     p.add_argument("--num_workers", type=int, default=4)
@@ -429,6 +433,7 @@ def build_data_task_model(args):
         seed=args.seed,
         use_path_embeddings=args.use_path_embeddings,
         dist_as_index=True,
+        path_ties=args.path_ties,
     )
     dataset_name = dataset_info["name"]
 
@@ -484,6 +489,7 @@ def build_data_task_model(args):
         head_norm=args.head_norm,
         final_norm=args.final_norm,
         path_norm=args.path_norm,
+        path_ties=args.path_ties,
     ).to(args.device)
     return train_loader, val_loader, test_loader, dataset_info, task, model
 

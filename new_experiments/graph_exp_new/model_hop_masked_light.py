@@ -1,4 +1,4 @@
-# model_hop_masked_light.py
+# model_hop_mask_light.py
 """
 Lightweight hop-masked multi-head transformer.
 
@@ -393,8 +393,15 @@ class PathEmbedder(nn.Module):
                  edge_feat_dim: Optional[int] = None,
                  path_node_terms: str = "all",
                  one_linear: bool = False,
-                 path_norm: str = "sum"):
+                 path_norm: str = "sum",
+                 path_ties: str = "single"):
         super().__init__()
+        # 'single': one shortest path per pair (Floyd-Warshall pred).
+        # 'uniform': average over all shortest paths (needs tie triples from
+        # the collate, data._tie_triples).
+        if path_ties not in ("single", "uniform"):
+            raise ValueError(f"path_ties must be 'single' or 'uniform', got {path_ties!r}")
+        self.path_ties = path_ties
         # Where the LayerNorm sits: "sum" (after the path sum; cancels the
         # 1/sqrt(k) scale), "term" (on each per-edge term before the sum) or "none".
         if path_norm not in ("sum", "term", "none"):
@@ -493,7 +500,30 @@ class PathEmbedder(nn.Module):
         Pin = self.edge_pos_in_p(self.pos_emb.weight[:L]).float()
         out = x.new_zeros(B, N, N, d, dtype=torch.float32)
         prev = None
-        if levels is not None and levels["ptr"].numel() - 1 == L:
+        if self.path_ties == "uniform":
+            if levels is None or "tptr" not in levels or levels["ptr"].numel() - 1 != L:
+                raise ValueError("path_ties='uniform' needs tie triples from the collate "
+                                 "(collate_with_dist_masks(path_ties='uniform')) with "
+                                 "max_hops matching the model")
+            ptr, tptr = levels["ptr"].tolist(), levels["tptr"].tolist()
+            lb, ls, lt = (levels[k].to(dev, non_blocking=True).long() for k in ("b", "s", "t"))
+            tb, tp, tt, tch, tpar = (levels[k].to(dev, non_blocking=True).long()
+                                     for k in ("tb", "tp", "tt", "tchild", "tparent"))
+            tw = levels["tw"].to(dev, non_blocking=True).float()
+            for k in range(1, L + 1):
+                lo, hi = ptr[k - 1], ptr[k]
+                if hi == lo:
+                    break
+                a, z = tptr[k - 1], tptr[k]
+                # S_k[s,t] = sum_p w_p (S_{k-1}[s,p] + T(p->t)), w_p = c(s,p)/c(s,t):
+                # the average over all shortest s->t paths.
+                C = self._edge_pos_terms(Ein, Pin, k)[edge_map[tb[a:z], tp[a:z], tt[a:z]]]
+                if k > 1:
+                    C = C + prev[tpar[a:z]]
+                S = C.new_zeros(hi - lo, d).index_add_(0, tch[a:z], C * tw[a:z, None])
+                prev = S
+                out[lb[lo:hi], ls[lo:hi], lt[lo:hi]] = S / math.sqrt(k)
+        elif levels is not None and levels["ptr"].numel() - 1 == L:
             ptr = levels["ptr"].tolist()                    # CPU tensor: no sync
             lb, ls, lt, lp = (levels[k].to(dev, non_blocking=True).long()
                               for k in ("b", "s", "t", "p"))
@@ -1015,6 +1045,7 @@ class HopMaskedTransformerModel(nn.Module):
         head_norm: str = "layer",
         final_norm: bool = False,
         path_norm: str = "sum",
+        path_ties: str = "single",
     ):
         super().__init__()
         # --one_linear sets both; the two specific flags set one each.
@@ -1133,6 +1164,7 @@ class HopMaskedTransformerModel(nn.Module):
                 path_node_terms=path_node_terms,
                 one_linear=one_linear_path,
                 path_norm=path_norm,
+                path_ties=path_ties,
             )
 
         self._use_cross_hop = dynamic_cross_hop
