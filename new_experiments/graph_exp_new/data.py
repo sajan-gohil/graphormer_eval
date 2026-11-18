@@ -557,7 +557,7 @@ class DistMaskDataset(torch.utils.data.Dataset):
         return item
 
 
-def _path_levels(dist_pad, pred_pad, L):
+def _path_levels(dist_pad, pred_pad, L, edge_lists=None):
     """Per-hop-level index lists for the PathEmbedder recursion.
 
     All pairs (b, s, t) with 1 <= d(s, t) <= L, sorted by level (row-major
@@ -578,7 +578,7 @@ def _path_levels(dist_pad, pred_pad, L):
     pos[sel] = np.arange(sel.size, dtype=np.int32)
     parent = pos[b * N * N + s * N + p]
     ptr = np.searchsorted(lev, np.arange(1, L + 2), side="left")
-    return {
+    out = {
         "b": torch.from_numpy(b.astype(np.int16)),
         "s": torch.from_numpy(s.astype(np.int16)),
         "t": torch.from_numpy(t.astype(np.int16)),
@@ -586,10 +586,81 @@ def _path_levels(dist_pad, pred_pad, L):
         "parent": torch.from_numpy(parent),
         "ptr": torch.from_numpy(ptr.astype(np.int64)),
     }
+    if edge_lists is not None:
+        out.update(_tie_triples(dist_pad, edge_lists, L, pos, ptr))
+    return out
+
+
+def _tie_triples(dist_pad, edge_lists, L, pos, ptr):
+    """All shortest-path predecessors, for the uniform tie merge
+    (path_ties='uniform').
+
+    One triple (b, s, p, t) per directed edge p->t with d(s,p) = d(s,t) - 1,
+    1 <= d(s,t) <= L, i.e. every last step of every shortest s->t path.
+    Weight w = c(s,p) / c(s,t), where c(s,v) is the number of shortest s->v
+    paths, so sum_p w * (S[s,p] + T(p->t)) is the average over all shortest
+    paths. Triples are sorted by level d(s,t); per triple:
+      child  = position of (b,s,t) inside its level's pair slice
+      parent = position of (b,s,p) inside level d-1's slice (-1 for d = 1)
+    tptr[k-1]:tptr[k] is level k's triple slice. With unique shortest paths
+    this reduces to one triple per pair with w = 1 (same result as 'single').
+    Assumes no duplicate edges (a duplicate would count its paths twice).
+    """
+    B, N, _ = dist_pad.shape
+    cols = {k: [] for k in ("b", "s", "p", "t", "lev", "w")}
+    for i, (pe, te) in enumerate(edge_lists):
+        if pe.size == 0:
+            continue
+        n = int(max(pe.max(), te.max())) + 1
+        D = dist_pad[i, :n, :n].astype(np.int64)
+        dp, dt = D[:, pe], D[:, te]                         # (n_src, E)
+        m = (dp >= 0) & (dt == dp + 1) & (dt >= 1) & (dt <= L)
+        s_idx, e_idx = np.nonzero(m)
+        if s_idx.size == 0:
+            continue
+        p_idx, t_idx = pe[e_idx], te[e_idx]
+        lev = D[s_idx, t_idx]
+        order = np.argsort(lev, kind="stable")
+        s_idx, p_idx, t_idx, lev = s_idx[order], p_idx[order], t_idx[order], lev[order]
+        # Shortest-path counts, level by level (level k-1 is final before k).
+        C = np.zeros((n, n), dtype=np.float64)
+        C[np.arange(n), np.arange(n)] = 1.0
+        bounds = np.searchsorted(lev, np.arange(1, L + 2), side="left")
+        for k in range(1, L + 1):
+            lo, hi = bounds[k - 1], bounds[k]
+            if lo == hi:
+                continue
+            np.add.at(C, (s_idx[lo:hi], t_idx[lo:hi]), C[s_idx[lo:hi], p_idx[lo:hi]])
+        w = C[s_idx, p_idx] / C[s_idx, t_idx]
+        for k_, v in (("b", np.full(s_idx.size, i)), ("s", s_idx), ("p", p_idx),
+                      ("t", t_idx), ("lev", lev), ("w", w)):
+            cols[k_].append(v)
+
+    if not cols["b"]:
+        empty = np.zeros(0, dtype=np.int64)
+        tb = ts = tp = tt = tl = empty
+        tw = np.zeros(0)
+    else:
+        tb, ts, tp, tt, tl, tw = (np.concatenate(cols[k]) for k in
+                                  ("b", "s", "p", "t", "lev", "w"))
+        order = np.argsort(tl, kind="stable")                # group levels across graphs
+        tb, ts, tp, tt, tl, tw = (a[order] for a in (tb, ts, tp, tt, tl, tw))
+    child = pos[tb * N * N + ts * N + tt] - ptr[np.maximum(tl - 1, 0)]
+    parent = np.where(tl > 1, pos[tb * N * N + ts * N + tp] - ptr[np.maximum(tl - 2, 0)], -1)
+    tptr = np.searchsorted(tl, np.arange(1, L + 2), side="left")
+    return {
+        "tb": torch.from_numpy(tb.astype(np.int16)),
+        "tp": torch.from_numpy(tp.astype(np.int16)),
+        "tt": torch.from_numpy(tt.astype(np.int16)),
+        "tchild": torch.from_numpy(child.astype(np.int32)),
+        "tparent": torch.from_numpy(parent.astype(np.int32)),
+        "tw": torch.from_numpy(tw.astype(np.float32)),
+        "tptr": torch.from_numpy(tptr.astype(np.int64)),
+    }
 
 
 def collate_with_dist_masks(batch, max_hops=40, use_path_embeddings=False,
-                            dist_as_index=False):
+                            dist_as_index=False, path_ties="single"):
     """
     Collate function for DistMaskDataset.
     Pads graphs and expands distance matrices into hop masks at the batch's
@@ -668,7 +739,12 @@ def collate_with_dist_masks(batch, max_hops=40, use_path_embeddings=False,
                 n = int(g.num_nodes)
                 dist_pad[i, :n, :n] = np.where(dist < max_hops, dist, -1)
         # Levels 1..max_hops-1 == PathEmbedder's L = min(K-1, max_hops).
-        path_data["levels"] = _path_levels(dist_pad, pred_padded, max_hops - 1)
+        edge_lists = None
+        if path_ties == "uniform":                     # all shortest-path predecessors
+            edge_lists = [(g.edge_index[0].numpy(), g.edge_index[1].numpy())
+                          for g in graphs]
+        path_data["levels"] = _path_levels(dist_pad, pred_padded, max_hops - 1,
+                                           edge_lists=edge_lists)
         pyg_batch.path_data = path_data
         result = result + (path_data,)
 
@@ -861,7 +937,7 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
                 dataset_name="Peptides-func", return_info=False,
                 subgraph_mode="partition", num_parts=128, egonet_hops=2,
                 egonet_max_nodes=1024, max_egonet_samples=None, seed=0,
-                use_path_embeddings=False, dist_as_index=False):
+                use_path_embeddings=False, dist_as_index=False, path_ties="single"):
     """Load train/val/test splits and return loaders + datasets.
 
     Args:
@@ -1002,7 +1078,7 @@ def get_loaders(batch_size=256, num_workers=4, use_dist_masks=False, max_hops=40
 
         collate_fn = partial(collate_with_dist_masks, max_hops=max_hops,
                             use_path_embeddings=use_path_embeddings,
-                            dist_as_index=dist_as_index)
+                            dist_as_index=dist_as_index, path_ties=path_ties)
 
         # Use standard PyTorch DataLoader (not PyG's) because our custom
         # collate_fn handles batching and PyG's Collater cannot handle the
