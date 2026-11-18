@@ -141,6 +141,10 @@ def build_parser():
     p.add_argument("--path_node_terms", type=str, default="all",
                    help="Inputs of the per-edge path MLP besides position: 'all' "
                         "or a comma list of edge,src,dst (e.g. 'edge' or 'edge,dst').")
+    p.add_argument("--path_ties", type=str, default="single",
+                   choices=["single", "uniform"],
+                   help="Path embedding over tied shortest paths: 'single' = one "
+                        "Floyd-Warshall path; 'uniform' = average over all shortest paths.")
     p.add_argument("--linear_head", action="store_true", default=False,
                    help="Output head = LayerNorm -> Dropout -> one Linear "
                         "(default: 2-layer MLP head).")
@@ -175,16 +179,28 @@ def build_parser():
     p.add_argument("--max_epochs", type=int, default=500)
     p.add_argument("--patience", type=int, default=40)
     p.add_argument("--lr_scheduler", choices=["cosine", "plateau", "constant"],
-                   default="plateau",
+                   default="cosine",
                    help="cosine: per-step warmup + cosine to lr_min over "
                         "--cosine_epochs. plateau: warmup, then ReduceLROnPlateau "
                         "(factor 0.5, --reduce_lr_patience). constant: warmup, then "
                         "constant lr. (Before this flag both cosine and plateau were "
                         "created; the cosine step overwrote the plateau cuts.)")
     p.add_argument("--cosine_epochs", type=int, default=None,
-                   help="Cosine length in epochs (default: --max_epochs). Set it near "
-                        "where early stopping usually ends a run.")
-    p.add_argument("--reduce_lr_patience", type=int, default=50)
+                   help="Cosine length in epochs. Default: the usual schedule length "
+                        "for the dataset (DEFAULT_COSINE_EPOCHS, e.g. ZINC 2000, "
+                        "Peptides 250, PascalVOC/COCO 200, PCQM-Contact 150), capped at "
+                        "--max_epochs; other datasets use --max_epochs. After the "
+                        "cosine ends the lr stays at --lr_min.")
+    p.add_argument("--mrr_mode", choices=["raw", "filtered", "ext_filtered"],
+                   default="raw",
+                   help="Link-level MRR (PCQM-Contact): raw = LRGB/GraphGPS code "
+                        "(other true tails and the self-loop stay candidates); filtered "
+                        "removes other true tails; ext_filtered also removes the "
+                        "self-loop (Tonshoff et al. 2023).")
+    p.add_argument("--link_num_neg", type=int, default=1,
+                   help="Training negatives per positive pair for link tasks "
+                        "(random node of the same graph; reference uses 1).")
+    p.add_argument("--reduce_lr_patience", type=int, default=10)
     p.add_argument("--warmup_ratio", type=float, default=0.01)
     p.add_argument("--grad_clip", type=float, default=5.0)
     p.add_argument("--num_workers", type=int, default=4)
@@ -255,11 +271,13 @@ def _run_link_epoch(model, loader, task, device, optimizer=None, scheduler=None,
     decoded per-node embeddings; pairs are scored by dot product. Train: BCE
     over positive contact pairs + 1 structured negative per positive (random
     node of the same graph). Metric: OGB filtered MRR, mean over batches."""
-    from metrics import build_link_targets, link_scores, compute_link_mrr
+    from metrics import build_link_targets, link_scores, link_reciprocal_ranks
 
     is_train = optimizer is not None
     model.train(is_train)
-    losses, mrrs = [], []
+    num_neg = getattr(task, "link_num_neg", 1)
+    mode = getattr(task, "mrr_mode", "raw")
+    losses, rr_sum, rr_cnt = [], 0.0, 0
     for batch in loader:
         pyg_batch, dist_masks, node_masks, path_data = _move_batch_to_device(
             batch, device, model.max_hops)
@@ -272,7 +290,7 @@ def _run_link_epoch(model, loader, task, device, optimizer=None, scheduler=None,
                                 enabled=amp and str(device).startswith("cuda")):
                 h, _, aux_loss, _ = model(pyg_batch, dist_masks, node_masks)
             h, aux_loss = h.float(), aux_loss.float()
-            edge_index, labels = build_link_targets(pyg_batch, num_neg_per_pos=1)
+            edge_index, labels = build_link_targets(pyg_batch, num_neg_per_pos=num_neg)
             logits = link_scores(h, edge_index)
             loss = task.loss_fn(logits, labels.float()) + aux_loss
 
@@ -284,9 +302,13 @@ def _run_link_epoch(model, loader, task, device, optimizer=None, scheduler=None,
             if scheduler is not None:
                 scheduler.step()
 
-        losses.append(float(loss.item()))
-        mrrs.append(compute_link_mrr(h.detach(), pyg_batch))
-    return float(np.mean(losses)), float(np.mean(mrrs)) if mrrs else 0.0
+        losses.append(loss.detach())
+        rr = link_reciprocal_ranks(h.detach(), pyg_batch, mode)   # vectorized
+        rr_sum = rr_sum + rr.sum()
+        rr_cnt += rr.numel()
+    loss = float(torch.stack(losses).mean().item()) if losses else 0.0
+    mrr = float(rr_sum / rr_cnt) if rr_cnt else 0.0           # mean over all positives
+    return loss, mrr
 
 
 def run_epoch(model, loader, task, device, optimizer=None, scheduler=None,
@@ -387,13 +409,35 @@ def attn_diagnostics(model, loader, device, tag, max_batches=10):
     print(flush=True)
 
 
+# Usual cosine schedule length (epochs) per dataset: GraphGPS / Tonshoff et al.
+# 2023 settings. Used when --cosine_epochs is not given (capped at max_epochs),
+# so long --max_epochs / --patience budgets don't stretch the cosine.
+DEFAULT_COSINE_EPOCHS = {
+    "ZINC12k": 2000, "Peptides-func": 250, "Peptides-struct": 250,
+    "PascalVOC-SP": 200, "COCO-SP": 200, "PCQM-Contact": 150,
+    "MNIST": 150, "CIFAR10": 150, "PATTERN": 100, "CLUSTER": 100,
+    "ogbg-molhiv": 100, "ogbg-molpcba": 100,
+}
+
+
+def cosine_horizon(args):
+    if args.cosine_epochs:
+        return args.cosine_epochs
+    name = args.dataset
+    try:                                     # resolve aliases (e.g. "zinc12k")
+        from data import canonicalize_dataset_name
+        name = canonicalize_dataset_name(name)
+    except Exception:
+        pass
+    return min(DEFAULT_COSINE_EPOCHS.get(name, args.max_epochs), args.max_epochs)
+
+
 def build_optimizer_and_schedulers(model, args, steps_per_epoch, higher_is_better):
     """(optimizer, per-step scheduler, plateau scheduler or None) for
     --lr_scheduler cosine | plateau | constant. Only one scheduler sets the lr
     after warmup, so plateau cuts are not overwritten."""
     spe = max(steps_per_epoch, 1)
-    horizon = (args.cosine_epochs or args.max_epochs) if args.lr_scheduler == "cosine" \
-        else args.max_epochs
+    horizon = cosine_horizon(args) if args.lr_scheduler == "cosine" else args.max_epochs
     total_steps = max(horizon * spe, 1)
     optimizer, scheduler = build_grouped_optimizer_and_scheduler(
         named_parameters=list(model.named_parameters()), lr_max=args.lr,
@@ -429,6 +473,7 @@ def build_data_task_model(args):
         seed=args.seed,
         use_path_embeddings=args.use_path_embeddings,
         dist_as_index=True,
+        path_ties=args.path_ties,
     )
     dataset_name = dataset_info["name"]
 
@@ -437,6 +482,8 @@ def build_data_task_model(args):
     task = build_task(dataset_name, dataset_info=dataset_info, pos_weight=pos_weight,
                       focal_gamma=0.0, label_smoothing=0.0)
     task.loss_fn = task.loss_fn.to(args.device)
+    task.mrr_mode = args.mrr_mode            # link-level tasks only
+    task.link_num_neg = args.link_num_neg
 
     print(f"[{dataset_name}] task={task.task_type} level={task.level} "
           f"metric={task.metric_name}",
@@ -484,6 +531,7 @@ def build_data_task_model(args):
         head_norm=args.head_norm,
         final_norm=args.final_norm,
         path_norm=args.path_norm,
+        path_ties=args.path_ties,
     ).to(args.device)
     return train_loader, val_loader, test_loader, dataset_info, task, model
 
@@ -512,7 +560,7 @@ def main():
     optimizer, scheduler, plateau_scheduler = build_optimizer_and_schedulers(
         model, args, len(train_loader), task.higher_is_better)
     print(f"lr scheduler: {args.lr_scheduler}"
-          + (f" (cosine over {args.cosine_epochs or args.max_epochs} epochs)"
+          + (f" (cosine over {cosine_horizon(args)} epochs, then lr_min)"
              if args.lr_scheduler == "cosine" else ""), flush=True)
 
     best_val = -float("inf") if task.higher_is_better else float("inf")
