@@ -1,4 +1,3 @@
-# grid_search_hop_masked.py
 """Coarse-to-fine staged grid search for train_hop_masked_light.py.
 
 Coarse stage: hyperparameters are split into small groups. Groups are searched
@@ -468,6 +467,12 @@ def main():
     if "--" in argv:
         i = argv.index("--")
         argv, extra = argv[:i], argv[i + 1:]
+    # argparse rejects a value starting with "--" ("--base --use_path_embeddings");
+    # join it as "--base=<value>".
+    for i in range(len(argv) - 1):
+        if argv[i] == "--base":
+            argv[i:i + 2] = [f"--base={argv[i + 1]}"]
+            break
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dataset", required=True)
