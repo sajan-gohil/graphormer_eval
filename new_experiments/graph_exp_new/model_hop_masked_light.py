@@ -394,8 +394,21 @@ class PathEmbedder(nn.Module):
                  path_node_terms: str = "all",
                  one_linear: bool = False,
                  path_norm: str = "sum",
-                 path_ties: str = "single"):
+                 path_ties: str = "single",
+                 path_pool: str = "sum",
+                 path_attn_heads: int = 4):
         super().__init__()
+        # 'sum': edges of a path weighted equally (sum / sqrt(k)).
+        # 'attn': also a query-weighted summary A[s,t] = sum_r a_r v_r with
+        # a_r = softmax_r(q_s . k_r) over the path's edges, query from the start
+        # node s, computed level by level with a streaming softmax.
+        if path_pool not in ("sum", "attn"):
+            raise ValueError(f"path_pool must be 'sum' or 'attn', got {path_pool!r}")
+        if path_pool == "attn" and hidden_dim % path_attn_heads:
+            raise ValueError(f"hidden_dim={hidden_dim} must be divisible by "
+                             f"path_attn_heads={path_attn_heads}")
+        self.path_pool = path_pool
+        self.att_heads = path_attn_heads
         # 'single': one shortest path per pair (Floyd-Warshall pred).
         # 'uniform': average over all shortest paths (needs tie triples from
         # the collate, data._tie_triples).
@@ -428,6 +441,15 @@ class PathEmbedder(nn.Module):
         self.edge_enc = build_bond_encoder(d, dataset_name=dataset_name,
                                            edge_feat_dim=edge_feat_dim)
         self.norm = nn.LayerNorm(d)  # scale of P set here; per-layer gate in MHA
+        if path_pool == "attn":
+            self.att_q = nn.Linear(d, d)              # query from the start node
+            self.att_k = nn.Linear(d, d, bias=False)  # key per (edge, position) term
+            self.att_v = nn.Linear(d, d)              # value per (edge, position) term
+            # P = sum part + att_mix(A); att_mix starts at 0, so training starts
+            # from the 'sum' model.
+            self.att_mix = nn.Linear(d, d)
+            nn.init.zeros_(self.att_mix.weight)
+            nn.init.zeros_(self.att_mix.bias)
         self._tag_cache = {}  # hop-set content -> (H, K+2) membership (not saved)
         # Continuous edge features: GELU after the Linear bond encoder.
         # Categorical encoders (embedding lookups) are used as is.
@@ -439,9 +461,36 @@ class PathEmbedder(nn.Module):
         first-layer edge + node blocks; last row (no edge) = 0."""
         h = F.gelu(Ein + Pin[k - 1])
         T = h if self.edge_pos_out is None else self.edge_pos_out(h)
+        T = T.float()          # autocast returns bf16; the path sum stays fp32
         if self.path_norm == "term":
             T = self.norm(T)
         return torch.cat([T, T.new_zeros(1, T.shape[1])])
+
+    def _att_scores(self, Q, T, b, s, eid):
+        """Score z (n, h) and value v (n, h, dh) of the new edge for each pair."""
+        h = self.att_heads
+        dh = T.shape[1] // h
+        # Keys / values once per edge (E+1 rows), then gathered per pair.
+        kk = self.att_k(T)[eid].view(-1, h, dh)
+        vv = self.att_v(T)[eid].view(-1, h, dh)
+        z = (Q[b, s] * kk).sum(-1) * dh ** -0.5
+        return z, vv
+
+    @staticmethod
+    def _att_extend(z, v, parent=None):
+        """Streaming softmax: extend a parent state (M, D, N) by one edge.
+
+        M: running max (n, h), detached (softmax is shift invariant);
+        D: sum exp(z - M) (n, h);  N: sum exp(z - M) v (n, h, dh).
+        """
+        if parent is None:
+            M = z.detach()
+            e = torch.exp(z - M)
+            return M, e, e[..., None] * v
+        Mp, Dp, Np = parent
+        M = torch.maximum(Mp, z.detach())
+        a, e = torch.exp(Mp - M), torch.exp(z - M)
+        return M, Dp * a + e, Np * a[..., None] + e[..., None] * v
 
     def hop_tags(self, hop_sets: List[Optional[List[int]]], H: int) -> torch.Tensor:
         """(H, Dh): mean hop_emb over each head's hop set, head-h slice.
@@ -500,6 +549,14 @@ class PathEmbedder(nn.Module):
         Pin = self.edge_pos_in_p(self.pos_emb.weight[:L]).float()
         out = x.new_zeros(B, N, N, d, dtype=torch.float32)
         prev = None
+        attn = self.path_pool == "attn"
+        if attn:
+            if levels is None or levels["ptr"].numel() - 1 != L:
+                raise ValueError("path_pool='attn' needs the per-level index lists "
+                                 "from the collate (path_data['levels'])")
+            Q = self.att_q(x.float()).float().view(B, N, self.att_heads, -1)
+            outA = x.new_zeros(B, N, N, d, dtype=torch.float32)
+            prevA = None
         if self.path_ties == "uniform":
             if levels is None or "tptr" not in levels or levels["ptr"].numel() - 1 != L:
                 raise ValueError("path_ties='uniform' needs tie triples from the collate "
@@ -517,12 +574,30 @@ class PathEmbedder(nn.Module):
                 a, z = tptr[k - 1], tptr[k]
                 # S_k[s,t] = sum_p w_p (S_{k-1}[s,p] + T(p->t)), w_p = c(s,p)/c(s,t):
                 # the average over all shortest s->t paths.
-                C = self._edge_pos_terms(Ein, Pin, k)[edge_map[tb[a:z], tp[a:z], tt[a:z]]]
+                T = self._edge_pos_terms(Ein, Pin, k)
+                eid = edge_map[tb[a:z], tp[a:z], tt[a:z]]
+                C = T[eid]
                 if k > 1:
                     C = C + prev[tpar[a:z]]
                 S = C.new_zeros(hi - lo, d).index_add_(0, tch[a:z], C * tw[a:z, None])
                 prev = S
                 out[lb[lo:hi], ls[lo:hi], lt[lo:hi]] = S / math.sqrt(k)
+                if attn:
+                    # Extend each predecessor's state by its edge p->t, then merge
+                    # the states of all tied predecessors with weights w_p:
+                    # one softmax over every (shortest path, edge) of the pair.
+                    ch = tch[a:z]
+                    zt, vt = self._att_scores(Q, T, tb[a:z], ls[lo:hi][ch], eid)
+                    par = None if k == 1 else tuple(st[tpar[a:z]] for st in prevA)
+                    Mt, Dt, Nt = self._att_extend(zt, vt, par)
+                    n, h = hi - lo, self.att_heads
+                    Mc = Mt.new_full((n, h), float("-inf")).scatter_reduce(
+                        0, ch[:, None].expand(-1, h), Mt, reduce="amax")
+                    r = torch.exp(Mt - Mc[ch]) * tw[a:z, None]
+                    Dc = Mt.new_zeros(n, h).index_add_(0, ch, r * Dt)
+                    Nc = Nt.new_zeros(n, h, Nt.shape[-1]).index_add_(0, ch, r[..., None] * Nt)
+                    prevA = (Mc, Dc, Nc)
+                    outA[lb[lo:hi], ls[lo:hi], lt[lo:hi]] = (Nc / Dc[..., None]).reshape(n, d)
         elif levels is not None and levels["ptr"].numel() - 1 == L:
             ptr = levels["ptr"].tolist()                    # CPU tensor: no sync
             lb, ls, lt, lp = (levels[k].to(dev, non_blocking=True).long()
@@ -533,11 +608,20 @@ class PathEmbedder(nn.Module):
                 if hi == lo:
                     break
                 b, s, t, p = lb[lo:hi], ls[lo:hi], lt[lo:hi], lp[lo:hi]
-                S = self._edge_pos_terms(Ein, Pin, k)[edge_map[b, p, t]]
+                T = self._edge_pos_terms(Ein, Pin, k)
+                eid = edge_map[b, p, t]
+                S = T[eid]
                 if k > 1:
                     S = S + prev[lpar[lo:hi] - ptr[k - 2]]  # parent is in level k-1
                 prev = S
                 out[b, s, t] = S / math.sqrt(k)
+                if attn:
+                    za, va = self._att_scores(Q, T, b, s, eid)
+                    par = None if k == 1 else tuple(
+                        st[lpar[lo:hi] - ptr[k - 2]] for st in prevA)
+                    prevA = self._att_extend(za, va, par)
+                    Mx, Dn, Nm = prevA
+                    outA[b, s, t] = (Nm / Dn[..., None]).reshape(hi - lo, d)
         else:
             pred = pred.to(dev).long()
             row_of = torch.full((B, N, N), -1, dtype=torch.long, device=dev)
@@ -557,6 +641,8 @@ class PathEmbedder(nn.Module):
         has = dist_masks.bool().any(1)
         didx = dist_masks.float().argmax(1)
         didx[~has] = self.K
+        if attn:
+            out = out + self.att_mix(outA)
         out = out + self.hop_emb(didx)
         if self.path_norm == "sum":
             out = self.norm(out)
@@ -1046,8 +1132,13 @@ class HopMaskedTransformerModel(nn.Module):
         final_norm: bool = False,
         path_norm: str = "sum",
         path_ties: str = "single",
+        path_pool: str = "sum",
+        path_attn_heads: int = 4,
+        path_rebuild: str = "none",
     ):
         super().__init__()
+        if path_rebuild not in ("none", "shared", "per_layer"):
+            raise ValueError(f"path_rebuild must be none|shared|per_layer, got {path_rebuild!r}")
         # --one_linear sets both; the two specific flags set one each.
         one_linear_path = one_linear or one_linear_path
         one_linear_crosshop = one_linear or one_linear_crosshop
@@ -1155,8 +1246,15 @@ class HopMaskedTransformerModel(nn.Module):
         # Path-aware embeddings
         self.use_path_embeddings = use_path_embeddings
         self.path_embedder = None
+        # path_rebuild: 'none' = P built once from the encoder output and shared
+        # by all layers; 'shared' = P rebuilt before every layer from that
+        # layer's input node states, same PathEmbedder weights; 'per_layer' =
+        # rebuilt every layer, own PathEmbedder per layer (layer 0 uses
+        # self.path_embedder, layers 1.. use self.path_embedders_extra).
+        self.path_rebuild = path_rebuild if use_path_embeddings else "none"
+        self.path_embedders_extra = None
         if use_path_embeddings:
-            self.path_embedder = PathEmbedder(
+            pe_kwargs = dict(
                 hidden_dim=hidden_dim,
                 max_hops=max_hops,
                 dataset_name=dataset_name,
@@ -1165,7 +1263,13 @@ class HopMaskedTransformerModel(nn.Module):
                 one_linear=one_linear_path,
                 path_norm=path_norm,
                 path_ties=path_ties,
+                path_pool=path_pool,
+                path_attn_heads=path_attn_heads,
             )
+            self.path_embedder = PathEmbedder(**pe_kwargs)
+            if self.path_rebuild == "per_layer":
+                self.path_embedders_extra = nn.ModuleList(
+                    [PathEmbedder(**pe_kwargs) for _ in range(num_layers - 1)])
 
         self._use_cross_hop = dynamic_cross_hop
         self._member_cache = {}  # (hop-set content, K, device, excl) -> (M, glob)
@@ -1481,6 +1585,11 @@ class HopMaskedTransformerModel(nn.Module):
         h = self.encoder(batch.x, batch.edge_index, batch.edge_attr, lap_pe=None)
         return to_dense_batch(h, batch.batch)
 
+    def _layer_path_embedder(self, layer_idx: int) -> "PathEmbedder":
+        if self.path_embedders_extra is not None and layer_idx > 0:
+            return self.path_embedders_extra[layer_idx - 1]
+        return self.path_embedder
+
     def forward(self, batch, dist_masks, node_masks):
         """Forward pass. Returns (logits, node_emb, aux_loss, None)."""
         dense_x, dense_mask = self.encode_dense(batch)
@@ -1517,31 +1626,41 @@ class HopMaskedTransformerModel(nn.Module):
 
         x = dense_x
 
-        # Path embeddings: built once, shared by all layers (both attention modes).
+        # Path embeddings: built from the encoder output before layer 0; with
+        # path_rebuild != 'none', rebuilt before every later layer from that
+        # layer's input node states (both attention modes).
         path_embeddings = None
+        build_path = None
         hop_tags = [None] * len(self.layers)
         if self.use_path_embeddings:
             edge_attr = getattr(batch, "edge_attr", None)
             edge_map = self._build_edge_map(batch, B_orig, N_orig)
-            path_embeddings = self.path_embedder(
-                dense_x, edge_attr, edge_map, dist_masks,
-                batch.path_data["pred"], nm,
-                levels=batch.path_data.get("levels"),
-                edge_coords=self._dense_edge_coords(batch, B_orig))
+            pred = batch.path_data["pred"]
+            levels = batch.path_data.get("levels")
+            edge_coords = self._dense_edge_coords(batch, B_orig)
+            amp_dtype = None
             if torch.is_autocast_enabled():
                 # Cast once; otherwise every einsum would make its own bf16 copy.
                 amp_dtype = (torch.get_autocast_dtype("cuda")
                              if hasattr(torch, "get_autocast_dtype")
                              else torch.get_autocast_gpu_dtype())
-                path_embeddings = path_embeddings.to(amp_dtype)
+
+            def build_path(layer_idx, x_in):
+                P = self._layer_path_embedder(layer_idx)(
+                    x_in, edge_attr, edge_map, dist_masks, pred, nm,
+                    levels=levels, edge_coords=edge_coords)
+                return P if amp_dtype is None else P.to(amp_dtype)
+
+            path_embeddings = build_path(0, dense_x)
             if self._use_cross_hop:
                 if self.multihop_attn:
                     all_hops = [list(range(dist_masks.shape[1]))] * self.num_heads
-                    tag = self.path_embedder.hop_tags(all_hops, self.num_heads)
-                    hop_tags = [tag] * len(self.layers)
+                    hop_tags = [self._layer_path_embedder(i).hop_tags(all_hops, self.num_heads)
+                                for i in range(len(self.layers))]
                 else:
-                    hop_tags = [self.path_embedder.hop_tags(hs, self.num_heads)
-                                for hs in self.per_layer_hop_sets]
+                    hop_tags = [self._layer_path_embedder(i).hop_tags(hs, self.num_heads)
+                                for i, hs in enumerate(self.per_layer_hop_sets)]
+        rebuild = self.path_rebuild != "none"
 
         if self.multihop_attn:
             hop_index = None
@@ -1551,6 +1670,8 @@ class HopMaskedTransformerModel(nn.Module):
                 hop_index = mask_source.float().argmax(1)
                 hop_index[~has] = K_rt
             for layer_idx, layer in enumerate(self.layers):
+                if rebuild and layer_idx > 0:
+                    path_embeddings = build_path(layer_idx, x)
                 x = layer(x, mask_source, nm, path_embeddings=path_embeddings,
                           hop_tag=hop_tags[layer_idx], hop_index=hop_index)
             aux_loss = x.new_tensor(0.0)
@@ -1590,6 +1711,8 @@ class HopMaskedTransformerModel(nn.Module):
                         batch, B_orig, N_orig, dense_x.device, layer_idx=layer_idx
                     )
 
+                if rebuild and layer_idx > 0:
+                    path_embeddings = build_path(layer_idx, x)
                 x = layer(x, per_head_mask, nm, adj_blend_bias=adj_blend_bias_layer,
                          edge_bias=edge_bias_layer, path_embeddings=path_embeddings,
                          head_valid_mask=head_valid_mask,

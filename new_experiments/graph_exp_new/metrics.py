@@ -640,39 +640,27 @@ def _graph_offsets(node_batch: torch.Tensor, B: int) -> torch.Tensor:
 def build_link_targets(batch, num_neg_per_pos: int = 1):
     """Build (edge_index_all (2,M) global, labels (M,)) for the BCE link loss.
 
-    Positives are the labeled contact pairs (edge_label == 1).  For each
+    Positives are the labeled contact pairs (edge_label == 1). For each
     positive (i, j) we sample ``num_neg_per_pos`` negatives (i, k) with k a
-    random node in the *same graph* (structured negative sampling, matching the
-    GraphGPS transform).  Random negatives may occasionally coincide with a true
-    contact — an accepted approximation, as in the reference.
+    uniformly random node of the *same graph* (structured negative sampling,
+    as in the GraphGPS / LRGB reference). Vectorized: no per-graph loop.
+    A random negative may occasionally coincide with a true contact, an
+    accepted approximation (as in the reference).
     """
     eidx = batch.edge_label_index                    # (2, P) global
     elab = batch.edge_label.view(-1)                 # (P,)
     node_batch = batch.batch
-    B = int(node_batch.max().item()) + 1 if node_batch.numel() > 0 else 0
+    B = int(batch.num_graphs) if hasattr(batch, "num_graphs") else int(node_batch.max()) + 1
     counts, offsets = _graph_offsets(node_batch, B)
-    ebatch = node_batch[eidx[0]]                      # graph id per labeled edge
-
     pos = eidx[:, elab == 1]                          # (2, P+)
-    src_all = [pos[0]]
-    dst_all = [pos[1]]
-    lab_all = [torch.ones(pos.shape[1], device=eidx.device)]
-
-    for g in range(B):
-        p = eidx[:, (ebatch == g) & (elab == 1)]
-        npos = p.shape[1]
-        if npos == 0:
-            continue
-        ng = int(counts[g].item())
-        off = int(offsets[g].item())
-        heads = p[0].repeat_interleave(num_neg_per_pos)
-        rand = torch.randint(ng, (npos * num_neg_per_pos,), device=eidx.device) + off
-        src_all.append(heads)
-        dst_all.append(rand)
-        lab_all.append(torch.zeros(heads.shape[0], device=eidx.device))
-
-    edge_index = torch.stack([torch.cat(src_all), torch.cat(dst_all)], dim=0)
-    labels = torch.cat(lab_all)
+    g = node_batch[pos[0]]
+    heads = pos[0].repeat_interleave(num_neg_per_pos)
+    gneg = g.repeat_interleave(num_neg_per_pos)
+    rand = (torch.rand(heads.shape[0], device=eidx.device) * counts[gneg]).long()
+    rand = torch.minimum(rand, counts[gneg] - 1) + offsets[gneg]
+    edge_index = torch.cat([pos, torch.stack([heads, rand])], dim=1)
+    labels = torch.cat([torch.ones(pos.shape[1], device=eidx.device),
+                        torch.zeros(heads.shape[0], device=eidx.device)])
     return edge_index, labels
 
 
@@ -688,38 +676,57 @@ def _eval_mrr(y_pred_pos: torch.Tensor, y_pred_neg: torch.Tensor) -> torch.Tenso
     return 1.0 / ranking.to(torch.float)
 
 
+MRR_MODES = ("raw", "filtered", "ext_filtered")
+
+
 @torch.no_grad()
-def compute_link_mrr(h: torch.Tensor, batch) -> float:
-    """Filtered MRR over a batch: per graph, rank each positive tail against all
-    other nodes in that graph (self-tail masked out).  Mean reciprocal rank."""
+def link_reciprocal_ranks(h: torch.Tensor, batch, mode: str = "raw") -> torch.Tensor:
+    """Reciprocal rank of every positive pair (h, t) in the batch, vectorized.
+
+    Each positive tail t is ranked against all candidate tails x of the same
+    graph by the dot-product score h_h . h_x (Tönshoff et al. 2023, Sec. 2):
+      raw          : candidates = all nodes except t (other true tails and the
+                     self-loop x = h stay in). This is what the LRGB / GraphGPS
+                     code computes and what most published numbers use.
+      filtered     : also removes the other true tails of the same head.
+      ext_filtered : filtered, and also removes the self-loop x = h.
+    rank = 1 + number of candidates scored strictly higher than t.
+    """
+    if mode not in MRR_MODES:
+        raise ValueError(f"mode must be one of {MRR_MODES}, got {mode!r}")
+    from torch_geometric.utils import to_dense_batch
     eidx = batch.edge_label_index
     elab = batch.edge_label.view(-1)
     node_batch = batch.batch
-    B = int(node_batch.max().item()) + 1 if node_batch.numel() > 0 else 0
+    B = int(batch.num_graphs) if hasattr(batch, "num_graphs") else int(node_batch.max()) + 1
     counts, offsets = _graph_offsets(node_batch, B)
-    ebatch = node_batch[eidx[0]]
+    pos = eidx[:, elab == 1]
+    if pos.shape[1] == 0:
+        return h.new_zeros(0)
+    H, valid = to_dense_batch(h.float(), node_batch, batch_size=B)    # (B, N, d)
+    N = H.shape[1]
+    g = node_batch[pos[0]]
+    src, dst = pos[0] - offsets[g], pos[1] - offsets[g]
+    S = torch.bmm(H, H.transpose(1, 2))                                # (B, N, N)
+    rows = S[g, src]                                                   # (P, N)
+    sp = rows.gather(1, dst.view(-1, 1))                               # (P, 1)
+    cand = valid[g].clone()                                            # real nodes
+    cand[torch.arange(cand.shape[0], device=h.device), dst] = False   # not t itself
+    if mode in ("filtered", "ext_filtered"):
+        true = torch.zeros(B, N, N, dtype=torch.bool, device=h.device)
+        true[g, src, dst] = True
+        cand &= ~true[g, src]                                          # other true tails
+    if mode == "ext_filtered":
+        cand[torch.arange(cand.shape[0], device=h.device), src] = False   # self-loop
+    rank = 1 + ((rows > sp) & cand).sum(dim=1)
+    return 1.0 / rank.float()
 
-    rr = []
-    for g in range(B):
-        hg = h[node_batch == g]                      # (ng, d)
-        ng = hg.shape[0]
-        p = eidx[:, (ebatch == g) & (elab == 1)]
-        npos = p.shape[1]
-        if npos == 0 or ng < 2:
-            continue
-        off = int(offsets[g].item())
-        src = p[0] - off
-        dst = p[1] - off
-        pred = hg @ hg.t()                           # (ng, ng)
-        pred_pos = pred[src, dst]                     # (npos,)
-        neg_mask = torch.ones(npos, ng, dtype=torch.bool, device=h.device)
-        neg_mask[torch.arange(npos, device=h.device), dst] = False
-        pred_neg = pred[src][neg_mask].view(npos, -1)  # (npos, ng-1)
-        rr.append(_eval_mrr(pred_pos, pred_neg))
 
-    if not rr:
-        return 0.0
-    return float(torch.cat(rr).mean().item())
+@torch.no_grad()
+def compute_link_mrr(h: torch.Tensor, batch, mode: str = "raw") -> float:
+    """Mean reciprocal rank over a batch (see link_reciprocal_ranks)."""
+    rr = link_reciprocal_ranks(h, batch, mode)
+    return float(rr.mean().item()) if rr.numel() else 0.0
 
 
 

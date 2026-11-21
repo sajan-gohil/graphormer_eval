@@ -1,7 +1,7 @@
-# run_zinc_ablations.sh
 #!/usr/bin/env bash
-# ZINC12k ablations around one fixed base configuration; each run changes one
-# thing. Runs are spread over the GPUs in $GPUS (one job per GPU at a time),
+# ZINC12k ablations around the best earlier configuration (hidden 64, 4 heads
+# incl. 1 global, 4 layers, max_hops 10, path embeddings, linear head,
+# --one_linear); each run changes one thing, plus one combined run. Runs are spread over the GPUs in $GPUS (one job per GPU at a time),
 # finished runs (log has a BEST: line) are skipped on rerun, and a summary
 # table is printed at the end.
 #
@@ -12,46 +12,51 @@
 
 set -uo pipefail
 
-GPUS=${GPUS:-"0"}
+GPUS=${GPUS:-"0 1 2"}
 SEEDS=${SEEDS:-"0"}
 ONLY=${ONLY:-}                       # space-separated ablation names (empty = all)
-LOGS=${LOGS:-zinc_ablation_logs}
-CKPT=${CKPT:-zinc_ablation_ckpt}
+LOGS=${LOGS:-zinc_ablation_logs_h64}
+CKPT=${CKPT:-zinc_ablation_ckpt_h64}
 SUMMARY_ONLY=${SUMMARY_ONLY:-0}
-BATCH=${BATCH:-200}                  # not fixed by the base spec; best earlier run used 200
-RGP=${RGP:-0.05}                     # random_global_prob; default would be dropout/2 = 0.1
 WORKERS=${WORKERS:-4}
 
-# Fixed base configuration.
-BASE="--dataset ZINC12k --max_hops 8 --num_heads 8 --ffn_ratio 4 --num_global_heads 1 \
---num_layers 4 --hop_mode single --lr 0.001 --weight_decay 1e-5 --grad_clip 5 \
---max_epochs 2000 --patience 300 --dropout 0.2 --hidden_dim 128 \
---graph_pool sum --batch_size $BATCH --random_global_prob $RGP --num_workers $WORKERS"
-P="--use_path_embeddings"            # on for every ablation except no_path
+# Fixed settings (shared by every run): the best earlier ZINC run.
+COMMON="--dataset ZINC12k --max_hops 10 --hidden_dim 64 --num_heads 4 --ffn_ratio 4 \
+--num_layers 4 --dropout 0.2 --graph_pool sum --norm_type layer --hop_mode contiguous \
+--hop_window 1 --num_global_heads 1 --mask_type shortest_path --lr 0.001 --lr_min 1e-6 \
+--weight_decay 1e-5 --batch_size 512 --max_epochs 2000 --patience 500 \
+--reduce_lr_patience 10 --warmup_ratio 0.01 --grad_clip 5.0 --random_global_prob 0.05 \
+--num_workers $WORKERS"
+P="--use_path_embeddings"
+B="$P --linear_head --one_linear"      # base: path embeddings, linear head, 1-layer path term
 
-# name | extra flags (one change vs base, base = path embeddings + defaults:
-# cosine over max_epochs, 2-layer MLP head with LayerNorm, path_norm sum,
-# 2-layer path term, no cross-hop mixer)
+# name | flags on top of COMMON (each changes one thing vs base unless noted).
+# --one_linear = 1-layer path term AND 1-layer cross-hop output; the
+# path/crosshop-specific variants drop it and set one of the two flags.
 ABLATIONS=(
-  "base|$P"
-  "no_path|"
-  "sched_plateau|$P --lr_scheduler plateau"
-  "sched_constant|$P --lr_scheduler constant"
-  "sched_cos1000|$P --cosine_epochs 1000"
-  "sched_cos600|$P --cosine_epochs 600"
-  "head_linear|$P --linear_head"
-  "head_linear_nodrop|$P --linear_head --head_dropout 0"
-  "head_nodrop|$P --head_dropout 0"
-  "head_nonorm|$P --head_norm none"
-  "final_norm|$P --final_norm"
-  "final_norm_head_nonorm|$P --final_norm --head_norm none"
-  "pool_mean|$P --graph_pool mean"
-  "path_norm_term|$P --path_norm term"
-  "path_norm_none|$P --path_norm none"
-  "one_linear_path|$P --one_linear_path"
-  "path_edge_only|$P --path_node_terms edge"
-  "crosshop|$P --dynamic_cross_hop"
-  "crosshop_one_linear|$P --dynamic_cross_hop --one_linear_crosshop"
+  "base|$B"
+  "no_path|--linear_head --one_linear"
+  "sched_plateau|$B --lr_scheduler plateau"
+  "sched_constant|$B --lr_scheduler constant"
+  "sched_cos1000|$B --cosine_epochs 1000"
+  "head_mlp|$P --one_linear"
+  "head_nodrop|$B --head_dropout 0"
+  "head_nonorm|$B --head_norm none"
+  "final_norm|$B --final_norm"
+  "final_norm_head_nonorm|$B --final_norm --head_norm none"
+  "pool_mean|$B --graph_pool mean"
+  "path_norm_term|$B --path_norm term"
+  "path_norm_none|$B --path_norm none"
+  "path_two_layer|$P --linear_head"
+  "path_edge_only|$B --path_node_terms edge"
+  "path_edge_src|$B --path_node_terms edge,src"
+  "path_edge_dst|$B --path_node_terms edge,dst"
+  "path_nodes_only|$B --path_node_terms src,dst"
+  "path_ties_uniform|$B --path_ties uniform"
+  "crosshop|$B --dynamic_cross_hop"
+  "crosshop_two_layer|$P --linear_head --one_linear_path --dynamic_cross_hop"
+  # Combined: 2-layer cross-hop mixer + no path LayerNorm + 1-layer path term.
+  "combined|$P --linear_head --one_linear_path --dynamic_cross_hop --path_norm none"
 )
 
 mkdir -p "$LOGS" "$CKPT"
@@ -85,7 +90,7 @@ if [[ "$SUMMARY_ONLY" == 0 ]]; then
       gpu=$(wait_for_slot)
       echo "start $run on cuda:$gpu"
       # shellcheck disable=SC2086
-      OMP_NUM_THREADS=1 nohup python train_hop_masked_light.py $BASE $flags \
+      OMP_NUM_THREADS=1 nohup python train_hop_masked_light.py $COMMON $flags \
         --seed "$seed" --device "cuda:$gpu" --save_dir "$CKPT/$run" \
         > "$log" 2>&1 &
       SLOT_PID[$gpu]=$!
