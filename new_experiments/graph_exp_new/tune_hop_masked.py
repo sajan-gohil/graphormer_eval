@@ -1,3 +1,4 @@
+# tune_hop_masked.py
 """Bayesian hyperparameter search (Optuna TPE) for train_hop_masked_light.py.
 
 Each trial runs the training script as a subprocess, reads the per-epoch
@@ -34,7 +35,34 @@ import shlex
 import subprocess
 import sys
 
+import warnings
+
 import optuna
+
+warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
+
+
+def make_storage(spec: str, tag: str):
+    """Study storage shared by all workers.
+
+    'journal' (default) / 'journal:<file>': Optuna journal file, made for many
+    processes appending at once (no 'database is locked').
+    'sqlite:///<file>': SQLite with a 120 s lock timeout (fine for a few workers).
+    Any other URL is passed to Optuna unchanged.
+    """
+    if spec is None or spec == "journal" or spec.startswith("journal:"):
+        path = spec[len("journal:"):] if spec and spec.startswith("journal:") else \
+            f"optuna_{tag}.journal"
+        st = optuna.storages
+        if hasattr(st, "journal") and hasattr(st.journal, "JournalFileBackend"):
+            backend = st.journal.JournalFileBackend(path)          # optuna >= 4.0
+        else:
+            backend = st.JournalFileStorage(path)                  # optuna 3.x
+        return st.JournalStorage(backend)
+    if spec.startswith("sqlite"):
+        return optuna.storages.RDBStorage(
+            spec, engine_kwargs={"connect_args": {"timeout": 120}})
+    return spec
 
 EPOCH_RE = re.compile(
     r"^epoch\s+(\d+)\s.*\|\s*val loss\s+\S+\s+\S+\s+([-+0-9.eE]+|nan|inf)\s*\|"
@@ -46,7 +74,7 @@ PARAMS_RE = re.compile(r"trainable params:\s*([0-9.]+)M")
 CORE = {"head_dim", "num_heads", "num_global_heads", "num_layers", "ffn_ratio",
         "max_hops", "dropout", "random_global_prob", "lr", "weight_decay",
         "batch_size", "use_path_embeddings", "path_node_terms", "one_linear_path",
-        "linear_head"}
+        "linear_head", "path_rebuild"}
 
 
 def suggest(trial: optuna.Trial, a) -> dict:
@@ -124,7 +152,10 @@ def suggest(trial: optuna.Trial, a) -> dict:
     if use_path:
         cat("path_node_terms", ["all", "edge", "edge,src", "edge,dst"])
         cat("path_ties", ["single", "uniform"])
+        if cat("path_pool", ["sum", "attn"]) == "attn":
+            cat("path_attn_heads", [2, 4])
         cat("path_norm", ["sum", "term", "none"])
+        cat("path_rebuild", ["none", "shared", "per_layer"])
         flag("one_linear_path")
 
     # ---- output head ---------------------------------------------------------
@@ -161,6 +192,8 @@ def _check(f: dict, a):
         return "hidden_dim not divisible by num_heads"
     if f.get("num_post_gat_layers", 0) > 0 and hidden % f.get("num_gat_heads", 4):
         return "hidden_dim not divisible by num_gat_heads"
+    if f.get("path_pool") == "attn" and hidden % f.get("path_attn_heads", 4):
+        return "hidden_dim not divisible by path_attn_heads"
     if f.get("multihop_attn") and f.get("blend_adj_power"):
         return "multihop_attn and blend_adj_power are exclusive"
     return None
@@ -294,7 +327,9 @@ def main():
     p.add_argument("--startup_trials", type=int, default=8,
                    help="Random trials before TPE / pruning start")
     p.add_argument("--study_name", default=None)
-    p.add_argument("--storage", default=None, help="Default: sqlite:///optuna_<dataset>.db")
+    p.add_argument("--storage", default="journal",
+                   help="journal (default, optuna_<dataset>.journal), journal:<file>, "
+                        "or sqlite:///<file> (120 s lock timeout)")
     p.add_argument("--out_dir", default=None, help="Default: optuna_<dataset>/")
     p.add_argument("--train_script", default="train_hop_masked_light.py")
     p.add_argument("--show", action="store_true", help="Print results and exit")
@@ -311,12 +346,12 @@ def main():
             else "maximize"
     tag = a.dataset.replace("/", "_")
     a.study_name = a.study_name or f"hop_masked_{tag}"
-    a.storage = a.storage or f"sqlite:///optuna_{tag}.db"
+    storage = make_storage(a.storage, tag)
     a.out_dir = a.out_dir or f"optuna_{tag}"
     os.makedirs(a.out_dir, exist_ok=True)
 
     study = optuna.create_study(
-        study_name=a.study_name, storage=a.storage, direction=a.direction,
+        study_name=a.study_name, storage=storage, direction=a.direction,
         load_if_exists=True,
         sampler=optuna.samplers.TPESampler(multivariate=True, group=True,
                                            n_startup_trials=a.startup_trials),

@@ -145,6 +145,16 @@ def build_parser():
                    choices=["single", "uniform"],
                    help="Path embedding over tied shortest paths: 'single' = one "
                         "Floyd-Warshall path; 'uniform' = average over all shortest paths.")
+    p.add_argument("--path_pool", choices=["sum", "attn"], default="sum",
+                   help="How edges along a path are weighted: 'sum' = equally; 'attn' "
+                        "= also a query-weighted summary (softmax over the path's edges, "
+                        "query from the start node), added to P.")
+    p.add_argument("--path_attn_heads", type=int, default=4,
+                   help="Query heads for --path_pool attn (must divide hidden_dim).")
+    p.add_argument("--path_rebuild", choices=["none", "shared", "per_layer"], default="none",
+                   help="'none' = P built once from encoder output; 'shared' = rebuilt "
+                        "before every layer from that layer's input node states (same "
+                        "weights); 'per_layer' = rebuilt every layer, own weights per layer.")
     p.add_argument("--linear_head", action="store_true", default=False,
                    help="Output head = LayerNorm -> Dropout -> one Linear "
                         "(default: 2-layer MLP head).")
@@ -532,6 +542,9 @@ def build_data_task_model(args):
         final_norm=args.final_norm,
         path_norm=args.path_norm,
         path_ties=args.path_ties,
+        path_pool=args.path_pool,
+        path_attn_heads=args.path_attn_heads,
+        path_rebuild=args.path_rebuild,
     ).to(args.device)
     return train_loader, val_loader, test_loader, dataset_info, task, model
 

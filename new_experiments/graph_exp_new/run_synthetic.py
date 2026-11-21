@@ -58,7 +58,7 @@ def build_loaders(root, args):
               if args.use_path_embeddings else None)
         collate = partial(collate_with_dist_masks, max_hops=args.max_hops,
                           use_path_embeddings=args.use_path_embeddings,
-                          dist_as_index=True)
+                          dist_as_index=True, path_ties=args.path_ties)
         loaders[sp] = TorchDataLoader(DistMaskDataset(ds, dm, pr),
                                       batch_size=args.batch_size, shuffle=(sp == "train"),
                                       num_workers=args.num_workers, collate_fn=collate)
@@ -91,6 +91,9 @@ def build_model(args, info):
         head_norm=args.head_norm,
         final_norm=args.final_norm,
         path_norm=args.path_norm,
+        path_ties=args.path_ties,
+        path_pool=args.path_pool,
+        path_attn_heads=args.path_attn_heads,
     ).to(args.device)
 
 
