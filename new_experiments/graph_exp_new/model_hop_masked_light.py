@@ -1,4 +1,4 @@
-# model_hop_mask_light.py
+# model_hop_masked_light.py
 """
 Lightweight hop-masked multi-head transformer.
 
@@ -276,7 +276,8 @@ class AttentionReadout(nn.Module):
 # Dynamic cross-hop mixer.
 # ---------------------------------------------------------------------------
 class DynamicCrossHopMixer(nn.Module):
-    """Per-node attention across hop-tagged slabs."""
+    """Per-node attention across the H per-head outputs (each Dh slice is one
+    head / hop set). Used inside the attention module, before out_proj."""
 
     def __init__(self, num_heads: int, head_dim: int, dropout: float = 0.0,
                  use_hop_embedding: bool = False, max_hops: Optional[int] = None,
@@ -676,6 +677,20 @@ def _accumulate_attn_stats(mod, k, out, node_mask, pair_mask,
 # ---------------------------------------------------------------------------
 # Hop-masked multi-head attention.
 # ---------------------------------------------------------------------------
+def _mix_heads(mod, out: torch.Tensor, head_valid_mask=None, hop_tag=None) -> torch.Tensor:
+    """out: (B, H, N, Dh) per-head outputs -> (B, N, H*Dh) for out_proj.
+
+    With a head mixer (--dynamic_cross_hop): out + Dropout(mixer(out)), the
+    per-node attention across the H head outputs, before out_proj.
+    """
+    B, H, N, Dh = out.shape
+    out = out.transpose(1, 2).reshape(B, N, H * Dh)
+    if getattr(mod, "head_mixer", None) is not None:
+        out = out + mod.mix_drop(mod.head_mixer(out, head_valid_mask=head_valid_mask,
+                                                hop_tag=hop_tag))
+    return out
+
+
 class HopMaskedMHA(nn.Module):
     """Standard multi-head self-attention with per-head hop masking."""
 
@@ -720,6 +735,8 @@ class HopMaskedMHA(nn.Module):
         adj_blend_bias: Optional[torch.Tensor] = None,
         edge_bias: Optional[torch.Tensor] = None,
         path_embeddings: Optional[torch.Tensor] = None,
+        head_valid_mask: Optional[torch.Tensor] = None,
+        hop_tag: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, N, d = x.shape
         H, Dh = self.num_heads, self.head_dim
@@ -775,8 +792,7 @@ class HopMaskedMHA(nn.Module):
                      & node_mask[:, None, :, None])
             _accumulate_attn_stats(self, k, out, node_mask, pairs,
                                    P_raw if path_v is not None else None, path_v)
-        out = out.transpose(1, 2).reshape(B, N, d)
-        return self.out_proj(out)
+        return self.out_proj(_mix_heads(self, out, head_valid_mask, hop_tag))
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +867,7 @@ class MultiHopMaskedMHA(nn.Module):
         node_mask: torch.Tensor,
         path_embeddings: Optional[torch.Tensor] = None,
         hop_index: Optional[torch.Tensor] = None,
+        hop_tag: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, N, d = x.shape
         H, Dh = self.num_heads, self.head_dim
@@ -925,8 +942,7 @@ class MultiHopMaskedMHA(nn.Module):
             _accumulate_attn_stats(self, k, out_sum, node_mask, pairs,
                                    P_raw if path_v is not None else None, path_v)
 
-        out = out_sum.transpose(1, 2).reshape(B, N, d)
-        return self.out_proj(out)
+        return self.out_proj(_mix_heads(self, out_sum, None, hop_tag))
 
 
 # ---------------------------------------------------------------------------
@@ -972,15 +988,15 @@ class HopMaskedTransformerLayer(nn.Module):
             )
         self.drop1 = nn.Dropout(dropout)
 
+        # Cross-hop mixing runs inside the attention module on the per-head
+        # outputs (before out_proj), where each Dh slice is one head / hop set.
         self.use_cross_hop = dynamic_cross_hop
         if dynamic_cross_hop:
-            head_dim = hidden_dim // num_heads
-            self.norm_ch = build_norm(norm_type, hidden_dim)
-            self.cross_hop = DynamicCrossHopMixer(
-                num_heads=num_heads, head_dim=head_dim, dropout=dropout,
+            self.attn.head_mixer = DynamicCrossHopMixer(
+                num_heads=num_heads, head_dim=hidden_dim // num_heads, dropout=dropout,
                 use_hop_embedding=False, one_linear=one_linear,
             )
-            self.drop_ch = nn.Dropout(dropout)
+            self.attn.mix_drop = nn.Dropout(dropout)
 
         self.norm2 = build_norm(norm_type, hidden_dim)
         self.ffn = nn.Sequential(
@@ -1003,19 +1019,14 @@ class HopMaskedTransformerLayer(nn.Module):
         if self.multihop_attn:
             attn_out = self.attn(normed, per_head_mask_or_dist_masks, node_mask,
                                  path_embeddings=path_embeddings,
-                                 hop_index=hop_index)
+                                 hop_index=hop_index, hop_tag=hop_tag)
             x = x + self.drop1(attn_out)
         else:
             attn_out = self.attn(normed, per_head_mask_or_dist_masks, node_mask,
                                  adj_blend_bias=adj_blend_bias, edge_bias=edge_bias,
-                                 path_embeddings=path_embeddings)
+                                 path_embeddings=path_embeddings,
+                                 head_valid_mask=head_valid_mask, hop_tag=hop_tag)
             x = x + self.drop1(attn_out)
-        if self.use_cross_hop:
-            x = x + self.drop_ch(
-                self.cross_hop(self.norm_ch(x, node_mask),
-                               head_valid_mask=head_valid_mask,
-                               hop_tag=hop_tag)
-            )
         x = x + self.drop2(self.ffn(self.norm2(x, node_mask)))
         return x
 

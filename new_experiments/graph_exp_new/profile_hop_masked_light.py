@@ -34,7 +34,7 @@ args = T.parse_args()
 torch.manual_seed(args.seed)
 train_loader, _, _, _, task, model = T.build_data_task_model(args)
 dev = args.device
-use_cuda = str(dev).startswith("cuda:2")
+use_cuda = str(dev).startswith("cuda")
 sync = torch.cuda.synchronize if use_cuda else (lambda: None)
 opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 model.train()
@@ -126,7 +126,7 @@ for i, layer in enumerate(model.layers):
     label_module(layer.attn, f"L{i}.attn")
     label_module(layer.ffn, f"L{i}.ffn")
     if getattr(layer, "use_cross_hop", False):
-        label_module(layer.cross_hop, f"L{i}.cross_hop")
+        label_module(layer.attn.head_mixer, f"L{i}.cross_hop")
 if model.post_gat is not None:
     label_module(model.post_gat, "post_gat")
 label_module(model.head, "head")
